@@ -1,0 +1,71 @@
+[package]
+name = "pcap-evidence-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+pcap-evidence = { path = ".." }
+
+[[bin]]
+name = "capture"
+path = "fuzz_targets/capture.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine"
+path = "fuzz_targets/engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capture_parity"
+path = "fuzz_targets/capture_parity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp"
+path = "fuzz_targets/tcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocols"
+path = "fuzz_targets/protocols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "provenance"
+path = "fuzz_targets/provenance.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index"
+path = "fuzz_targets/index.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

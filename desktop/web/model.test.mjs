@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {count,timestamp,virtualRange,bytes,overlaps,packetRefs,shortValue} from './model.mjs';
+test('u64 display does not round',()=>assert.equal(count('18446744073709551615'),'18,446,744,073,709,551,615'));
+test('nanosecond identity preserved',()=>assert.equal(timestamp('1700000000123456789'),'1700000000.123456789 s Unix'));
+test('negative fractional timestamp preserved',()=>assert.equal(timestamp('-1'),'-0.000000001 s Unix'));
+test('unknown time never becomes epoch',()=>assert.equal(timestamp(null),'Unknown'));
+test('virtual rows remain bounded for a billion entries',()=>{const v=virtualRange(36000000,400,1000000000);assert.ok(v.end-v.start<30);assert.ok(v.start>900000);});
+test('empty virtual table',()=>assert.deepEqual(virtualRange(0,400,0),{start:0,end:0,top:0,bottom:0}));
+test('hex preserves bytes',()=>assert.deepEqual(bytes('00ff41'),[0,255,65]));
+test('malformed hex fails',()=>assert.throws(()=>bytes('a')));
+test('intervals are half-open',()=>{assert.equal(overlaps('0','5','5','9'),false);assert.equal(overlaps('0','6','5','9'),true);});
+test('unattributed data has no synthetic packet identity',()=>assert.deepEqual(packetRefs({}),[]));
+test('bounded previews remain marked',()=>assert.equal(shortValue('0123456789',3),'012…'));

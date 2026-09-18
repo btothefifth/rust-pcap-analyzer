@@ -1,0 +1,15 @@
+/target/
+/streaming/target/
+/fuzz/target/
+/streaming/fuzz/target/
+/**/target/
+/fuzz/artifacts/
+/streaming/fuzz/artifacts/
+/fuzz/corpus/
+/streaming/fuzz/corpus/
+__pycache__/
+.pytest_cache/
+*.partial
+*.pcidx
+*.report.json
+!tests/fixtures/**

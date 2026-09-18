@@ -1,0 +1,404 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pcap-evidence:ndjson-line:v1",
+  "title": "PCAP evidence NDJSON line, candidate v1",
+  "$comment": "Structural contract only. Does not verify hashes, source authenticity, span arithmetic, relations, or semantic replay. Native source was not compiled on the authoring host.",
+  "type": "object",
+  "required": [
+    "event",
+    "previous_sha256",
+    "event_sha256"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "previous_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "event_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "schema",
+        "run_id",
+        "sequence",
+        "kind",
+        "status",
+        "source_binding",
+        "session",
+        "direction",
+        "protocol",
+        "stream_range",
+        "related_events",
+        "evidence",
+        "data"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "pcap-evidence.event.v1"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sequence": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "kind": {
+          "enum": [
+            "capture.start",
+            "capture.complete",
+            "capture.aborted",
+            "capture.metadata",
+            "packet.observed",
+            "network.observed",
+            "network.reassembled",
+            "flow.start",
+            "flow.end",
+            "stream.chunk",
+            "stream.gap",
+            "stream.conflict",
+            "protocol.detection",
+            "protocol.message",
+            "protocol.issue",
+            "transaction.candidate",
+            "diagnostic",
+            "coverage.boundary"
+          ]
+        },
+        "status": {
+          "enum": [
+            "observed",
+            "candidate",
+            "ambiguous",
+            "incomplete",
+            "unsupported",
+            "rejected"
+          ]
+        },
+        "source_binding": {
+          "const": "requires_capture_complete"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "direction": {
+          "enum": [
+            0,
+            1,
+            null
+          ]
+        },
+        "protocol": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stream_range": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "start",
+                "end"
+              ],
+              "properties": {
+                "start": {
+                  "type": "string",
+                  "pattern": "^-?(0|[1-9][0-9]*)$"
+                },
+                "end": {
+                  "type": "string",
+                  "pattern": "^-?(0|[1-9][0-9]*)$"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "related_events": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$"
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "required": [
+            "byte_length",
+            "reconstructed_sha256",
+            "packets",
+            "spans"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "byte_length": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "reconstructed_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "packets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "frame",
+                  "record_offset"
+                ],
+                "properties": {
+                  "frame": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "record_offset": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "spans": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "frame",
+                  "record_offset",
+                  "packet_start",
+                  "start",
+                  "end"
+                ],
+                "properties": {
+                  "frame": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "record_offset": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "packet_start": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "start": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "end": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "capture.start"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "required": [
+                  "implementation",
+                  "config",
+                  "plugins",
+                  "source_sha256",
+                  "provenance_binding",
+                  "reconstruction_scope"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "capture.complete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "required": [
+                  "source_bytes",
+                  "source_sha256",
+                  "records",
+                  "packets",
+                  "events",
+                  "complete_container_read",
+                  "complete_protocol_history"
+                ],
+                "properties": {
+                  "source_bytes": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "source_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "records": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "packets": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "events": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "complete_container_read": {
+                    "const": true
+                  },
+                  "complete_protocol_history": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "packet.observed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "required": [
+                  "frame",
+                  "record_offset",
+                  "data_offset",
+                  "captured_length",
+                  "original_length",
+                  "link_type",
+                  "section",
+                  "interface",
+                  "timestamp_ns",
+                  "raw_timestamp",
+                  "packet_sha256",
+                  "warnings",
+                  "snaplen_truncated"
+                ],
+                "properties": {
+                  "frame": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "record_offset": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "data_offset": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "timestamp_ns": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]*)$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "packet_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "capture.aborted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "required": [
+                  "reason",
+                  "consumed_bytes",
+                  "consumed_prefix_sha256",
+                  "complete_source_binding"
+                ],
+                "properties": {
+                  "complete_source_binding": {
+                    "const": false
+                  },
+                  "consumed_bytes": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  "consumed_prefix_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

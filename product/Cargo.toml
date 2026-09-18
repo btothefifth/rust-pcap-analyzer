@@ -1,0 +1,33 @@
+[package]
+name = "pcap-evidence-product"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+pcap-evidence = { path = ".." }
+pcap-evidence-stream = { path = "../streaming" }
+
+[features]
+default = ["standard", "extensions", "industrial", "industrial-full", "binary"]
+standard = []
+extensions = []
+industrial = []
+industrial-full = ["industrial"]
+binary = []
+
+[[bin]]
+name = "pcap-product"
+path = "src/main.rs"
+
+[workspace]
+exclude = ["fuzz", "ffi"]
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"

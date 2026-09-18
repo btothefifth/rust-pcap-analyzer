@@ -1,0 +1,4 @@
+# Capture and protocol-payload fixtures are exact bytes; never normalize them as text.
+*.bin -text -diff
+*.pcap -text -diff
+*.pcapng -text -diff

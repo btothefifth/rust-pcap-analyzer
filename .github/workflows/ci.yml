@@ -1,0 +1,24 @@
+name: native-validation
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install the declared toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal --component clippy --component rustfmt
+      - name: Independent fixture preflight and native validation
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scripts/validate.py
+      - name: API documentation build
+        run: cargo doc --locked --offline --no-deps

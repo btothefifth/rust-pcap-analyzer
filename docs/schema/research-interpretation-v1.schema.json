@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pcap-evidence:interpretation:v1",
+  "$comment": "Structural only. Native validators also enforce arithmetic, duplicate keys, source anchors, budgets and exact identity. No correctness/authorship proof.",
+  "type": "object",
+  "required": [
+    "schema",
+    "normalization",
+    "source",
+    "producer",
+    "coverage",
+    "observations",
+    "notes"
+  ],
+  "properties": {
+    "schema": {
+      "const": "pcap-evidence.interpretation.v1"
+    },
+    "normalization": {
+      "const": "source-anchored-fields-v1"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "producer": {
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "origin",
+        "config_sha256",
+        "command",
+        "dependencies"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "origin": {
+          "enum": [
+            "independent_engine",
+            "independent_fixture",
+            "external_tool",
+            "manual_research"
+          ]
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "command": {
+          "type": "array"
+        },
+        "dependencies": {
+          "type": "array"
+        }
+      },
+      "additionalProperties": true
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "capture_record",
+        "packet_bytes",
+        "timestamp",
+        "link_layer",
+        "network_layer",
+        "fragment_set",
+        "transport_identity",
+        "tcp_reconstruction",
+        "stream_bytes",
+        "protocol_detection",
+        "protocol_message",
+        "transaction",
+        "higher_order"
+      ],
+      "properties": {
+        "capture_record": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "packet_bytes": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "timestamp": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "link_layer": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "network_layer": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "fragment_set": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "transport_identity": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "tcp_reconstruction": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "stream_bytes": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "protocol_detection": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "protocol_message": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "transaction": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        },
+        "higher_order": {
+          "enum": [
+            "complete",
+            "partial",
+            "not_collected",
+            "unsupported"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "observations": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": [
+          "layer",
+          "key",
+          "status",
+          "value",
+          "evidence"
+        ],
+        "properties": {
+          "layer": {
+            "enum": [
+              "capture_record",
+              "packet_bytes",
+              "timestamp",
+              "link_layer",
+              "network_layer",
+              "fragment_set",
+              "transport_identity",
+              "tcp_reconstruction",
+              "stream_bytes",
+              "protocol_detection",
+              "protocol_message",
+              "transaction",
+              "higher_order"
+            ]
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "status": {
+            "enum": [
+              "ambiguous",
+              "candidate",
+              "incomplete",
+              "observed",
+              "opaque",
+              "rejected",
+              "unsupported"
+            ]
+          },
+          "value": {
+            "type": "object"
+          },
+          "evidence": {
+            "type": "object",
+            "required": [
+              "frames",
+              "spans",
+              "events",
+              "notes"
+            ],
+            "properties": {
+              "frames": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "maxItems": 10000
+              },
+              "spans": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "start",
+                    "end"
+                  ],
+                  "properties": {
+                    "start": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "end": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    }
+                  },
+                  "additionalProperties": true
+                },
+                "maxItems": 10000
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "maxItems": 10000
+              },
+              "notes": {
+                "type": "array"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "notes": {
+      "type": "array"
+    }
+  },
+  "additionalProperties": true
+}
