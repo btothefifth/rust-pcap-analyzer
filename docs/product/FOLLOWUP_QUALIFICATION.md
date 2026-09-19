@@ -25,10 +25,38 @@ classes are explicitly listed, not converted into success.
 
 The integrated Windows run on 2026-09-19 recorded 25 PASS gates. The linked C ABI
 was BLOCKED because this host has no compatible C compiler/native-link setup; six
-independent classes (browser-to-native, sustained fuzz, 50–500 GiB scale,
+independent classes (browser-to-native, sustained fuzz, 50-500 GiB scale,
 normative review, install/upgrade/uninstall and authorized NIC capture) remain
-NOT_RUN. The baseline validator and the full product qualification matrix also
-passed their portable/native Rust checks.
+NOT_RUN in that driver. The baseline validator and the full product qualification
+matrix also passed their portable/native Rust checks. A separate direct browser
+smoke run passed with real requests, native-worker source binding and keyboard
+navigation; it is not a substitute for the broader packaging/accessibility gate.
+
+## Tier-A semantic evidence
+
+The current integration includes a bounded semantic slice rather than a claim of
+complete protocol support. Run its independent native and projection checks with
+fresh output paths:
+
+```sh
+python scripts/test_semantic_tools.py -v
+cargo build --locked --offline --example semantic_probe
+python scripts/semantic_case_runner.py \
+  --probe target/debug/examples/semantic_probe \
+  --output /new/native-semantic-cases.json
+python scripts/validate_semantic_product.py \
+  --binary product/target/debug/pcap-product \
+  --output-dir /new/semantic-product-parity
+```
+
+The completed Windows receipt contains 18/18 native semantic cases and complete
+NDJSON/TLV event-sequence parity for five semantic captures. It covers DNP3
+per-fragment object selection and Modbus bit/register semantics through the root,
+streaming and product projections. It does not prove normative conformance,
+cross-fragment DNP3 joining, complete application protocols or large-capture
+performance. The semantic fuzz target compiles and passes warnings-denied Clippy;
+Windows `cargo test` for libFuzzer bins is not runnable here because the MSVC
+linker reports the missing libFuzzer entry point, so no fuzz campaign is claimed.
 
 ## Native history / independent witness validation
 
@@ -84,8 +112,9 @@ remain ordered evidence. Rehashed false raw witnesses must still fail verificati
 
 ## Still-open engineering, in dependency order
 
-1. Run native checks and repair this candidate before broadening it. Review the
-   history generation policy against RFC 9293 sections 3.4/3.6, RFC 1982 and adversarial
+1. Review the completed native checks and repair this candidate before broadening
+   it. Review the history generation policy against RFC 9293 sections 3.4/3.6,
+   RFC 1982 and adversarial
    endpoint captures. These sources describe serial/transport principles; the
    nearest-frontier research policy is not an RFC conformance claim.
 2. Add disk-backed IP-fragment state and complete application-parser continuation
@@ -93,9 +122,10 @@ remain ordered evidence. Rehashed false raw witnesses must still fail verificati
    FIN conflicts and gaps; never concatenate across ambiguity to satisfy a decoder.
 3. Add efficient checkpoint resume only with independently verified state/journal
    commitments. Current recovery intentionally replays source prefixes.
-4. Complete high-value DNP3 objects, BACnet segmentation, connected CIP and MMS
-   session/presentation subsets with primary normative fixtures. Do not inflate the
-   support table or equate labeled capture folders with decoded semantics.
+4. Extend high-value DNP3 objects beyond the current per-fragment slice, then add
+   BACnet segmentation, connected CIP and MMS session/presentation subsets with
+   primary normative fixtures. Do not inflate the support table or equate labeled
+   capture folders with decoded semantics.
 5. Measure progressively larger same-policy workloads: few/many tuples, long streams,
    wrap/reuse/delay, fragments/tunnels, small/large frames, gaps/conflicts, NDJSON/TLV,
    history queries/replay and output/index amplification. Retain named hardware,

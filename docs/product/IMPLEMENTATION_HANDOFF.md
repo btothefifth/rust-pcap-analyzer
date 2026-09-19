@@ -147,11 +147,13 @@ The current tree provides:
 - source archives, source-bound indexes and disk-backed interval/history pieces;
 - research catalog, properties, adapters, comparison, reduction and adjudication
   artifacts;
+- source-bound DNP3 and Modbus semantic reports, 18 native semantic cases,
+  five semantic captures, and NDJSON/TLV projection parity validation;
 - a local HTTP workbench, isolated worker processes, SQLite query views, hex and
   provenance views, cases and research export;
 - FFI handles and a separate opt-in Linux capture implementation;
 - native root/streaming/product/FFI format, debug/release, build, feature-matrix
-  and warnings-denied checks, plus 157 Python tests, catalog maintenance and 11
+  and warnings-denied checks, plus 191 Python tests, catalog maintenance and 11
   JavaScript model tests on the current Windows host.
 
 These facts do not establish full protocol conformance, complete TCP history,

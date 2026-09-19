@@ -6,9 +6,12 @@ Design reconciliation and the next implementing-agent package:
 [../product/IMPLEMENTATION_HANDOFF.md](../product/IMPLEMENTATION_HANDOFF.md).
 The current integration passes the local Rust/Python/JavaScript qualification
 matrix described in `STATUS.md`, plus the follow-up root, streaming, product,
-FFI and history matrices. C compiler/link execution, Linux live capture,
-browser-to-native, full-history, fuzz, scale and normative protocol gates remain
-open.
+FFI and history matrices. The Tier-A semantic slice adds source-bound DNP3 and
+Modbus reports through the root and streaming paths, 18 native semantic cases,
+and five-capture NDJSON/TLV projection parity. The real browser-to-native
+smoke gate also passes on this Windows host. C compiler/link execution, Linux
+live capture, sustained fuzz campaigns, full-history completion, scale and
+normative protocol gates remain open.
 
 ## Follow-up source candidate (not a release promotion)
 

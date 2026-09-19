@@ -268,7 +268,10 @@ pub fn response_matches(request: &ModbusMessage, response: &ModbusMessage) -> bo
     }
     match request.function {
         1 | 2 if req.len() == 12 && rsp.len() >= 9 => {
+            // The request supplies the meaningful bit count. Unused high-order
+            // response bits must be zero (Modbus V1.1b3 sections 6.1 and 6.2).
             usize::from(rsp[8]) == usize::from(be16(&req[10..12])).div_ceil(8)
+                && crate::semantics::modbus::padding_is_zero(be16(&req[10..12]), &rsp[9..])
         }
         3 | 4 if req.len() == 12 && rsp.len() >= 9 => {
             usize::from(rsp[8]) == 2 * usize::from(be16(&req[10..12]))

@@ -1,0 +1,445 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pcap-evidence:semantic-subsets:v1",
+  "title": "Additive Tier-A field observations v1",
+  "$comment": "Structural schema only, not source authentication, span verification, native execution, or conformance. Custom limits may exceed default span cap; arithmetic and budgets are native contracts.",
+  "$defs": {
+    "semantic": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "schema",
+            "protocol",
+            "decoder",
+            "context",
+            "status",
+            "support",
+            "input_length",
+            "input_sha256",
+            "consumed",
+            "all_input_consumed",
+            "device_effect_established",
+            "normative_conformance_certified",
+            "source_binding",
+            "records",
+            "issues",
+            "undecoded_tail"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "const": "pcap-evidence.semantic-subset.v1"
+            },
+            "protocol": {
+              "enum": [
+                "dnp3",
+                "modbus"
+              ]
+            },
+            "decoder": {
+              "const": "independent-tier-a-subset/1"
+            },
+            "context": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "decoded_subset",
+                "incomplete",
+                "unsupported",
+                "rejected",
+                "limit_exceeded"
+              ]
+            },
+            "support": {
+              "const": "implemented-partial"
+            },
+            "input_length": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "input_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "consumed": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            },
+            "all_input_consumed": {
+              "type": "boolean"
+            },
+            "device_effect_established": {
+              "const": false
+            },
+            "normative_conformance_certified": {
+              "const": false
+            },
+            "source_binding": {
+              "const": "inherited_from_parent_capture_or_run"
+            },
+            "records": {
+              "type": "array",
+              "maxItems": 65536,
+              "items": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "range",
+                  "fields"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "range": {
+                    "type": "object",
+                    "required": [
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "start": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      },
+                      "end": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      }
+                    }
+                  },
+                  "fields": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "type",
+                        "value",
+                        "range",
+                        "basis",
+                        "bit",
+                        "evidence"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "enum": [
+                            "unsigned",
+                            "signed",
+                            "boolean",
+                            "ieee754_binary32_bits",
+                            "ieee754_binary64_bits",
+                            "wire_milliseconds_48",
+                            "relative_milliseconds_16_unresolved"
+                          ]
+                        },
+                        "value": {
+                          "type": [
+                            "string",
+                            "boolean"
+                          ]
+                        },
+                        "range": {
+                          "type": "object",
+                          "required": [
+                            "start",
+                            "end"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "start": {
+                              "type": "string",
+                              "pattern": "^(0|[1-9][0-9]*)$"
+                            },
+                            "end": {
+                              "type": "string",
+                              "pattern": "^(0|[1-9][0-9]*)$"
+                            }
+                          }
+                        },
+                        "basis": {
+                          "type": "string"
+                        },
+                        "bit": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 7
+                        },
+                        "evidence": {
+                          "type": "object",
+                          "required": [
+                            "sha256",
+                            "spans"
+                          ],
+                          "additionalProperties": false,
+                          "properties": {
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^[0-9a-f]{64}$"
+                            },
+                            "spans": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "required": [
+                                  "frame",
+                                  "record_offset",
+                                  "packet_start",
+                                  "start",
+                                  "end"
+                                ],
+                                "additionalProperties": false,
+                                "properties": {
+                                  "frame": {
+                                    "type": "string",
+                                    "pattern": "^(0|[1-9][0-9]*)$"
+                                  },
+                                  "record_offset": {
+                                    "type": "string",
+                                    "pattern": "^(0|[1-9][0-9]*)$"
+                                  },
+                                  "packet_start": {
+                                    "type": "string",
+                                    "pattern": "^(0|[1-9][0-9]*)$"
+                                  },
+                                  "start": {
+                                    "type": "string",
+                                    "pattern": "^(0|[1-9][0-9]*)$"
+                                  },
+                                  "end": {
+                                    "type": "string",
+                                    "pattern": "^(0|[1-9][0-9]*)$"
+                                  }
+                                }
+                              },
+                              "maxItems": 1048576
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "issues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "range"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "range": {
+                    "type": "object",
+                    "required": [
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "start": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      },
+                      "end": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "undecoded_tail": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "range",
+                    "evidence"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "range": {
+                      "type": "object",
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]*)$"
+                        },
+                        "end": {
+                          "type": "string",
+                          "pattern": "^(0|[1-9][0-9]*)$"
+                        }
+                      }
+                    },
+                    "evidence": {
+                      "type": "object",
+                      "required": [
+                        "sha256",
+                        "spans"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "spans": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "frame",
+                              "record_offset",
+                              "packet_start",
+                              "start",
+                              "end"
+                            ],
+                            "additionalProperties": false,
+                            "properties": {
+                              "frame": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]*)$"
+                              },
+                              "record_offset": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]*)$"
+                              },
+                              "packet_start": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]*)$"
+                              },
+                              "start": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]*)$"
+                              },
+                              "end": {
+                                "type": "string",
+                                "pattern": "^(0|[1-9][0-9]*)$"
+                              }
+                            }
+                          },
+                          "maxItems": 1048576
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "schema",
+            "status",
+            "error",
+            "device_effect_established"
+          ],
+          "properties": {
+            "schema": {
+              "const": "pcap-evidence.semantic-subset.v1"
+            },
+            "status": {
+              "enum": [
+                "limit_exceeded",
+                "rejected"
+              ]
+            },
+            "error": {
+              "type": "object"
+            },
+            "device_effect_established": {
+              "const": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/semantic"
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema",
+        "selection",
+        "interpretations",
+        "device_effect_established"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "pcap-evidence.modbus-alternatives.v1"
+        },
+        "selection": {
+          "enum": [
+            "unresolved_role",
+            "caller_supplied_role"
+          ]
+        },
+        "interpretations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/semantic"
+          }
+        },
+        "device_effect_established": {
+          "const": false
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "error"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "pcap-evidence.modbus-alternatives.v1"
+        },
+        "status": {
+          "const": "limit_exceeded"
+        },
+        "error": {
+          "type": "object"
+        }
+      }
+    }
+  ]
+}

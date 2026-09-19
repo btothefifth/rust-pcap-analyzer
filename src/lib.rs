@@ -21,6 +21,7 @@ pub mod protocol;
 pub mod provenance;
 pub mod publish;
 pub mod report;
+pub mod semantics;
 pub mod sha256;
 pub mod tcp;
 pub mod time;

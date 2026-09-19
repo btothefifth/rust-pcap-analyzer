@@ -314,7 +314,7 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                     .map(|(index, application)| {
                         let data = match &application.data {
                             ApplicationData::Failed(e) => J::object([("error", error(e))]),
-                            ApplicationData::Dnp3(d) => dnp3_data(d, include_payload),
+                            ApplicationData::Dnp3(d) => dnp3_data(d, include_payload, limits),
                             ApplicationData::Modbus(m) => J::object([
                                 ("issues", issues(&m.issues)),
                                 (
@@ -336,6 +336,14 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                                             ),
                                             ("boundary_verified", message.boundary_verified.into()),
                                             ("raw", evidence(&message.raw, include_payload)),
+                                            (
+                                                "semantic_subset",
+                                                crate::semantics::modbus::alternatives_json(
+                                                    &message.raw,
+                                                    message.role,
+                                                    crate::semantics::Limits::from_capture(limits),
+                                                ),
+                                            ),
                                         ])
                                     })),
                                 ),
@@ -355,7 +363,7 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
             "udp_applications",
             J::array(value.datagrams.iter().enumerate().map(|(id, app)| {
                 let data = match &app.data {
-                    Ok(d) => dnp3_data(d, include_payload),
+                    Ok(d) => dnp3_data(d, include_payload, limits),
                     Err(e) => J::object([("error", error(e))]),
                 };
                 J::object([
@@ -550,7 +558,7 @@ pub fn inspect(source: &[u8], limits: Limits, mode: ParseMode, include_payload: 
     ]))
 }
 
-fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool) -> J {
+fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits) -> J {
     J::object([
         (
             "object_semantics",
@@ -590,6 +598,13 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool) -> J {
                         J::array(fragment.frames.iter().map(|f| J::from(*f))),
                     ),
                     ("raw", evidence(&fragment.raw, include_payload)),
+                    (
+                        "object_semantic_subset",
+                        crate::semantics::dnp3::fragment_json(
+                            fragment,
+                            crate::semantics::Limits::from_capture(limits),
+                        ),
+                    ),
                 ])
             })),
         ),

@@ -20,7 +20,8 @@ def check() -> dict:
     rust = sorted((ROOT / "src").glob("*.rs")) + sorted((ROOT / "tests").rglob("*.rs")) + sorted((ROOT / "examples").glob("*.rs"))
     declared = re.findall(r"pub mod (\w+);", (ROOT / "src/lib.rs").read_text())
     for name in declared:
-        assert (ROOT / "src" / f"{name}.rs").is_file(), name
+        module = ROOT / "src" / name
+        assert module.with_suffix(".rs").is_file() or (module / "mod.rs").is_file(), name
     for file in rust:
         text = file.read_text()
         assert b"\r" not in file.read_bytes(), f"unexpected CRLF/mixed newline: {file}"

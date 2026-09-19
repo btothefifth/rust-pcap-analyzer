@@ -47,9 +47,13 @@ def check(output,engine):
                 try:page.goto(server.origin+'/#token='+server.token,wait_until='networkidle',timeout=30000)
                 except Exception as error:
                     receipt['reason']='Actual loopback browser navigation blocked/unavailable: '+str(error)[:256];return finish()
-                page.wait_for_function("document.querySelector('#mode').value==='rust' && !document.querySelector('#mode option[value=rust]').disabled")
+                page.locator('#mode').wait_for(state='visible')
+                rust_option=page.locator('#mode option[value="rust"]')
+                rust_option.wait_for(state='attached')
+                if rust_option.is_disabled():raise AssertionError('Native Rust mode is disabled')
+                page.locator('#mode').select_option('rust')
                 page.locator('#capture').fill(source.name);page.locator('#start').click()
-                page.wait_for_function("document.querySelector('#run-label').textContent.includes('Independent Rust engine · complete')",timeout=120000)
+                page.locator('#run-label',has_text='Independent Rust engine · complete').wait_for(state='visible',timeout=120000)
                 jobs=manager.jobs()
                 if len(jobs)!=1 or jobs[0]['mode']!='rust' or jobs[0]['state']!='complete' or jobs[0].get('source_sha256')!=receipt['source_sha256']:
                     raise AssertionError('Native source binding differs from browser status')
@@ -58,7 +62,8 @@ def check(output,engine):
                 page.get_by_role('button',name='Apply',exact=True).click()
                 row=page.locator('tr[data-seq]').first;row.wait_for();row.focus();page.keyboard.press('Enter')
                 page.locator('#hex-block').wait_for()
-                if 'hash checked' not in page.locator('#hex-block').inner_text():raise AssertionError('No checked source-byte view')
+                hex_text=page.locator('#hex-block').inner_text()
+                if 'hash checked' not in hex_text.lower():raise AssertionError('No checked source-byte view: '+hex_text[:256])
                 if errors:raise AssertionError('Browser errors: '+str(errors))
                 page.screenshot(path=str(output/'browser-native.png'),full_page=True)
                 receipt.update(status='PASS',packets=jobs[0]['packets'],source_binding=jobs[0]['source_binding'],

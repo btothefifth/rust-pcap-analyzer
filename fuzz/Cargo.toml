@@ -67,5 +67,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "semantics"
+path = "fuzz_targets/semantics.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

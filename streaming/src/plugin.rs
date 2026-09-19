@@ -230,9 +230,16 @@ impl TransactionCorrelator for IdentifierCorrelator {
                 .collect();
             let unique = req.len() == 1 && rsp.len() == 1;
             let compatible = unique
-                && (req[0].hint.compatibility.is_empty()
-                    || rsp[0].hint.compatibility.is_empty()
-                    || req[0].hint.compatibility == rsp[0].hint.compatibility);
+                && if protocol == "modbus" {
+                    pcap_evidence::semantics::modbus::compatibility_matches(
+                        &req[0].hint.compatibility,
+                        &rsp[0].hint.compatibility,
+                    )
+                } else {
+                    req[0].hint.compatibility.is_empty()
+                        || rsp[0].hint.compatibility.is_empty()
+                        || req[0].hint.compatibility == rsp[0].hint.compatibility
+                };
             let (status, reason) = if req.is_empty() {
                 (EvidenceStatus::Incomplete, "orphan_response")
             } else if rsp.is_empty() {
@@ -1096,6 +1103,23 @@ fn decode_dnp(
                 ("complete", m.complete.into()),
                 ("object_semantics", "opaque".into()),
                 (
+                    "object_semantic_subsets",
+                    Json::array(m.fragments.iter().map(|index| {
+                        Json::object([
+                            ("fragment_index", (*index).into()),
+                            (
+                                "object_fields",
+                                pcap_evidence::semantics::dnp3::fragment_json(
+                                    &d.fragments[*index],
+                                    pcap_evidence::semantics::Limits::from_capture(&native_limits(
+                                        l,
+                                    )),
+                                ),
+                            ),
+                        ])
+                    })),
+                ),
+                (
                     "transport_scope",
                     if out.context.transport == ProbeTransport::Udp {
                         "one_datagram"
@@ -1157,14 +1181,20 @@ fn emit_modbus(
     };
     let bytes = raw.data();
     let compatibility = match (chosen.function & 0x7f, role) {
-        (1 | 2, Role::Request) if bytes.len() == 12 => format!(
-            "count:{}",
-            usize::from(protocols::be16(bytes, 10)).div_ceil(8)
-        ),
+        (1 | 2, Role::Request) if bytes.len() == 12 => {
+            format!("modbus-bits-v1:quantity:{}", protocols::be16(bytes, 10))
+        }
         (3 | 4, Role::Request) if bytes.len() == 12 => {
             format!("count:{}", 2 * usize::from(protocols::be16(bytes, 10)))
         }
-        (1..=4, Role::Response) if bytes.len() >= 9 && chosen.function & 0x80 == 0 => {
+        (1 | 2, Role::Response) if bytes.len() >= 10 && chosen.function & 0x80 == 0 => {
+            format!(
+                "modbus-bits-v1:response:{}:{}",
+                bytes[8],
+                bytes[bytes.len() - 1]
+            )
+        }
+        (3 | 4, Role::Response) if bytes.len() >= 9 && chosen.function & 0x80 == 0 => {
             format!("count:{}", bytes[8])
         }
         (5 | 6 | 15 | 16, _) if bytes.len() >= 12 && chosen.function & 0x80 == 0 => {
@@ -1200,6 +1230,18 @@ fn emit_modbus(
             ("response_shape_valid", b.shape_valid.into()),
             ("semantics_supported", chosen.semantics_supported.into()),
             ("boundary_verified", boundary.into()),
+            (
+                "semantic_subset",
+                pcap_evidence::semantics::modbus::alternatives_json(
+                    raw,
+                    match role {
+                        Role::Request => modbus::Role::Request,
+                        Role::Response => modbus::Role::Response,
+                        Role::Unknown => modbus::Role::Unknown,
+                    },
+                    pcap_evidence::semantics::Limits::from_capture(&native_limits(l)),
+                ),
+            ),
         ]),
         hint,
         valid,
