@@ -112,7 +112,7 @@ def _anchor_order(key):
     match = re.match(r"frame:([0-9]+)(?:;|$)", key)
     return (0, int(match[1]), key) if match else (1, 0, key)
 
-def compare_fields(left, right, *, maximum=10000):
+def compare_fields_v1(left, right, *, maximum=10000):
     comparison.validate(left); comparison.validate(right)
     if left["source"] != right["source"]: raise InvalidResearch("comparison source identity mismatch")
     if not 1 <= maximum <= MAX_ROWS: raise InvalidResearch("comparison row budget")
@@ -195,3 +195,17 @@ def assertions(value, rules):
         results.append({"path": rule["path"], "status": "PASS" if ok else "MISMATCH",
                         "actual": actual, "basis": rule.get("basis", "explicit_project_invariant")})
     return results
+
+
+def compare_fields(left, right, *, maximum=10000):
+    """Current v2 comparator; original v1 remains available for old artifacts."""
+    from .compare_v2 import compare
+    return compare(left, right, maximum=maximum)
+
+
+def recompute_differential(left, right, schema):
+    if schema == "pcap-evidence.research-differential.v1":
+        return compare_fields_v1(left, right)
+    if schema == "pcap-evidence.research-differential.v2":
+        return compare_fields(left, right)
+    raise InvalidResearch("unsupported differential policy version")

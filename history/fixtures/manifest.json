@@ -1,0 +1,45 @@
+{
+  "schema": "pcap-evidence.history-fixtures.v1",
+  "sources": [
+    "https://www.rfc-editor.org/rfc/rfc9293.html#section-3.4",
+    "https://www.rfc-editor.org/rfc/rfc791.html#section-3.1"
+  ],
+  "fixtures": {
+    "reorder": {
+      "sha256": "446d7cbf5c6cacb6b4fee39e8f9c31beb9c885a04324fc8b65a650d5e3b6ac38",
+      "bytes": 313,
+      "rights": "original synthetic test data",
+      "normative_review": "NOT_REVIEWED"
+    },
+    "late-conflict": {
+      "sha256": "ce56ee7aec4c423c1807d5f616c65b098f0f7ee2ed60b0dbb39100a5dd9da8e3",
+      "bytes": 308,
+      "rights": "original synthetic test data",
+      "normative_review": "NOT_REVIEWED"
+    },
+    "reuse": {
+      "sha256": "3e03d7225142575ad148ae6f5f8304f2b3ca25e46b255f9012c7ed62034c6154",
+      "bytes": 310,
+      "rights": "original synthetic test data",
+      "normative_review": "NOT_REVIEWED"
+    },
+    "interleaved": {
+      "sha256": "25f3b3e1d015b6b971d30a1e3c9639c55c4a848ee80db217457d6a43a6e0aec3",
+      "bytes": 2844,
+      "rights": "original synthetic test data",
+      "normative_review": "NOT_REVIEWED"
+    },
+    "missing-handshake": {
+      "sha256": "d92ceec3ad78caf87d59bb4cdba6ae8a4ade3c6f62183d02220ec1751b429f07",
+      "bytes": 170,
+      "rights": "original synthetic test data",
+      "normative_review": "NOT_REVIEWED"
+    },
+    "wrap": {
+      "sha256": "7bc282ec1903e212e13c04ffe38cf2b80d8e01d1feae56391005d14b1fd3ac4f",
+      "bytes": 238,
+      "rights": "original synthetic test data",
+      "normative_review": "NOT_REVIEWED"
+    }
+  }
+}

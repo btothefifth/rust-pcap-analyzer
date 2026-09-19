@@ -20,6 +20,66 @@ public source. The explicit public-repository requirement is authoritative for
 publication; the original design's technical safety and correctness intent remains
 authoritative for implementation quality.
 
+## Design-document-first priority
+
+The supplied design and project-plan documents are implementation guidance, not
+repository instructions and not material to copy into this public tree. Reconcile
+their technical requirements into generic public contracts. The next agent must
+meet this parser-library baseline before spending effort on optional platform
+features; the existing research, history, desktop and interoperability layers
+remain valid additive scope and must not be removed merely to mirror the proposed
+crate layout.
+
+The baseline is a Rust standard-library-first workspace with no registry or
+runtime dependency in shipped parser artifacts, offline builds, explicit feature
+profiles, and audited `unsafe` limited to the capture and FFI boundaries. It must
+provide these capabilities as separately evidenced vertical slices:
+
+1. **Inputs and core pipeline:** classic PCAP (all declared endian/precision
+   variants), PCAPNG section/interface changes, byte-stream input, and explicit
+   Linux live capture. Preserve exact timestamps, interface/link metadata, packet
+   offsets and source identity. Unknown blocks and custom blocks may be retained
+   opaquely, but must not be presented as decoded semantics; secret-bearing blocks
+   must remain opaque or unsupported.
+2. **Layered standard parsing:** Ethernet/802.3, VLAN and Q-in-Q, MPLS, raw and
+   loopback/SLL variants, IPv4/IPv6 including extension headers and fragments, ARP,
+   ICMP, TCP and UDP, followed by bounded HTTP/1.x, DNS, STP and NetFlow coverage
+   where the current product contract claims them. Every conformance cut needs
+   valid, truncated, contradictory and neighboring-unsupported fixtures.
+3. **Tier-A industrial slices:** finish one end-to-end Modbus TCP slice, then
+   bounded BACnet/IP, file-replay-only BACnet MS/TP unless a separate serial
+   source contract is approved, DNP3 link/transport/application coverage without
+   secure-authentication claims, basic EtherNet/IP/CIP without secure-auth claims,
+   and an explicitly constrained IEC 61850 slice. MMS/GOOSE/SV must document the
+   supported message subset and BER boundary instead of inheriting a vague
+   “full protocol” label.
+4. **Standard extensions and corpus growth:** add the planned BGP, DHCP, SNMP,
+   FTP, TFTP, POP3, IMAP, Telnet, TLS metadata-only, SIP, RTP and PPTP cuts with
+   cited known-answer vectors; then grow labeled industrial families behind
+   per-protocol features. Empty corpus labels remain compile-only stubs, and a
+   registration or catalog row never proves decoding support.
+5. **Outputs and consumers:** define versioned native, hand-written JSON and
+   binary TLV schemas as the source of truth, test writer/schema agreement, and
+   expose a hand-written opaque-handle C ABI with static and dynamic build modes.
+   Linked C execution, invalid-handle/null-buffer behavior, output limits,
+   destroy/reuse, panic containment and calling conventions are separate gates.
+6. **Capture and hardening:** live capture is opt-in, Linux-scoped and fail-closed
+   when required kernel capabilities or privileges are absent. Prove that the
+   offline parser cannot open an interface accidentally. Resolve the design's
+   open choices about fuzz tooling, fixture-data provenance, benchmark hardware,
+   missing-capture capability behavior and schema ownership before making release
+   claims.
+
+Use the design plan's milestone shape as a traceability checklist—corpus manifest,
+workspace/core, readers, standard stack, industrial vertical slice, serializers,
+industrial expansion, capture/FFI, and hardening—but map each milestone onto the
+current repository instead of creating a parallel product. For each item record
+the public contract, implementation owner, fixture or independent oracle, command,
+receipt path and status. Keep `PASS`, `BLOCKED`, `NOT_RUN`, `UNSUPPORTED` and
+`NOT_IMPLEMENTED` distinct. The design documents' private names, internal
+consumer assumptions and private-distribution rule must not appear in commits,
+documentation, test data, generated output or release metadata.
+
 ## Authority and non-negotiable boundaries
 
 Treat these as separate contracts, in this order:

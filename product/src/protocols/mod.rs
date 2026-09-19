@@ -3,6 +3,7 @@
 mod common;
 mod industrial;
 mod it;
+mod semantic_fields;
 pub use common::{ber, BerElement};
 use pcap_evidence::{json::Json, Error, ErrorCode, Result};
 
@@ -99,7 +100,7 @@ impl Decoded {
     pub fn json(&self) -> Json {
         Json::object([
             ("protocol", self.protocol.name().into()),
-            ("decoder_version", "product-framing/1".into()),
+            ("decoder_version", "product-framing/2".into()),
             ("support", self.support.into()),
             ("consumed", self.consumed.to_string().into()),
             (
@@ -255,7 +256,7 @@ impl Protocol {
         if bytes.len() > MAX_FRAME {
             return Err(Error::limit("protocol_input"));
         }
-        let value = match self {
+        let mut value = match self {
             Self::Netflow9 => it::netflow(bytes),
             Self::Bgp => it::bgp(bytes),
             Self::Snmp => it::snmp(bytes),
@@ -268,6 +269,7 @@ impl Protocol {
             Self::Stp => it::stp(bytes),
             _ => industrial::decode(self, bytes),
         }?;
+        semantic_fields::extend(self, bytes, &mut value)?;
         if value.consumed == 0
             || value.consumed > bytes.len()
             || value

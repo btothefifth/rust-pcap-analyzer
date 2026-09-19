@@ -56,7 +56,9 @@ class Manager:
         proc=self.children.get(job)
         if proc is not None and proc.poll()is not None and v.get("state")in {"queued","running"}:
             error=(p/"worker.stderr.txt")
-            detail=error.read_text(errors="replace")[:320]if error.is_file()else ""
+            if error.is_file():
+                with error.open("rb")as file:detail=file.read(1280).decode("utf-8",errors="replace")[:320]
+            else:detail=""
             v.update(state="failed",source_binding="provisional_prefix",worker_exit_code=proc.returncode,error=detail or "worker exited before completion")
             state(p/"state.json",v)
         return v
@@ -101,7 +103,14 @@ class Manager:
     def cancel(self,job):
         p=self.path(job);proc=self.children.get(job)
         if proc and proc.poll()is None:
-            if os.name=="posix":os.killpg(proc.pid,signal.SIGTERM)
+            # Persistent request reaches the worker watchdog even if a Windows
+            # console control event is unavailable. No PID is taken from input.
+            try:
+                with (p/"cancel.request").open("xb")as request:request.write(b"cancel\n")
+            except FileExistsError:pass
+            if os.name=="posix":
+                try:os.killpg(proc.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
             else:
                 # Windows console break reaches the worker's process group and
                 # native child; force terminate the worker if it does not exit.

@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from tools.product import comparison
 from .contract import (InvalidResearch, canonical, decode_json, digest, file_identity,
-                       compare_fields, MAX_DOCUMENT)
+                       compare_fields, recompute_differential, MAX_DOCUMENT)
 
 SCHEMA = "pcap-evidence.research-bundle.v1"
 MAX_BUNDLE = 96 * 1024 * 1024
@@ -131,7 +131,8 @@ def verify(path):
     identity={"sha256":digest(source),"bytes":str(len(source))}
     if manifest["source"]!=identity:raise InvalidResearch("bundle source mismatch")
     left=comparison.load(members["left.interpretation.json"]);right=comparison.load(members["right.interpretation.json"])
-    report=compare_fields(left,right)
+    recorded=decode_json(members["differential.json"])
+    report=recompute_differential(left,right,recorded.get("schema"))
     if report["source"]!=identity or canonical(report)+b"\n"!=members["differential.json"]:raise InvalidResearch("recomputed divergence differs")
     if manifest.get("first_divergence")!=report["first_semantic_divergence"]:raise InvalidResearch("manifest divergence differs")
     if canonical(_witnesses(source,report))+b"\n"!=members["witnesses.json"]:raise InvalidResearch("recomputed source witnesses differ")

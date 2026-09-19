@@ -2,3 +2,9 @@
 *.bin -text -diff
 *.pcap -text -diff
 *.pcapng -text -diff
+
+# Rust source and test files must remain LF-only so the structural preflight is
+# deterministic on Windows as well as on POSIX hosts.
+*.rs text eol=lf
+tests/fixtures/MANIFEST.json text eol=lf
+history/fixtures/manifest.json text eol=lf

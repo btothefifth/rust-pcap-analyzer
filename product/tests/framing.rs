@@ -216,7 +216,7 @@ fn bacnet_ip_framing_known_answer() {
         .fields
         .iter()
         .all(|f| f.start <= f.end && f.end <= d.consumed));
-    assert_eq!(d.support, "metadata-only");
+    assert_eq!(d.support, "implemented-partial");
     for end in 0..2 {
         assert!(Protocol::BacnetIp.decode(&bytes[..end]).is_err());
     }

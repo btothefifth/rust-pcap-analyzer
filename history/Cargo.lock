@@ -1,0 +1,16 @@
+# Path-only lockfile candidate; confirm with Cargo --locked --offline during integration.
+version = 4
+
+[[package]]
+name = "pcap-evidence"
+version = "0.1.0"
+
+[[package]]
+name = "pcap-evidence-history"
+version = "0.1.0"
+dependencies = ["pcap-evidence", "pcap-evidence-stream"]
+
+[[package]]
+name = "pcap-evidence-stream"
+version = "0.1.0"
+dependencies = ["pcap-evidence"]
