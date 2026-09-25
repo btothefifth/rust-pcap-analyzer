@@ -1,0 +1,28 @@
+[package]
+name = "pcap-evidence-stream"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+pcap-evidence = { path = ".." }
+
+[lib]
+name = "pcap_evidence_stream"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pcap-stream"
+path = "src/main.rs"
+
+[workspace]
+exclude = ["fuzz"]
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,19 @@
+{
+  "archive_members": 139,
+  "checks": {
+    "scripts/static_check.py": "PASS_FROM_FRESH_EXTRACTION",
+    "scripts/make_fixtures.py --check": "PASS_FROM_FRESH_EXTRACTION",
+    "scripts/reference_verify.py": "PASS_FROM_FRESH_EXTRACTION",
+    "scripts/test_oracle.py": "PASS_FROM_FRESH_EXTRACTION",
+    "scripts/package.py": "PASS"
+  },
+  "fresh_extraction": true,
+  "native_rust_executed": false,
+  "schema": "pcap-evidence.delivery-check.v1",
+  "scope": "Fresh-extraction source integrity and portable checks only; not native Rust execution",
+  "source_files_verified": 136,
+  "source_identity": "b7c380e315aeb901c46fe2faa44f993d8dda713a6d5091ee7d9aabe49a6dee54",
+  "source_manifest_membership_and_hashes": "PASS",
+  "status": "PASS_SOURCE_DELIVERY_ONLY",
+  "zip_member_paths": "PASS"
+}

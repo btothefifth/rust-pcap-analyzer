@@ -1,0 +1,134 @@
+{
+  "schema": "pcap-evidence.bgp-support-matrix.v1",
+  "authority": "docs/product/BGP_COMPLETION.md",
+  "states": [
+    "accepted_local",
+    "partial",
+    "open",
+    "qualified"
+  ],
+  "profile_areas": [
+    "core",
+    "capabilities",
+    "nlri",
+    "core_attributes",
+    "common_extensions",
+    "as_semantics",
+    "refresh_restart",
+    "route_state",
+    "policy",
+    "external_input",
+    "product_integration",
+    "qualification"
+  ],
+  "entries": [
+    {
+      "id": "BGP-S001",
+      "area": "core",
+      "feature": "bounded core message framing and OPEN UPDATE NOTIFICATION KEEPALIVE ROUTE-REFRESH occurrences",
+      "state": "accepted_local",
+      "code": ["product/src/deep/bgp/producer.rs", "product/src/deep/bgp.rs", "product/src/protocols/it.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_producer_vectors.py", "product/tests/bgp_phase1.rs"],
+      "remaining": "stateless framer carries extended UPDATE and RFC 9072 OPEN bytes; complete negotiated endpoint and malformed-message disposition qualification remains open"
+    },
+    {
+      "id": "BGP-S002",
+      "area": "capabilities",
+      "feature": "source-bound typed declared OPEN capability occurrences, bilateral MP and ADD-PATH grammar, and receiver-directional extended-message authority",
+      "state": "partial",
+      "code": ["product/src/deep/bgp/producer.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_phase1.rs", "product/tests/bgp_phase1_vectors.py"],
+      "remaining": "value-dependent endpoint negotiation, persisted multi-session observation, and independent qualification remain open"
+    },
+    {
+      "id": "BGP-S003",
+      "area": "nlri",
+      "feature": "IPv4 and selected MP prefix evidence with bilateral family capability, directional ADD-PATH layout, and path-ID-preserving candidate keys",
+      "state": "partial",
+      "code": ["product/src/deep/bgp.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_phase1.rs", "product/tests/bgp_state.rs"],
+      "remaining": "specialized AFI/SAFI payloads, real-PCAP ADD-PATH/MP qualification, and endpoint route state remain opaque or unqualified"
+    },
+    {
+      "id": "BGP-S004",
+      "area": "core_attributes",
+      "feature": "typed core attribute occurrences with flag, length, multiplicity, mandatory and enforced RFC 7606 offline route dispositions",
+      "state": "partial",
+      "code": ["product/src/deep/bgp.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_phase1.rs"],
+      "remaining": "full malformed-header recovery, real-PCAP disposition qualification, and actual endpoint action remain unqualified; protocol-reset disposition is wired only in the opt-in captured pipeline"
+    },
+    {
+      "id": "BGP-S005",
+      "area": "common_extensions",
+      "feature": "route-reflector multiprotocol AS4 extended-community AIGP large-community and OTC occurrence decoding",
+      "state": "partial",
+      "code": ["product/src/deep/bgp.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_phase1.rs"],
+      "remaining": "specialized policy semantics, broad extension fixtures and qualification"
+    },
+    {
+      "id": "BGP-S006",
+      "area": "as_semantics",
+      "feature": "two and four-octet AS_PATH with confederation syntax and source-bound AS4 transition reconstruction",
+      "state": "partial",
+      "code": ["product/src/deep/bgp.rs", "product/src/deep/bgp/producer.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_phase1.rs", "product/tests/bgp_phase1_vectors.py"],
+      "remaining": "route-selection and endpoint use of reconstructed candidate are unqualified"
+    },
+    {
+      "id": "BGP-S007",
+      "area": "refresh_restart",
+      "feature": "ROUTE-REFRESH occurrences, typed refresh and restart advertisements, and opt-in session EOR graceful and LLGR markers",
+      "state": "partial",
+      "code": ["product/src/deep/bgp/producer.rs", "product/src/deep/bgp_state.rs", "product/src/deep/bgp_session.rs", "product/src/deep/bgp_pipeline.rs"],
+      "tests": ["product/tests/bgp_producer.rs", "product/tests/bgp_phase1.rs", "product/tests/bgp_state.rs", "product/tests/bgp_session_rib_policy.rs", "product/tests/bgp_pipeline.rs"],
+      "remaining": "automatic graceful/LLGR stale derivation, persisted refresh workflow, and complete enhanced refresh operation semantics"
+    },
+    {
+      "id": "BGP-S008",
+      "area": "route_state",
+      "feature": "path-ID-aware candidate reduction and opt-in versioned Adj-RIB-In model with atomic captured wire join, multi-action records, permanent identity quarantine, immutable peer binding, and explicit legacy adapter",
+      "state": "partial",
+      "code": ["product/src/deep/bgp_state.rs", "product/src/deep/bgp_replay.rs", "product/src/deep/bgp_session.rs", "product/src/deep/bgp_rib.rs", "product/src/deep/bgp_pipeline.rs", "product/src/deep/bgp_manager.rs", "product/src/deep/sink.rs"],
+      "tests": ["product/tests/bgp_state.rs", "product/tests/bgp_replay.rs", "product/tests/bgp_session_rib_policy.rs", "product/tests/bgp_pipeline.rs", "product/tests/bgp_manager.rs", "product/tests/pcap_depth_cli.rs"],
+      "remaining": "restartable persistent replay/query/export integration and independent qualification"
+    },
+    {
+      "id": "BGP-S009",
+      "area": "policy",
+      "feature": "deterministic explainable best-path candidate policy with reached-only inputs and explicit absent-versus-unknown MED evidence",
+      "state": "partial",
+      "code": ["product/src/deep/bgp_policy.rs"],
+      "tests": ["product/tests/bgp_session_rib_policy.rs"],
+      "remaining": "independent router-policy vectors, direct RIB-to-policy integration, and persistent product exposure"
+    },
+    {
+      "id": "BGP-S010",
+      "area": "external_input",
+      "feature": "source-partitioned normalized import and bounded MRT TABLE_DUMP_V2/BGP4MP adapter",
+      "state": "partial",
+      "code": ["product/src/deep/bgp_import.rs", "product/src/deep/bgp_replay.rs", "product/src/deep/bgp_mrt.rs"],
+      "tests": ["product/tests/bgp_import.rs", "product/tests/bgp_replay.rs", "product/tests/bgp_mrt.rs", "product/tests/bgp_mrt_vectors.py"],
+      "remaining": "MRT message-to-imported-wire normalization, full attribute conversion, capture/MRT equivalence and non-collapse at replay, source-byte verification at an import CLI boundary, and BMP"
+    },
+    {
+      "id": "BGP-S011",
+      "area": "product_integration",
+      "feature": "captured evidence through the opt-in pcap-depth boundary with bounded multi-session wire-to-Adj-RIB-In ownership, capture-ordered bidirectional protocol events, per-message receipts, and flow-end summaries",
+      "state": "partial",
+      "code": ["product/src/deep/sink.rs", "product/src/bin/pcap-depth.rs", "product/src/deep/bgp_pipeline.rs", "product/src/deep/bgp_manager.rs"],
+      "tests": ["product/tests/pcap_depth_cli.rs", "product/tests/bgp_pipeline.rs", "product/tests/bgp_manager.rs"],
+      "remaining": "restartable state replay, direct policy output, imported-source join, query, and export"
+    },
+    {
+      "id": "BGP-S012",
+      "area": "qualification",
+      "feature": "focused independent vectors native tests and warnings-denied Windows Clippy",
+      "state": "partial",
+      "code": ["scripts/validate_product.py"],
+      "tests": ["tools/tests/test_bgp_support_matrix.py", "product/tests/bgp_producer_vectors.py"],
+      "remaining": "Linux CI sustained fuzz real lawful corpus differential minimization scale and complete normative review"
+    }
+  ]
+}

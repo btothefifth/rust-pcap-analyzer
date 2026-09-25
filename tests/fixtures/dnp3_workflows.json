@@ -1,0 +1,264 @@
+{
+  "schema": "dnp3-workflow-reference-v1",
+  "method": "MSB-first polynomial 0x3d65, reflected input bytes/output register, final xor 0xffff; independent of candidate Rust",
+  "known_vector": {
+    "ascii": "123456789",
+    "crc": "ea82"
+  },
+  "cases": [
+    {
+      "name": "confirm_solicited",
+      "bytes": 15,
+      "sha256": "d3c82ea720941536a722ba8f3bd7e7046ab9e3ae2a4fadffc12d23b5dd543be0",
+      "header_crc_expected": "fc42"
+    },
+    {
+      "name": "confirm_unsolicited",
+      "bytes": 15,
+      "sha256": "79ab9bfa5c66c68b3b4b2f85546cb4fb4344142ac0fee6e406ac7653a545e250",
+      "header_crc_expected": "fc42"
+    },
+    {
+      "name": "unsolicited_event",
+      "bytes": 23,
+      "sha256": "1c043e86d21e176d0761c1863b36be1c66b8cea1f06d55ba7957cbbfe4a4e46b",
+      "header_crc_expected": "c4e1"
+    },
+    {
+      "name": "class_scan_15",
+      "bytes": 27,
+      "sha256": "e9c32decbcef5667cbf125aaa5a5bd2a8816231d80c1a40326e21e3f4e9f03f4",
+      "header_crc_expected": "8fed"
+    },
+    {
+      "name": "event_response_15",
+      "bytes": 23,
+      "sha256": "9d30f3f9f9bb33cd7e19ed4cb3a52d65b47c71f37d0f2b95f969fe3882a11347",
+      "header_crc_expected": "c4e1"
+    },
+    {
+      "name": "event_scan_0",
+      "bytes": 19,
+      "sha256": "54d2459d2dc8be6be62725e9862f194441813d201b2645b86967516b3e54dabf",
+      "header_crc_expected": "920f"
+    },
+    {
+      "name": "empty_response_0",
+      "bytes": 17,
+      "sha256": "68e2e76f93ebffb50a31d22febc0add9368ab099db51ddb697fabbb96abc31bb",
+      "header_crc_expected": "6e25"
+    },
+    {
+      "name": "class_scan_outstation11",
+      "bytes": 18,
+      "sha256": "2a8145c4ee91b831a8559f500e1976c660797aa5dfde750489087dee201eb34c",
+      "header_crc_expected": "4413"
+    },
+    {
+      "name": "empty_response_outstation11",
+      "bytes": 17,
+      "sha256": "322f748e3b0e2b1586fde94682a1581c1b9bc3743b2ef84e4b83a5807daee11a",
+      "header_crc_expected": "208e"
+    },
+    {
+      "name": "delay_measure",
+      "bytes": 15,
+      "sha256": "34696abae9daf0e848b95fb7193721084e40dcb74fd8dca14927b645db23ba20",
+      "header_crc_expected": "fc42"
+    },
+    {
+      "name": "delay_response",
+      "bytes": 23,
+      "sha256": "3aaabb1272a0f739226882bf659262f415ca24e2d8bb758d36ad9de13e6b0d8a",
+      "header_crc_expected": "c4e1"
+    },
+    {
+      "name": "record_time",
+      "bytes": 15,
+      "sha256": "ba0c8df672aad8c77a3b24b7683bf3773a61ddb7990c35ed548b9fd78d856127",
+      "header_crc_expected": "fc42"
+    },
+    {
+      "name": "time_write_absolute",
+      "bytes": 25,
+      "sha256": "2bf7a75c2c62d585849a226ac034827172f0402a355551c551263c1f06e1b9f1",
+      "header_crc_expected": "5686"
+    },
+    {
+      "name": "time_write_recorded",
+      "bytes": 25,
+      "sha256": "f1b4edf150a677369a078ccb427fba17b88c8fa0105b747027474cffcde91bbc",
+      "header_crc_expected": "5686"
+    },
+    {
+      "name": "enable_classes",
+      "bytes": 24,
+      "sha256": "51df4e4dc51c040d9d1de74675bfcc827a3f3eb42b2acd8b23fa598d99aa3254",
+      "header_crc_expected": "0615"
+    },
+    {
+      "name": "disable_classes",
+      "bytes": 18,
+      "sha256": "d244c5fd5795eb5af33e81ddcc8f0ca45c87fec0e4428acd7357e0bde8dfccca",
+      "header_crc_expected": "acd1"
+    },
+    {
+      "name": "no_response_control",
+      "bytes": 33,
+      "sha256": "e62307f2b471247ae244d2363023421c94cb760744590db0a43ab5b1f002698a",
+      "header_crc_expected": "3d3a"
+    },
+    {
+      "name": "broadcast_fffd",
+      "bytes": 15,
+      "sha256": "4921506b935071f52c401016e884420cc98a3ff702d09db92ffc860d950c8b3e",
+      "header_crc_expected": "6654"
+    },
+    {
+      "name": "broadcast_fffe",
+      "bytes": 15,
+      "sha256": "d5129bd7e446c13cea2b555440f854b26a05b5d816e357cf33dd7d749e2ac811",
+      "header_crc_expected": "275e"
+    },
+    {
+      "name": "broadcast_ffff",
+      "bytes": 15,
+      "sha256": "ba8ad57f5f31d18603a54bf7caca1a13d2470df9538988a03a922c81e0d78cb3",
+      "header_crc_expected": "cf9c"
+    },
+    {
+      "name": "application_first",
+      "bytes": 22,
+      "sha256": "f223f9f6f25ec42a9fcaff2958b33be40bfac1e743d79f9827386606e6c89838",
+      "header_crc_expected": "e7dd"
+    },
+    {
+      "name": "application_final",
+      "bytes": 18,
+      "sha256": "b4275f66210df996b36c724f5bd66bfd2ee62a66559293e5f7ffda2c3526cf0c",
+      "header_crc_expected": "8990"
+    },
+    {
+      "name": "application_skipped_final",
+      "bytes": 18,
+      "sha256": "b1278b4d1c9989ee837fa07e1f687092464be6c8f0bc028b188b2476aa37a0b8",
+      "header_crc_expected": "8990"
+    },
+    {
+      "name": "transport_first",
+      "bytes": 17,
+      "sha256": "a2d9addf5b9580e2c2c22f39cb7089c88af29b3ac21d4fdd520b7f015ac05603",
+      "header_crc_expected": "6e25"
+    },
+    {
+      "name": "transport_middle",
+      "bytes": 17,
+      "sha256": "257743e655348f9867385f868c65dd9291affe336126beb8300ec916122203ee",
+      "header_crc_expected": "6e25"
+    },
+    {
+      "name": "transport_final",
+      "bytes": 15,
+      "sha256": "94804cbb98a3ae0b1135a3eac59be1ec8fe2e21d3559d21a9ed73bb7affeb763",
+      "header_crc_expected": "d903"
+    },
+    {
+      "name": "transport_middle_conflict",
+      "bytes": 17,
+      "sha256": "96c286935178d748e41dde8d17d17acc23bdbdcc4ffdb513b37643d893fc95ed",
+      "header_crc_expected": "6e25"
+    },
+    {
+      "name": "bad_crc_nested_frame",
+      "bytes": 28,
+      "sha256": "390432574b79e3bb29ac37183d7a34b01e7a78d26142fded34d94fcd67237571",
+      "header_crc_expected": "6858"
+    },
+    {
+      "name": "declared_truncated",
+      "bytes": 15,
+      "sha256": "b22cc612207b9f4e8488cb9b7df42218f0701194db3b16f6d856b225d5981a0a",
+      "header_crc_expected": "9c0e"
+    },
+    {
+      "name": "secondary_dfc",
+      "bytes": 10,
+      "sha256": "ce7cbb7522c1992c00b829448a04cae29d993943bc35918b517c93dccea9203d",
+      "header_crc_expected": "ae67"
+    },
+    {
+      "name": "secondary_reserved",
+      "bytes": 10,
+      "sha256": "e4c46fcbeb36d9f6e06270f899b002a47bb190cbae85a9ef5df2f65a1c1cdcae",
+      "header_crc_expected": "f37f"
+    },
+    {
+      "name": "primary_reserved",
+      "bytes": 10,
+      "sha256": "19637477deeb47648ba3e39d075f7dcd028c3fc72aaacf1647df8d9d97ec9187",
+      "header_crc_expected": "a345"
+    },
+    {
+      "name": "legacy_primary",
+      "bytes": 10,
+      "sha256": "26eb33d2908b9668c13b96e9d450939f4936ad3e33df9b4ebc0f97663a3e0a63",
+      "header_crc_expected": "b78f"
+    },
+    {
+      "name": "test_link_valid",
+      "bytes": 10,
+      "sha256": "8ce5385f71e6f9e83d7c9c26ee6371ef3e2d6159a494b16fb08f32395289adc0",
+      "header_crc_expected": "2f40"
+    },
+    {
+      "name": "test_link_bad_fcv",
+      "bytes": 10,
+      "sha256": "47a2846d7b3fc66f28b38a69a10d4c2a5ea78f5134f82f1a4748b782f469c80f",
+      "header_crc_expected": "bdea"
+    },
+    {
+      "name": "user_data_bad_fcv",
+      "bytes": 18,
+      "sha256": "9c296c19d71981157b3f9c58ffc347a04ee3dd4aa99e7ef052a25d03e1711da0",
+      "header_crc_expected": "3e7b"
+    },
+    {
+      "name": "secondary_with_user_data",
+      "bytes": 18,
+      "sha256": "ea947668fe7df05526dae7d19fca408b90c01c7798efe70d067a084f25df6b35",
+      "header_crc_expected": "4d5d"
+    },
+    {
+      "name": "reserved_destination",
+      "bytes": 18,
+      "sha256": "f0d053331c686bf5156af9766348f5d2016994052a8b64225dad089aebaa7fc4",
+      "header_crc_expected": "da2c"
+    },
+    {
+      "name": "self_destination",
+      "bytes": 18,
+      "sha256": "deb4195c580b0d4d9da84bfb80cf2d79d46d532a352083a8a7de6d2d6c427093",
+      "header_crc_expected": "de05"
+    },
+    {
+      "name": "broadcast_wrong_direction",
+      "bytes": 15,
+      "sha256": "a05bcc558e14104016c15f7af7ae7cfe5837cc333815f4e0778e70701dfe24c6",
+      "header_crc_expected": "bbfd"
+    },
+    {
+      "name": "secure_auth_request",
+      "bytes": 18,
+      "sha256": "a5c63e418ebbca050f00888eecd3e0fb55e6baf1a7b2c4d2ff0c3eb581db4050",
+      "header_crc_expected": "acd1"
+    },
+    {
+      "name": "file_auth_request",
+      "bytes": 19,
+      "sha256": "ea9b932a3d00ac148494eb6cdc2c561de346757a5341a442e57b03e7d5cf0ebf",
+      "header_crc_expected": "920f"
+    }
+  ],
+  "rust_execution": false,
+  "normative_conformance": false
+}

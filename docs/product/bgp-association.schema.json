@@ -1,0 +1,534 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pcap-evidence:bgp:association:v1",
+  "title": "Bounded non-causal candidate evidence association",
+  "$comment": "Structural projection only. Runtime Limits, source verification, policy compatibility, exact ranges and complete candidate coverage are independent obligations. Opaque evidence objects preserve producer fields; this schema is not authentication or semantic proof.",
+  "type": "object",
+  "required": [
+    "schema",
+    "policy",
+    "candidate_snapshot_sha256",
+    "endpoint_state_established",
+    "rib_established",
+    "best_path_selected",
+    "reachability_established",
+    "attack_established",
+    "causality_established",
+    "source_authority_established",
+    "normative_conformance_certified",
+    "issues",
+    "route_evidence",
+    "internal_evidence",
+    "selection_notes",
+    "associations"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "pcap-evidence.bgp.association.v1"
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "policy_id",
+        "namespace",
+        "session",
+        "generation",
+        "flow",
+        "direction",
+        "spatial",
+        "time"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "policy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "const": "require_equal"
+        },
+        "session": {
+          "enum": [
+            "ignore",
+            "require_equal"
+          ]
+        },
+        "generation": {
+          "enum": [
+            "ignore",
+            "require_equal"
+          ]
+        },
+        "flow": {
+          "enum": [
+            "ignore",
+            "require_equal"
+          ]
+        },
+        "direction": {
+          "enum": [
+            "ignore",
+            "equal",
+            "opposite"
+          ]
+        },
+        "spatial": {
+          "enum": [
+            "equal_prefix",
+            "route_prefix_contains_endpoint"
+          ]
+        },
+        "time": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "const": "ignore_labels"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "mode",
+                "max_distance_ns",
+                "clocks",
+                "missing",
+                "semantics"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "const": "inclusive_absolute_distance"
+                },
+                "max_distance_ns": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)$"
+                },
+                "clocks": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "mode"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "mode": {
+                          "const": "same_policy_and_id"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "mode",
+                        "basis"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "mode": {
+                          "const": "caller_comparable"
+                        },
+                        "basis": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  ]
+                },
+                "missing": {
+                  "enum": [
+                    "error",
+                    "unresolved"
+                  ]
+                },
+                "semantics": {
+                  "enum": [
+                    "label_distance_only",
+                    "all_reported_bounds"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "candidate_snapshot_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "endpoint_state_established": {
+      "const": false
+    },
+    "rib_established": {
+      "const": false
+    },
+    "best_path_selected": {
+      "const": false
+    },
+    "reachability_established": {
+      "const": false
+    },
+    "attack_established": {
+      "const": false
+    },
+    "causality_established": {
+      "const": false
+    },
+    "source_authority_established": {
+      "const": false
+    },
+    "normative_conformance_certified": {
+      "const": false
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "route_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "evidence",
+          "input_sha256",
+          "occurrences",
+          "reasons"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "type": "object"
+          },
+          "input_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "occurrences": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "missing_namespace",
+                "incompatible_namespace",
+                "missing_session",
+                "incompatible_session",
+                "missing_generation",
+                "incompatible_generation",
+                "missing_flow",
+                "incompatible_flow",
+                "missing_direction",
+                "incompatible_direction",
+                "missing_prefix",
+                "incompatible_prefix",
+                "missing_endpoint",
+                "incompatible_endpoint",
+                "unsupported_dimension",
+                "missing_time",
+                "unknown_clock",
+                "incompatible_clock",
+                "unknown_uncertainty",
+                "uncertain_window",
+                "outside_window",
+                "insufficient_coverage",
+                "insufficient_provenance",
+                "missing_import_context",
+                "duplicate_identity",
+                "changed_content_conflict",
+                "conflicting_attributes",
+                "multiple_candidates",
+                "not_announcement",
+                "not_current_candidate",
+                "no_route_evidence",
+                "no_internal_evidence",
+                "metadata_only"
+              ]
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "internal_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "evidence",
+          "input_sha256",
+          "occurrences",
+          "reasons"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "type": "object"
+          },
+          "input_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "occurrences": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "missing_namespace",
+                "incompatible_namespace",
+                "missing_session",
+                "incompatible_session",
+                "missing_generation",
+                "incompatible_generation",
+                "missing_flow",
+                "incompatible_flow",
+                "missing_direction",
+                "incompatible_direction",
+                "missing_prefix",
+                "incompatible_prefix",
+                "missing_endpoint",
+                "incompatible_endpoint",
+                "unsupported_dimension",
+                "missing_time",
+                "unknown_clock",
+                "incompatible_clock",
+                "unknown_uncertainty",
+                "uncertain_window",
+                "outside_window",
+                "insufficient_coverage",
+                "insufficient_provenance",
+                "missing_import_context",
+                "duplicate_identity",
+                "changed_content_conflict",
+                "conflicting_attributes",
+                "multiple_candidates",
+                "not_announcement",
+                "not_current_candidate",
+                "no_route_evidence",
+                "no_internal_evidence",
+                "metadata_only"
+              ]
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "selection_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "reason",
+          "witness"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "enum": [
+              "missing_namespace",
+              "incompatible_namespace",
+              "missing_session",
+              "incompatible_session",
+              "missing_generation",
+              "incompatible_generation",
+              "missing_flow",
+              "incompatible_flow",
+              "missing_direction",
+              "incompatible_direction",
+              "missing_prefix",
+              "incompatible_prefix",
+              "missing_endpoint",
+              "incompatible_endpoint",
+              "unsupported_dimension",
+              "missing_time",
+              "unknown_clock",
+              "incompatible_clock",
+              "unknown_uncertainty",
+              "uncertain_window",
+              "outside_window",
+              "insufficient_coverage",
+              "insufficient_provenance",
+              "missing_import_context",
+              "duplicate_identity",
+              "changed_content_conflict",
+              "conflicting_attributes",
+              "multiple_candidates",
+              "not_announcement",
+              "not_current_candidate",
+              "no_route_evidence",
+              "no_internal_evidence",
+              "metadata_only"
+            ]
+          },
+          "witness": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "associations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "route",
+          "internal",
+          "status",
+          "reasons",
+          "time"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "route": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "internal": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "compatible_candidate",
+              "unresolved",
+              "incompatible"
+            ]
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "missing_namespace",
+                "incompatible_namespace",
+                "missing_session",
+                "incompatible_session",
+                "missing_generation",
+                "incompatible_generation",
+                "missing_flow",
+                "incompatible_flow",
+                "missing_direction",
+                "incompatible_direction",
+                "missing_prefix",
+                "incompatible_prefix",
+                "missing_endpoint",
+                "incompatible_endpoint",
+                "unsupported_dimension",
+                "missing_time",
+                "unknown_clock",
+                "incompatible_clock",
+                "unknown_uncertainty",
+                "uncertain_window",
+                "outside_window",
+                "insufficient_coverage",
+                "insufficient_provenance",
+                "missing_import_context",
+                "duplicate_identity",
+                "changed_content_conflict",
+                "conflicting_attributes",
+                "multiple_candidates",
+                "not_announcement",
+                "not_current_candidate",
+                "no_route_evidence",
+                "no_internal_evidence",
+                "metadata_only"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "time": {
+            "type": "object",
+            "required": [
+              "label_distance_ns",
+              "minimum_distance_ns",
+              "maximum_distance_ns",
+              "uncertainty_used"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "label_distance_ns": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "minimum_distance_ns": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maximum_distance_ns": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]*)$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "uncertainty_used": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

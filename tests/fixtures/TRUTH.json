@@ -1,0 +1,116 @@
+{
+  "schema": "pcap-evidence.independent-truth.v1",
+  "note": "Hand-authored expectations. Never rebuilt from candidate Rust output or generated fixture hashes.",
+  "cases": {
+    "ethernet_udp_le_us.pcap": {
+      "packets": 1,
+      "records": 2,
+      "times_ns": [
+        "1700000000123456000"
+      ],
+      "lengths": [
+        50
+      ]
+    },
+    "ethernet_udp_be_us.pcap": {
+      "packets": 1,
+      "records": 2,
+      "times_ns": [
+        "1700000000123456000"
+      ],
+      "lengths": [
+        50
+      ]
+    },
+    "ethernet_udp_le_ns.pcap": {
+      "packets": 1,
+      "records": 2,
+      "times_ns": [
+        "1700000000123456789"
+      ],
+      "lengths": [
+        50
+      ]
+    },
+    "ethernet_udp_be_ns.pcap": {
+      "packets": 1,
+      "records": 2,
+      "times_ns": [
+        "1700000000123456789"
+      ],
+      "lengths": [
+        50
+      ]
+    },
+    "mixed_sections.pcapng": {
+      "packets": 4,
+      "records": 14,
+      "times_ns": [
+        "7",
+        "1500000000",
+        null,
+        "3000004000"
+      ],
+      "interfaces": [
+        0,
+        1,
+        0,
+        0
+      ],
+      "sections": [
+        0,
+        0,
+        0,
+        1
+      ]
+    },
+    "binary_inexact.pcapng": {
+      "packets": 1,
+      "times_ns": [
+        null
+      ]
+    },
+    "timestamp_absent.pcapng": {
+      "packets": 1,
+      "times_ns": [
+        null
+      ]
+    },
+    "dnp3_tcp.pcap": {
+      "packets": 10,
+      "flows": 1,
+      "dnp3_messages": 3,
+      "dnp3_classes": [
+        "request",
+        "response",
+        "unsolicited"
+      ],
+      "dnp3_request_object_hex": "3c0206"
+    },
+    "modbus_tcp.pcap": {
+      "packets": 9,
+      "flows": 1,
+      "modbus_requests": 1,
+      "modbus_responses": 1,
+      "transaction": 42
+    },
+    "ipv4_fragments.pcap": {
+      "packets": 2,
+      "udp_packets": 2
+    },
+    "conflicting_tcp.pcap": {
+      "packets": 6,
+      "stream_first_hex": "616263",
+      "conflict_interval": [
+        3,
+        6
+      ]
+    },
+    "truncated_record.pcap": {
+      "reject": true
+    },
+    "bad_block_trailer.pcapng": {
+      "reject": true
+    }
+  }
+}

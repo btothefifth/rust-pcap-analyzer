@@ -1,0 +1,36 @@
+[package]
+name = "pcap-evidence-stream-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pcap-evidence-stream = { path = ".." }
+pcap-evidence = { path = "../.." }
+
+[[bin]]
+name = "streaming"
+path = "fuzz_targets/streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocols"
+path = "fuzz_targets/protocols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network"
+path = "fuzz_targets/network.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

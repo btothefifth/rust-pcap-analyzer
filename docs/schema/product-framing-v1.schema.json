@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pcap-evidence:product-framing:v1",
+  "$comment": "Message-relative ranges; source-span composition and arithmetic are checked by code, not by this structural schema.",
+  "type": "object",
+  "required": [
+    "protocol",
+    "decoder_version",
+    "support",
+    "consumed",
+    "fields",
+    "field_ranges",
+    "issues",
+    "endpoint_behavior_established",
+    "payload_semantics_complete"
+  ],
+  "properties": {
+    "protocol": {
+      "enum": [
+        "netflow9",
+        "bgp",
+        "snmp",
+        "ftp",
+        "tftp",
+        "pop3",
+        "imap",
+        "telnet",
+        "sip",
+        "rtp",
+        "pptp",
+        "bacnet_ip",
+        "bacnet_mstp",
+        "enip_cip",
+        "goose",
+        "sampled_values",
+        "mms",
+        "iec104",
+        "s7",
+        "hart_ip",
+        "fins_udp",
+        "fins_tcp",
+        "ads",
+        "opcua_tcp",
+        "melsec_3e",
+        "c37118",
+        "ethercat",
+        "profinet_rt",
+        "powerlink",
+        "stp"
+      ]
+    },
+    "decoder_version": {
+      "const": "product-framing/1"
+    },
+    "support": {
+      "const": "metadata-only"
+    },
+    "consumed": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "fields": {
+      "type": "object"
+    },
+    "field_ranges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$"
+          },
+          "end": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "endpoint_behavior_established": {
+      "const": false
+    },
+    "payload_semantics_complete": {
+      "const": false
+    }
+  },
+  "additionalProperties": false
+}

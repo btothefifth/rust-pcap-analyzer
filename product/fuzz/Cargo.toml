@@ -1,0 +1,19 @@
+[package]
+name = "pcap-product-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[package.metadata]
+cargo-fuzz = true
+[dependencies]
+libfuzzer-sys = "0.4"
+pcap-evidence = { path = "../.." }
+pcap-evidence-product = { path = ".." }
+[workspace]
+members = ["."]
+[[bin]]
+name = "research"
+path = "fuzz_targets/research.rs"
+test = false
+doc = false
+bench = false

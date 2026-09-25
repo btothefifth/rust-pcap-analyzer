@@ -1,0 +1,9 @@
+# Independently laid out base BGP messages. No parser-generated fixture bytes.
+# header = 16 ff + big-endian length + type. See BGP_STATE.md for arithmetic.
+announce ffffffffffffffffffffffffffffffff002d0200000012400101004002040201fde8400304c000020118cb0071
+withdraw ffffffffffffffffffffffffffffffff001b02000418cb00710000
+notification ffffffffffffffffffffffffffffffff0017030602dead
+keepalive ffffffffffffffffffffffffffffffff001304
+# The duplicate ORIGIN is retained by the inherited normalizer but must not
+# yield a single clean candidate from its last-scalar-value representation.
+duplicate_origin ffffffffffffffffffffffffffffffff0031020000001640010100400101014002040201fde8400304c000020118cb0071

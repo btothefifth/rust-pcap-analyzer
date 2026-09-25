@@ -1,0 +1,11 @@
+# Independently calculated inclusive absolute-time relations; unknown is not zero.
+id	route_ns	internal_ns	route_uncertainty_ns	internal_uncertainty_ns	window_ns	status	reason	distance_ns	minimum_ns	maximum_ns
+same	100	100	0	0	0	compatible_candidate	-	0	0	0
+boundary	100	110	0	0	10	compatible_candidate	-	10	10	10
+straddle	100	110	1	0	10	unresolved	uncertain_window	10	9	11
+outside	100	113	1	1	10	incompatible	outside_window	13	11	15
+contained	100	108	1	1	10	compatible_candidate	-	8	6	10
+missing	unknown	100	0	0	10	unresolved	missing_time	unknown	unknown	unknown
+unknown_accuracy	100	100	unknown	0	10	unresolved	unknown_uncertainty	0	unknown	unknown
+negative	-17	-8	0	0	9	compatible_candidate	-	9	9	9
+extreme	-9223372036854775808	9223372036854775807	18446744073709551615	18446744073709551615	10	unresolved	uncertain_window	18446744073709551615	0	55340232221128654845

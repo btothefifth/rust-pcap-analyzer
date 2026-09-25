@@ -1,0 +1,25 @@
+[package]
+name = "pcap-evidence-history-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+pcap-evidence = { path = ".." }
+pcap-evidence-history = { path = "../history" }
+pcap-evidence-product = { path = "../product" }
+
+[[bin]]
+name = "pcap-evidence-history-app"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,140 @@
+{
+  "schema": "pcap-evidence.bgp.import-test-vectors.v1",
+  "scope": "synthetic caller labels, not wire evidence or native execution",
+  "context": {
+    "schema": "pcap-evidence.bgp.import-context.v1",
+    "source_id": "synthetic-source",
+    "source_schema": "route-record",
+    "source_version": "1",
+    "clock": {
+      "policy": "unknown",
+      "clock_id": null,
+      "reported_uncertainty_ns": null,
+      "ordering_established": false
+    },
+    "batch": {
+      "batch_id": "batch-a",
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "byte_length": "3"
+    },
+    "checkpoint_id": "checkpoint-a",
+    "session": "session-a",
+    "generation": "7",
+    "direction": 0,
+    "peer": "peer-label",
+    "local": null,
+    "provenance": [
+      {
+        "start": "0",
+        "end": "3",
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+    ],
+    "wire_verified": false,
+    "source_authenticated": false
+  },
+  "second_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "successor_vectors": [
+    [
+      "7",
+      "8",
+      true
+    ],
+    [
+      "7",
+      "7",
+      false
+    ],
+    [
+      "7",
+      "9",
+      false
+    ],
+    [
+      "18446744073709551615",
+      "0",
+      false
+    ],
+    [
+      "18446744073709551614",
+      "18446744073709551615",
+      true
+    ]
+  ],
+  "transition_trace": [
+    {
+      "operation": "announce",
+      "record": "r",
+      "checkpoint": "checkpoint-a",
+      "generation": "7",
+      "expected": "applied",
+      "active": 1
+    },
+    {
+      "operation": "announce",
+      "record": "r",
+      "checkpoint": "checkpoint-a",
+      "generation": "7",
+      "expected": "identical_replay",
+      "active": 1
+    },
+    {
+      "operation": "withdraw",
+      "record": "w",
+      "checkpoint": "checkpoint-b",
+      "generation": "7",
+      "expected": "absent",
+      "active": 1
+    },
+    {
+      "operation": "announce",
+      "record": "future",
+      "checkpoint": "checkpoint-a",
+      "generation": "9",
+      "expected": "invalid_transition",
+      "active": 1
+    },
+    {
+      "operation": "boundary",
+      "record": "reset",
+      "checkpoint": "checkpoint-a",
+      "generation": "8",
+      "expected": "reset",
+      "active": 0,
+      "previous": 7
+    },
+    {
+      "operation": "announce",
+      "record": "r",
+      "checkpoint": "checkpoint-a",
+      "generation": "7",
+      "expected": "identical_replay",
+      "active": 0
+    },
+    {
+      "operation": "boundary",
+      "record": "reset",
+      "checkpoint": "checkpoint-a",
+      "generation": "8",
+      "expected": "identical_replay",
+      "active": 0,
+      "previous": 7
+    },
+    {
+      "operation": "announce",
+      "record": "next",
+      "checkpoint": "checkpoint-a",
+      "generation": "8",
+      "expected": "applied",
+      "active": 1
+    },
+    {
+      "operation": "withdraw",
+      "record": "late",
+      "checkpoint": "checkpoint-a",
+      "generation": "7",
+      "expected": "invalid_transition",
+      "active": 1
+    }
+  ]
+}

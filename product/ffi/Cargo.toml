@@ -1,0 +1,16 @@
+[package]
+name = "pcap-evidence-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+[lib]
+name = "pcap_evidence_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+[dependencies]
+pcap-evidence = { path = "../.." }
+[workspace]
+[profile.release]
+overflow-checks = true
+panic = "unwind"

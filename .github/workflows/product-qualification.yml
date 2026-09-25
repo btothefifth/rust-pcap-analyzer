@@ -1,0 +1,72 @@
+name: additive-product-qualification
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'product/**'
+      - 'tools/**'
+      - 'desktop/**'
+      - 'scripts/*product*'
+      - '.github/workflows/product-qualification.yml'
+  pull_request:
+    paths:
+      - 'product/**'
+      - 'tools/**'
+      - 'desktop/**'
+      - 'scripts/*product*'
+      - '.github/workflows/product-qualification.yml'
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Explicit toolchain provisioning (not part of runtime build)
+        run: rustup toolchain install 1.85.1 --profile minimal --component clippy --component rustfmt
+      - name: Product Rust format, debug and release
+        run: |
+          cargo fmt --manifest-path product/Cargo.toml --all -- --check
+          cargo test --manifest-path product/Cargo.toml --locked --offline --all-targets
+          cargo test --manifest-path product/Cargo.toml --locked --offline --release --all-targets
+          cargo clippy --manifest-path product/Cargo.toml --locked --offline --all-targets -- -D warnings
+          cargo build --manifest-path product/Cargo.toml --locked --offline --release --all-targets
+          cargo test --manifest-path product/Cargo.toml --locked --offline --no-default-features --all-targets
+      - name: Isolated FFI crate
+        run: |
+          cargo fmt --manifest-path product/ffi/Cargo.toml --all -- --check
+          cargo test --manifest-path product/ffi/Cargo.toml --locked --offline --all-targets
+          cargo build --manifest-path product/ffi/Cargo.toml --locked --offline --release
+      - name: Python and JS models (not browser/native qualification)
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -m unittest discover -s tools/tests -v
+          python -m tools.research audit
+          node --test desktop/web/model.test.mjs
+      - name: Existing baseline regression gates
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          cargo test --locked --offline --all-targets
+          cargo test --manifest-path streaming/Cargo.toml --locked --offline --all-targets
+      - name: Linux C ABI link and client run
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror product/ffi/harness.c -Lproduct/ffi/target/release -lpcap_evidence_ffi -Wl,-rpath,"${PWD}/product/ffi/target/release" -o /tmp/pcap-ffi-client
+          /tmp/pcap-ffi-client
+          cc -std=c11 -Wall -Wextra -Werror product/live/capture_linux.c -o /tmp/pcap-capture-compile-only

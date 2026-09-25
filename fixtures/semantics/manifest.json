@@ -1,0 +1,461 @@
+{
+  "schema": "pcap-evidence.semantic-cases.v1",
+  "cases": [
+    {
+      "id": "dnp-read",
+      "protocol": "dnp3",
+      "context": "read",
+      "path": "dnp-read.bin",
+      "bytes": 9,
+      "sha256": "c581068938f829c621a851c6b6afe0244a8d49ef3a2dd923413287d5b60512d4",
+      "hex": "3c02063c03063c0406",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-packed",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-packed.bin",
+      "bytes": 7,
+      "sha256": "065752830ad82120e2378e51d5e44c80ba9993656bd3c0ecd166d81e5fca18a8",
+      "hex": "01010000094d03",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "value",
+            "ordinal": 0,
+            "value": true
+          },
+          {
+            "name": "value",
+            "ordinal": 1,
+            "value": false
+          },
+          {
+            "name": "point_index",
+            "ordinal": 9,
+            "value": "9"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-counter",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-counter.bin",
+      "bytes": 10,
+      "sha256": "44f7fc4a8b96782b60f37ca0c18577118251c9e587b390085cafbe95df6f97f1",
+      "hex": "14020702010a00011400",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "value",
+            "ordinal": 0,
+            "value": "10"
+          },
+          {
+            "name": "value",
+            "ordinal": 1,
+            "value": "20"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-duplicate-index",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-duplicate-index.bin",
+      "bytes": 12,
+      "sha256": "f54a7dafa341d70601fcc9c93e297ac4ee7d868b2025f01e8d10a67e8252e968",
+      "hex": "1402170205010a0005011400",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "point_index",
+            "ordinal": 0,
+            "value": "5"
+          },
+          {
+            "name": "point_index",
+            "ordinal": 1,
+            "value": "5"
+          },
+          {
+            "name": "value",
+            "ordinal": 1,
+            "value": "20"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-signed",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-signed.bin",
+      "bytes": 15,
+      "sha256": "bc7204c5d61761942122dfcd6f581d3aafb7fab007704ff8ce4580acc6a0f256",
+      "hex": "1e0100010201feffffff0100000080",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "value",
+            "ordinal": 0,
+            "value": "-2"
+          },
+          {
+            "name": "value",
+            "ordinal": 1,
+            "value": "-2147483648"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-float-bits",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-float-bits.bin",
+      "bytes": 15,
+      "sha256": "bd43307b180fa46475582717804e87ca740dafb799aea14be2776db612d328d8",
+      "hex": "1e05000001010100c07f0100000080",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "value",
+            "ordinal": 0,
+            "value": "7fc00001"
+          },
+          {
+            "name": "value",
+            "ordinal": 1,
+            "value": "80000000"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-relative",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-relative.bin",
+      "bytes": 8,
+      "sha256": "7b6424a233cc2cad3a42cd6e00da0063a09c71d46c9c36e0b9aa5c45809504f3",
+      "hex": "0203170104813412",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "time",
+            "ordinal": 0,
+            "value": "4660"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-unknown",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-unknown.bin",
+      "bytes": 10,
+      "sha256": "4525511e3028efb8bf3bc0bbeb7d89eece965e57e7ab11b7d69cf5565e96760b",
+      "hex": "63630701010200000081",
+      "expected": {
+        "status": "unsupported",
+        "fields": [],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-truncated",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-truncated.bin",
+      "bytes": 8,
+      "sha256": "f19129f9ce2eccd6162f1bd50fed312a31575aa6fb9ed5786380b3a5477f224e",
+      "hex": "14020702010a0001",
+      "expected": {
+        "status": "incomplete",
+        "fields": [
+          {
+            "name": "value",
+            "ordinal": 0,
+            "value": "10"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "dnp-inverted",
+      "protocol": "dnp3",
+      "context": "response",
+      "path": "dnp-inverted.bin",
+      "bytes": 5,
+      "sha256": "d19ff9f16906c4f93178083966fe77f6ca0840915cb142a77def063f269ac4c1",
+      "hex": "0102000807",
+      "expected": {
+        "status": "rejected",
+        "fields": [],
+        "absent_fields": []
+      },
+      "basis": "dnp3-project-subset-cross-checked-reference",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-fc15-example",
+      "protocol": "modbus",
+      "context": "request",
+      "path": "modbus-fc15-example.bin",
+      "bytes": 15,
+      "sha256": "9a2a36cf649acacd9311a5f4d231ed831e75ab61441f04c569e2546d0adc0bc4",
+      "hex": "002a00000009010f0013000a02cd01",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "starting_address_zero_based",
+            "ordinal": 0,
+            "value": "19"
+          },
+          {
+            "name": "quantity",
+            "ordinal": 0,
+            "value": "10"
+          },
+          {
+            "name": "address_zero_based",
+            "ordinal": 9,
+            "value": "28"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-fc16-example",
+      "protocol": "modbus",
+      "context": "request",
+      "path": "modbus-fc16-example.bin",
+      "bytes": 17,
+      "sha256": "58ccda223bfb9c9313a7bec10e635c21fe92321a7d389c953496641a9ff585a0",
+      "hex": "002a0000000b01100001000204000a0102",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "register_u16",
+            "ordinal": 0,
+            "value": "10"
+          },
+          {
+            "name": "register_u16",
+            "ordinal": 1,
+            "value": "258"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-read",
+      "protocol": "modbus",
+      "context": "request",
+      "path": "modbus-read.bin",
+      "bytes": 12,
+      "sha256": "a5461235a53eff1e3be1b865ca3a98be7556fa7a724cd9dbe5a3045c45596c6d",
+      "hex": "002a0000000601030000007d",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "quantity",
+            "ordinal": 0,
+            "value": "125"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-read-over",
+      "protocol": "modbus",
+      "context": "request",
+      "path": "modbus-read-over.bin",
+      "bytes": 12,
+      "sha256": "4120b0156de75d173173953cb85c3fb53b3be552ead3bab40e56e5c6442720a0",
+      "hex": "002a0000000601030000007e",
+      "expected": {
+        "status": "rejected",
+        "fields": [],
+        "absent_fields": []
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-register-response",
+      "protocol": "modbus",
+      "context": "response",
+      "path": "modbus-register-response.bin",
+      "bytes": 13,
+      "sha256": "ba748a90ae11b34758fb4fe6bf35e46c56a7da39545020251f904725c1113ace",
+      "hex": "002a00000007010304000a0102",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "register_u16",
+            "ordinal": 0,
+            "value": "10"
+          },
+          {
+            "name": "register_u16",
+            "ordinal": 1,
+            "value": "258"
+          }
+        ],
+        "absent_fields": [
+          "address_zero_based"
+        ]
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-bit-response",
+      "protocol": "modbus",
+      "context": "response",
+      "path": "modbus-bit-response.bin",
+      "bytes": 11,
+      "sha256": "8c64ff650187c3c1a2a5c2d1a57dcc71d3218e5a3e3983fed24ebbe4faf7c110",
+      "hex": "002a00000005010102ffff",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "packed_lsb_first",
+            "ordinal": 0,
+            "value": "255"
+          }
+        ],
+        "absent_fields": [
+          "value",
+          "address_zero_based"
+        ]
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-exception",
+      "protocol": "modbus",
+      "context": "response",
+      "path": "modbus-exception.bin",
+      "bytes": 9,
+      "sha256": "a98c9baf0a78de278b02eaa352ca91cf67d50442c3a0f1e5de259c18d15332e3",
+      "hex": "002a00000003018302",
+      "expected": {
+        "status": "decoded_subset",
+        "fields": [
+          {
+            "name": "exception_code",
+            "ordinal": 0,
+            "value": "2"
+          }
+        ],
+        "absent_fields": []
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    },
+    {
+      "id": "modbus-unsupported",
+      "protocol": "modbus",
+      "context": "request",
+      "path": "modbus-unsupported.bin",
+      "bytes": 14,
+      "sha256": "1146b9d3eaf35c814817714b2e2e778481f611c94e04da3db8e6211a5b31112a",
+      "hex": "002a000000080116000100ff0100",
+      "expected": {
+        "status": "unsupported",
+        "fields": [],
+        "absent_fields": []
+      },
+      "basis": "modbus-v1.1b3",
+      "normative_review": "NOT_RUN"
+    }
+  ],
+  "captures": [
+    {
+      "path": "modbus_bits_valid.pcap",
+      "bytes": 467,
+      "sha256": "1e050d1e047964b152dd98880d713f98ea1af4e6b6c297b4e560feca837c0e15"
+    },
+    {
+      "path": "modbus_bits_bad_padding.pcap",
+      "bytes": 467,
+      "sha256": "367fa21d9a44c8bb90689b320ea82eca68d03490ab2e6b06a010574300505d96"
+    },
+    {
+      "path": "dnp3_split_valid.pcap",
+      "bytes": 568,
+      "sha256": "f509528ce46bb901c9fe8354ba06bf4c08a38e2a72679204bf6b687b0f5bb52c"
+    },
+    {
+      "path": "dnp3_split_gap.pcap",
+      "bytes": 487,
+      "sha256": "7a2dcf765c97a37823d96b551fcab455dbd487015ef4412dc21f72d98129581d"
+    },
+    {
+      "path": "dnp3_split_conflict.pcap",
+      "bytes": 568,
+      "sha256": "35e2c8a67aeb11af064c2d3ad659d5ff8a81f9a4400d04900dcf6c930e16544b"
+    }
+  ],
+  "rights": "original synthetic test bytes; MIT project license",
+  "source": "scripts/make_semantic_fixtures.py",
+  "qualified": false
+}

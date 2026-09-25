@@ -1,0 +1,140 @@
+[
+  {
+    "protocol": "netflow9",
+    "variant": "Netflow9",
+    "transport": "udp",
+    "feature": "standard"
+  },
+  {
+    "protocol": "bgp",
+    "variant": "Bgp",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "snmp",
+    "variant": "Snmp",
+    "transport": "udp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "ftp",
+    "variant": "Ftp",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "pop3",
+    "variant": "Pop3",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "imap",
+    "variant": "Imap",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "telnet",
+    "variant": "Telnet",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "tftp",
+    "variant": "Tftp",
+    "transport": "udp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "sip",
+    "variant": "Sip",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "rtp",
+    "variant": "Rtp",
+    "transport": "udp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "pptp",
+    "variant": "Pptp",
+    "transport": "tcp",
+    "feature": "extensions"
+  },
+  {
+    "protocol": "bacnet_ip",
+    "variant": "BacnetIp",
+    "transport": "udp",
+    "feature": "industrial"
+  },
+  {
+    "protocol": "enip_cip",
+    "variant": "Enip",
+    "transport": "tcp",
+    "feature": "industrial"
+  },
+  {
+    "protocol": "mms",
+    "variant": "Mms",
+    "transport": "tcp",
+    "feature": "industrial"
+  },
+  {
+    "protocol": "iec104",
+    "variant": "Iec104",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "s7",
+    "variant": "S7",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "hart_ip",
+    "variant": "HartIp",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "fins_udp",
+    "variant": "FinsUdp",
+    "transport": "udp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "fins_tcp",
+    "variant": "FinsTcp",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "ads",
+    "variant": "Ads",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "opcua_tcp",
+    "variant": "OpcUa",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "melsec_3e",
+    "variant": "Melsec",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  },
+  {
+    "protocol": "c37118",
+    "variant": "Synchrophasor",
+    "transport": "tcp",
+    "feature": "industrial-full"
+  }
+]

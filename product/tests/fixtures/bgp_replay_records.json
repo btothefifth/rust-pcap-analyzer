@@ -1,0 +1,211 @@
+{
+  "declaration": {
+    "schema": "pcap-evidence.bgp.replay-feed.v1",
+    "context": {
+      "schema": "pcap-evidence.bgp.import-context.v1",
+      "source_id": "route-source",
+      "source_schema": "synthetic-route-sequence",
+      "source_version": "1",
+      "clock": {
+        "policy": "source_label",
+        "clock_id": "clock-a",
+        "reported_uncertainty_ns": null,
+        "ordering_established": false
+      },
+      "batch": {
+        "batch_id": "batch-a",
+        "sha256": "5a84385f8445f968260c04d5d5927a7f1b4a21235316486d24d27f80dfbb3c95",
+        "byte_length": "512"
+      },
+      "checkpoint_id": "checkpoint-a",
+      "session": "session-a",
+      "generation": "7",
+      "direction": null,
+      "peer": "peer-a",
+      "local": "local-a",
+      "provenance": [
+        {
+          "start": "0",
+          "end": "512",
+          "sha256": null
+        }
+      ],
+      "wire_verified": false,
+      "source_authenticated": false
+    }
+  },
+  "records": [
+    {
+      "ordinal": "0",
+      "coverage": "caller_declared_complete",
+      "observation": {
+        "schema": "pcap-evidence.bgp.route-evidence.v1",
+        "source_kind": "imported",
+        "source_id": "route-source",
+        "record_id": "a",
+        "observed_at_ns": "100",
+        "session": "session-a",
+        "direction": 0,
+        "peer": "peer-a",
+        "local": "local-a",
+        "generation": "7",
+        "import_context": {
+          "schema": "pcap-evidence.bgp.import-context.v1",
+          "source_id": "route-source",
+          "source_schema": "synthetic-route-sequence",
+          "source_version": "1",
+          "clock": {
+            "policy": "source_label",
+            "clock_id": "clock-a",
+            "reported_uncertainty_ns": null,
+            "ordering_established": false
+          },
+          "batch": {
+            "batch_id": "batch-a",
+            "sha256": "5a84385f8445f968260c04d5d5927a7f1b4a21235316486d24d27f80dfbb3c95",
+            "byte_length": "512"
+          },
+          "checkpoint_id": "checkpoint-a",
+          "session": "session-a",
+          "generation": "7",
+          "direction": 0,
+          "peer": "peer-a",
+          "local": "local-a",
+          "provenance": [
+            {
+              "start": "10",
+              "end": "20",
+              "sha256": "70ce871f8a3d3fb449bc3c3ace6547cef02dfc74ffe48d912532a724bfdbe5b9"
+            }
+          ],
+          "wire_verified": false,
+          "source_authenticated": false
+        },
+        "import_boundary": null,
+        "message_type": 0,
+        "routes": [
+          {
+            "action": "announce",
+            "prefix": {
+              "afi": 1,
+              "safi": 1,
+              "length": 24,
+              "address": "203.0.113.0"
+            },
+            "field_start": 0,
+            "field_end": 0,
+            "attributes": {
+              "origin": null,
+              "as_path": [],
+              "next_hop": null,
+              "med": 5,
+              "local_preference": null,
+              "aggregator": null,
+              "communities": [],
+              "originator_id": null,
+              "cluster_list": [],
+              "mp_reach": [],
+              "mp_unreach": []
+            },
+            "attribute_ranges": []
+          }
+        ],
+        "message_detail": null,
+        "issues": [
+          "imported_observation_not_wire_verified",
+          "route_candidates_are_not_endpoint_state",
+          "cross_source_correlation_requires_explicit_join"
+        ],
+        "evidence": null,
+        "endpoint_state_established": false,
+        "causality_established": false
+      }
+    },
+    {
+      "ordinal": "1",
+      "coverage": "caller_declared_complete",
+      "observation": {
+        "schema": "pcap-evidence.bgp.route-evidence.v1",
+        "source_kind": "imported",
+        "source_id": "route-source",
+        "record_id": "b",
+        "observed_at_ns": "100",
+        "session": "session-a",
+        "direction": 0,
+        "peer": "peer-a",
+        "local": "local-a",
+        "generation": "7",
+        "import_context": {
+          "schema": "pcap-evidence.bgp.import-context.v1",
+          "source_id": "route-source",
+          "source_schema": "synthetic-route-sequence",
+          "source_version": "1",
+          "clock": {
+            "policy": "source_label",
+            "clock_id": "clock-a",
+            "reported_uncertainty_ns": null,
+            "ordering_established": false
+          },
+          "batch": {
+            "batch_id": "batch-a",
+            "sha256": "5a84385f8445f968260c04d5d5927a7f1b4a21235316486d24d27f80dfbb3c95",
+            "byte_length": "512"
+          },
+          "checkpoint_id": "checkpoint-a",
+          "session": "session-a",
+          "generation": "7",
+          "direction": 0,
+          "peer": "peer-a",
+          "local": "local-a",
+          "provenance": [
+            {
+              "start": "10",
+              "end": "20",
+              "sha256": "70ce871f8a3d3fb449bc3c3ace6547cef02dfc74ffe48d912532a724bfdbe5b9"
+            }
+          ],
+          "wire_verified": false,
+          "source_authenticated": false
+        },
+        "import_boundary": null,
+        "message_type": 0,
+        "routes": [
+          {
+            "action": "announce",
+            "prefix": {
+              "afi": 1,
+              "safi": 1,
+              "length": 24,
+              "address": "203.0.113.0"
+            },
+            "field_start": 0,
+            "field_end": 0,
+            "attributes": {
+              "origin": null,
+              "as_path": [],
+              "next_hop": null,
+              "med": 5,
+              "local_preference": null,
+              "aggregator": null,
+              "communities": [],
+              "originator_id": null,
+              "cluster_list": [],
+              "mp_reach": [],
+              "mp_unreach": []
+            },
+            "attribute_ranges": []
+          }
+        ],
+        "message_detail": null,
+        "issues": [
+          "imported_observation_not_wire_verified",
+          "route_candidates_are_not_endpoint_state",
+          "cross_source_correlation_requires_explicit_join"
+        ],
+        "evidence": null,
+        "endpoint_state_established": false,
+        "causality_established": false
+      }
+    }
+  ]
+}

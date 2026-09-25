@@ -1,0 +1,9 @@
+# Address membership only, not next-hop traversal or reachability.
+id	prefix	endpoint	contains
+ipv4_member	203.0.113.0/24	203.0.113.9	true
+ipv4_neighbor	203.0.113.0/24	203.0.114.9	false
+ipv4_edge	203.0.113.0/24	203.0.113.255	true
+ipv4_default	0.0.0.0/0	192.0.2.2	true
+ipv6_member	2001:db8::/32	2001:0db8:ffff::1	true
+ipv6_neighbor	2001:db8::/32	2001:db9::1	false
+family_mismatch	203.0.113.0/24	::ffff:203.0.113.9	false

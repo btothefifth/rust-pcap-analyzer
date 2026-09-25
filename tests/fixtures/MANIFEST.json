@@ -1,0 +1,97 @@
+{
+  "files": {
+    "bad_block_trailer.pcapng": {
+      "bytes": 664,
+      "sha256": "7fed06adce941bcb3ec4167493c49b753dd518e47dd59e8bd88d113afaac5f3c"
+    },
+    "binary_inexact.pcapng": {
+      "bytes": 160,
+      "sha256": "48737584a951957648d3526676f7436e7643d571507b04242a603b9dc369be98"
+    },
+    "conflicting_tcp.pcap": {
+      "bytes": 453,
+      "sha256": "d245721a7580ec17fc7514dd0c97d05261d3f65f03333d9dea33883381ec3ccc"
+    },
+    "dnp3_application_wrap.bin": {
+      "bytes": 36,
+      "sha256": "c962f50c025f9952576d51a79f6b5204fb82ebe0ebde16d67f86b39cac79b5ba"
+    },
+    "dnp3_bad_crc.pcap": {
+      "bytes": 794,
+      "sha256": "9d541f29eb2f617e2886580db4c1b7093666f6d0f0c012eaafb0a43ebcc251dc"
+    },
+    "dnp3_confirmations.hex": {
+      "bytes": 1776,
+      "sha256": "5f7d11a4f8809c63dd289f8525a034c890ac600f3c3da8426b555cd7f79402d8"
+    },
+    "dnp3_confirmations.json": {
+      "bytes": 11847,
+      "sha256": "3a6a9103dab63331ccdbef05e552659f1f2358a80454d513d34a825e07a05f00"
+    },
+    "dnp3_confirmations_capture.hex": {
+      "bytes": 1315,
+      "sha256": "01b361e3530b12ae8bfcfee46ced1f23c0d41963ae504a78edd0802bfde6dac3"
+    },
+    "dnp3_interrupted.bin": {
+      "bytes": 51,
+      "sha256": "b9f46c5aa24263ed4244aa8be535c8788c3cbbdb2fb1d3c9e7a0ed4a7d7a577b"
+    },
+    "dnp3_tcp.pcap": {
+      "bytes": 794,
+      "sha256": "d82dc576979930db991342340b4a13dd758dffe7a641f7f2bfa196652a420485"
+    },
+    "dnp3_transport_wrap.bin": {
+      "bytes": 31,
+      "sha256": "33931db6af3e17254d5f0a283145367a5c97764806a888f5fb584c4eb0c74ccc"
+    },
+    "ethernet_udp_be_ns.pcap": {
+      "bytes": 90,
+      "sha256": "07caee12f3f24f557e00f023c53dcbf0d472f2feee9a8b5c8a462a943edb65ef"
+    },
+    "ethernet_udp_be_us.pcap": {
+      "bytes": 90,
+      "sha256": "6610cd4e11d6fcce7648abf10f4c1761093ab209a39176aa33cec259481b3b97"
+    },
+    "ethernet_udp_le_ns.pcap": {
+      "bytes": 90,
+      "sha256": "9628b778819891680ca1e97ca86db727fa37b518a8fb8e812dc4f1aa06b16594"
+    },
+    "ethernet_udp_le_us.pcap": {
+      "bytes": 90,
+      "sha256": "c1a4ef461ca2dc5862425d76f48c08a8f34ab14217f12bbf2e95a2e659f54dd7"
+    },
+    "ipv4_fragments.pcap": {
+      "bytes": 156,
+      "sha256": "ac831a426e8b9c23627e2b625d557ed9722176f5d47e67a7a6244518b0d6f2eb"
+    },
+    "mixed_sections.pcapng": {
+      "bytes": 664,
+      "sha256": "6fa7f7950a7cd019bc2ce5b890f23919c94bb911233eb3f96806fc31d35dfc65"
+    },
+    "modbus_messages.bin": {
+      "bytes": 24,
+      "sha256": "a1aa8f3039d17a1b576f8638c8e30a9c5f7d01a15615e7b308bca08bf4fef2c0"
+    },
+    "modbus_tcp.pcap": {
+      "bytes": 677,
+      "sha256": "8788a36a0a35bf081b2d3aa01aee07fadbd44b98e5dbeeb47dd35bd5a3deff40"
+    },
+    "pcap_link_flags.pcap": {
+      "bytes": 90,
+      "sha256": "d1f33cbc4966a993ca6f23bbca3e86f526ae8908153644cf1dfa0f0e18130fce"
+    },
+    "timestamp_absent.pcapng": {
+      "bytes": 140,
+      "sha256": "c241d6ab6216b1894cc156270b07815edb8660d46b78b1e4520ede4131fe062e"
+    },
+    "truncated_record.pcap": {
+      "bytes": 89,
+      "sha256": "5b3b4823fa4f3a02303819ec13d2851c107669724a740e44557d0cc57fcff31e"
+    },
+    "unknown_link.pcap": {
+      "bytes": 43,
+      "sha256": "23dd98f691836a652e07d30af97d4d93317b33c650a07eee6652b292005134b9"
+    }
+  },
+  "schema": "pcap-evidence.synthetic-fixtures.v1"
+}

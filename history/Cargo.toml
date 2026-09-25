@@ -1,0 +1,25 @@
+[package]
+name = "pcap-evidence-history"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[dependencies]
+pcap-evidence = { path = ".." }
+pcap-evidence-stream = { path = "../streaming" }
+
+[workspace]
+exclude = ["fuzz"]
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[[bin]]
+name = "pcap-history"
+path = "src/main.rs"

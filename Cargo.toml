@@ -1,0 +1,29 @@
+[package]
+name = "pcap-evidence"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Offline PCAP/PCAPNG evidence parsing, bounded reconstruction, and auditable correlation"
+license = "MIT"
+publish = false
+
+[lib]
+name = "pcap_evidence"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pcap-evidence"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[workspace]
+members = ["."]
+exclude = ["fuzz", "streaming", "tools/pcap-parser-oracle"]

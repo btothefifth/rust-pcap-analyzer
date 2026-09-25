@@ -1,0 +1,38 @@
+name: hardening-candidate-manual
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-hardening:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install baseline toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal --component clippy --component rustfmt
+      - name: Validate formatting and native tests
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+          cargo test --locked --offline --all-targets
+          cargo test --locked --offline --release --all-targets
+          cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Build CLI
+        run: cargo build --locked --offline
+      - name: Independent generated-corpus CLI check
+        shell: bash
+        run: |
+          BINARY=target/debug/pcap-evidence
+          if [ "${RUNNER_OS}" = Windows ]; then BINARY="${BINARY}.exe"; fi
+          python scripts/check_hardening_cli.py --binary "$BINARY"
+      - name: Independent upstream validation
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python scripts/validate.py

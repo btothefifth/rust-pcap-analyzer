@@ -1,0 +1,4 @@
+OPTIONS sip:example.test SIP/2.0
+Via: SIP/2.0/TCP example.test
+Content-Length: 0
+
