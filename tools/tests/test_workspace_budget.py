@@ -44,7 +44,7 @@ class WorkspaceBudgetTests(unittest.TestCase):
         def launch(command,**kwargs):
             options=dict(kwargs);options.update(stdin=subprocess.PIPE,stdout=subprocess.PIPE)
             child=real_popen([sys.executable,'-c',
-                'import sys; print("READY", flush=True); sys.stdin.buffer.read(1)'],**options)
+                'import sys; sys.stdout.buffer.write(b"READY\\n"); sys.stdout.buffer.flush(); sys.stdin.buffer.read(1)'],**options)
             children.append(child)
             return child
         with patch('tools.desktop.server.subprocess.Popen',side_effect=launch):

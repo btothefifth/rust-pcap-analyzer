@@ -78,7 +78,7 @@ fn assert_valid_generation_reaches_history_open(output: Output) {
 #[test]
 fn generation_rejects_non_ascii_64_byte_input_without_unwinding() {
     let generation = format!("aé{}", "a".repeat(61));
-    assert_eq!(generation.as_bytes().len(), 64);
+    assert_eq!(generation.len(), 64);
     assert_eq!(generation.chars().count(), 63);
     assert_rejected_generation(invoke(&generation));
 }

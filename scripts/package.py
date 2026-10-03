@@ -37,7 +37,7 @@ CORE_SCRIPTS = {'__init__.py', 'package.py', 'validate.py', 'static_check.py',
                 'differential_tshark.py'}
 # Newly authored files must be explicit until the integrator indexes them.
 NEW_SOURCES = ('scripts/validation_frontier.py', 'scripts/test_validation_frontier.py',
-               'scripts/test_package_contract.py')
+               'scripts/test_package_contract.py', 'scripts/requirements-qualification.txt')
 MAX_SOURCE_BYTES = 20_000_000
 
 
@@ -108,6 +108,7 @@ def check_closure(root, members):
     This checks source membership, not Rust syntax/types or Python execution.
     External packages remain their owning native/portable gate's responsibility.
     """
+    root = Path(root).resolve()
     names = {name for _, name in members}
     def require_existing(paths, owner):
         for path in paths:
@@ -129,6 +130,10 @@ def check_closure(root, members):
                 if isinstance(node, ast.Import):modules = [(alias.name, 0) for alias in node.names]
                 elif isinstance(node, ast.ImportFrom) and node.module:modules = [(node.module, node.level)]
                 for module, level in modules:
+                    if module.split('.')[0] == 'jsonschema':
+                        requirement = 'scripts/requirements-qualification.txt'
+                        if requirement not in names:
+                            raise ValueError('package dependency missing: ' + name + ' -> ' + requirement)
                     base = path.parent
                     if level:
                         for _ in range(level-1):base = base.parent
@@ -157,6 +162,11 @@ def build(output, profile='expanded-product', root=None, max_source_bytes=MAX_SO
                 'validation_receipts': 'EXCLUDED_GENERATED_OR_HISTORICAL',
                 'entrypoints': ['scripts/validate.py', 'Cargo.toml', 'streaming/Cargo.toml']}
     if profile == 'expanded-product':
+        requirement = 'scripts/requirements-qualification.txt'
+        if requirement in hashes:
+            manifest['qualification_dependencies'] = {
+                'requirements': requirement, 'provisioning': 'EXPLICIT_BEFORE_OFFLINE_GATES',
+                'application_runtime_dependency': False}
         manifest['entrypoints'] += ['scripts/validate_product.py', 'scripts/validate_followup.py',
                                    'product/Cargo.toml', 'product/ffi/Cargo.toml',
                                    'history/Cargo.toml', 'history-app/Cargo.toml']

@@ -265,6 +265,21 @@ python scripts/validate.py
 The validation script does not install missing tools or silently skip native proof.
 An absent compiler returns **2 / BLOCKED**. A real failing check returns **1 / FAIL**.
 
+The expanded product qualification drivers also execute an independent JSON
+Schema oracle. Provision its pinned test-only Python dependencies explicitly
+before selecting these offline gates; the drivers perform no installation:
+
+```sh
+python -m pip install --only-binary=:all: -r scripts/requirements-qualification.txt
+python scripts/validate_product.py --portable-only --output /tmp/pcap-product-portable
+```
+
+The same provisioned environment is required for `validate_followup.py` and the
+expanded source package's extraction witnesses. The core source profile omits
+these product selectors and their test-only dependency declaration. The Python
+oracle supports structural schema tests; it does not establish normative
+protocol qualification or add dependencies to the application runtime.
+
 For the optional Windows native C-ABI gate, install the Visual Studio 2022 Build
 Tools C++ workload and Windows SDK, then run from an x64 MSVC developer shell:
 

@@ -62,8 +62,8 @@ consumer. A concrete counterexample reopens the owning seam only.
 | Policy/association | final occurrence/stage/disposition/budget source accepted; final ten-case receipt governs execution | Strict persisted profile, filters, verified typed stores and CLI; depends on final imported/BMP hooks. |
 | BMP | replacement source accepted; twenty native cases passed; final receipt governs execution | New adapter/store/shim; depends on shared decoder and accepted normalized identities; CLI integration owned by policy lane. |
 | Source review | all final frozen lane generations accepted independently | Separate Sol XHigh reviewers, frozen lane generations. |
-| Integrated coherence | pending | Actual assembled diff/callers, cross-lane contracts, evidence and finding dispositions; distinct from integrator checks. |
-| Publication | pending | Root commits/pushes to PR #1 after required checks; exact-head hosted evidence recorded separately. |
+| Integrated coherence | assembled source accepted; final receipt governs later narrow amendments | Independent review of assembled diff/callers, cross-lane contracts, evidence and finding dispositions; separate narrow review of final CI repairs. |
+| Publication | implementation checkpoint published; final receipt governs validation | Implementation commit `a3764315fb2aac0df127a12df8fcb4b684bf2559` is on PR #1. Later validation and CI repairs are recorded by the final receipt; no merge or release. |
 
 No concurrent writers share a file without an explicit accessor-only grant or
 handover. Root classifies review findings and owns acceptance/publication.
@@ -75,8 +75,8 @@ stores and original captures are never silently deleted or rewritten.
 
 ## Test evidence and remaining qualification
 
-This ledger is a pre-publication checkpoint. The authoritative final same-generation
-selector and resource receipt is
+The implementation checkpoint is published for review. The authoritative final
+same-generation selector, narrow repair and resource receipt is
 [`evidence/objectives-1-4-validation.json`](../../evidence/objectives-1-4-validation.json).
 Its source inventory binds the code and documentation; generated evidence is
 excluded from that source inventory to avoid a self-hash cycle. A `PENDING`

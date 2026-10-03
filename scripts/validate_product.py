@@ -29,6 +29,26 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def failure_diagnostics(rows, output):
+    """Finite gate names/reasons and bounded failed-log tails for CI terminals."""
+    issues = []
+    remaining = 8000
+    for row in rows:
+        if row['status'] not in {'FAIL', 'BLOCKED'}:continue
+        issue = {key: row[key] for key in ('name', 'status', 'reason', 'returncode', 'log') if key in row}
+        if row['status']=='FAIL' and row.get('log') and remaining:
+            log = output/row['log']
+            if log.is_file():
+                with log.open('rb') as handle:
+                    count = min(2000, remaining)
+                    handle.seek(max(0, log.stat().st_size-count))
+                    tail = handle.read(count)
+                remaining -= len(tail)
+                issue['log_tail'] = tail.decode('utf-8', errors='replace')
+        issues.append(issue)
+    return issues
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
@@ -123,7 +143,8 @@ def main(argv=None):
              'full_history_automatic_tcp':'NOT_IMPLEMENTED'}
     summary['status']='FAIL'if any(r['status']=='FAIL'for r in rows)else 'BLOCKED'if any(r['status']=='BLOCKED'for r in rows)else 'PASS'
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n',encoding='utf-8')
-    print(json.dumps({'status':summary['status'],'scope':summary['scope'],'receipt':str(out/'summary.json')},indent=2))
+    print(json.dumps({'status':summary['status'],'scope':summary['scope'],'receipt':str(out/'summary.json'),
+                      'failed_gates':failure_diagnostics(rows,out)},indent=2))
     return {'PASS':0,'FAIL':1,'BLOCKED':2}[summary['status']]
 
 

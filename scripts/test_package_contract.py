@@ -48,10 +48,12 @@ class PackageContract(unittest.TestCase):
                     if path.is_file():self.assertIn(path.relative_to(ROOT).as_posix(), names)
             if profile == 'core':
                 self.assertNotIn('scripts/validate_product.py', names)
+                self.assertNotIn('scripts/requirements-qualification.txt', names)
                 self.assertNotIn('.github/workflows/streaming-evidence.yml', names)
             else:
                 for path in ('scripts/validate_product.py', 'scripts/validate_followup.py',
-                             'product/Cargo.toml', 'history-app/Cargo.toml', 'desktop/web/model.test.mjs'):
+                             'scripts/requirements-qualification.txt', 'product/Cargo.toml',
+                             'history-app/Cargo.toml', 'desktop/web/model.test.mjs'):
                     self.assertIn(path, names)
 
     def test_small_extractions_match_fresh_inventory_and_execute_portable_entrypoints(self):
@@ -60,7 +62,7 @@ class PackageContract(unittest.TestCase):
         env = dict(__import__('os').environ, PYTHONDONTWRITEBYTECODE='1')
         for profile in active_profiles():
             with self.subTest(profile=profile), tempfile.TemporaryDirectory(prefix='pcap-package-contract-') as temporary:
-                directory = Path(temporary)
+                directory = Path(temporary).resolve()
                 archive = directory / 'source.zip'
                 result = package.build(archive, profile)
                 self.assertLess(result['bytes'], 5_000_000)
@@ -71,6 +73,12 @@ class PackageContract(unittest.TestCase):
                 self.assertEqual(actual, set(manifest['files']) | {'evidence/source-manifest.json'})
                 self.assertEqual(manifest['profile'], profile)
                 self.assertFalse(manifest['native_build_claim'])
+                if profile == 'expanded-product':
+                    self.assertEqual(manifest['qualification_dependencies']['requirements'],
+                                     'scripts/requirements-qualification.txt')
+                    self.assertEqual(manifest['qualification_dependencies']['provisioning'],
+                                     'EXPLICIT_BEFORE_OFFLINE_GATES')
+                    self.assertFalse(manifest['qualification_dependencies']['application_runtime_dependency'])
                 for name, digest in manifest['files'].items():
                     self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), digest)
                 for script in ('scripts/static_check.py', 'scripts/make_fixtures.py', 'scripts/reference_verify.py', 'scripts/test_oracle.py'):
@@ -109,7 +117,7 @@ class PackageContract(unittest.TestCase):
 
     def test_local_dependency_omission_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix='pcap-package-closure-') as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root/'src').mkdir()
             source = root/'src/lib.rs'
             source.write_text('pub mod required;')
@@ -122,11 +130,23 @@ class PackageContract(unittest.TestCase):
             (root/'helper.py').write_text('value = 1')
             with self.assertRaisesRegex(ValueError, 'dependency missing'):
                 package.check_closure(root, [(source, 'caller.py')])
+            # A logical root alias must preserve the same dependency boundary.
+            # macOS TemporaryDirectory commonly uses /var -> /private/var.
+            alias = root/'logical-root'
+            try:alias.symlink_to(root, target_is_directory=True)
+            except OSError:
+                if __import__('os').name != 'nt':raise
+            else:
+                with self.assertRaisesRegex(ValueError, 'dependency missing'):
+                    package.check_closure(alias, [(alias/'caller.py', 'caller.py')])
+            source.write_text('import jsonschema')
+            with self.assertRaisesRegex(ValueError, 'requirements-qualification'):
+                package.check_closure(root, [(source, 'caller.py')])
 
     def test_competing_creators_are_preserved_at_exclusive_acquisition(self):
         from unittest import mock
         with tempfile.TemporaryDirectory(prefix='pcap-package-owner-') as temporary:
-            directory = Path(temporary)
+            directory = Path(temporary).resolve()
             source = directory/'source'
             source.mkdir()
             data = source/'README.md'
@@ -166,7 +186,7 @@ class PackageContract(unittest.TestCase):
         import os
         for replaced in ('archive', 'checksum'):
             with self.subTest(replaced=replaced), tempfile.TemporaryDirectory(prefix='pcap-package-aba-') as temporary:
-                directory = Path(temporary)
+                directory = Path(temporary).resolve()
                 source = directory/'source'
                 source.mkdir()
                 data = source/'README.md'
@@ -203,7 +223,7 @@ class PackageContract(unittest.TestCase):
         for cut in ('archive', 'checksum'):
             for exception_type in (OSError, KeyboardInterrupt):
                 with self.subTest(cut=cut,exception=exception_type.__name__), tempfile.TemporaryDirectory(prefix='pcap-package-creation-') as temporary:
-                    directory = Path(temporary)
+                    directory = Path(temporary).resolve()
                     source = directory/'source'
                     source.mkdir()
                     data = source/'README.md'

@@ -57,6 +57,7 @@ class ValidationFrontier(unittest.TestCase):
         self.assertIn('ubuntu-22.04', text)
         self.assertIn('python scripts/validate_product.py', text)
         self.assertIn('CARGO_TARGET_DIR:', text)
+        self.assertIn('python -m pip install --only-binary=:all: -r scripts/requirements-qualification.txt',text)
 
     def test_source_identity_preserves_untracked_sources_and_prunes_tooling(self):
         import tempfile
@@ -97,12 +98,33 @@ class ValidationFrontier(unittest.TestCase):
                 return subprocess.CompletedProcess(command,1 if 'scripts/test_package_contract.py' in command else 0)
             with tempfile.TemporaryDirectory(prefix='pcap-red-preflight-') as temporary:
                 output = Path(temporary)/'receipt'
-                with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(driver.platform,'platform',return_value='test-platform'), mock.patch.object(driver.subprocess,'run',execute), mock.patch.object(driver.shutil,'which',side_effect=lambda name:'/unexecuted/'+name):
+                terminal = io.StringIO()
+                with contextlib.redirect_stdout(terminal), mock.patch.object(driver.platform,'platform',return_value='test-platform'), mock.patch.object(driver.subprocess,'run',execute), mock.patch.object(driver.shutil,'which',side_effect=lambda name:'/unexecuted/'+name):
                     result = driver.main(['--output',str(output)]) if driver is validate_product else driver.run(output)
                 self.assertEqual(result,1)
                 self.assertTrue(any('scripts/test_package_contract.py' in command for command in observed))
                 self.assertFalse(any(Path(command[0]).name in {'cargo','cc','cl'} for command in observed))
                 self.assertFalse(any('scripts/validate_semantic_product.py' in command or 'scripts/check_linked_abi.py' in command for command in observed))
+                if driver is validate_product:
+                    failures = __import__('json').loads(terminal.getvalue())['failed_gates']
+                    gate = next(row for row in failures if row['name']=='package-contract')
+                    self.assertEqual((gate['status'],gate['returncode'],gate['log']),('FAIL',1,'package-contract.log'))
+
+    def test_terminal_failure_tails_are_bounded_and_exclude_passing_logs(self):
+        import tempfile
+        import validate_product
+        with tempfile.TemporaryDirectory(prefix='pcap-failure-tails-') as temporary:
+            root = Path(temporary)
+            (root/'failed.log').write_bytes(b'x'*30_000+b'final failure')
+            (root/'pass.log').write_bytes(b'passing output')
+            rows = [{'name':str(number),'status':'FAIL','log':'failed.log'} for number in range(7)]
+            rows += [{'name':'passing','status':'PASS','log':'pass.log'},
+                     {'name':'missing','status':'BLOCKED','reason':'runtime unavailable'}]
+            issues = validate_product.failure_diagnostics(rows,root)
+            self.assertEqual(len(issues),8)
+            self.assertLessEqual(sum(len(row.get('log_tail','').encode()) for row in issues),8000)
+            self.assertTrue(issues[0]['log_tail'].endswith('final failure'))
+            self.assertEqual(issues[-1]['reason'],'runtime unavailable')
 
     def test_target_resolution_and_mutation_copy_preserve_runtime_origin(self):
         import os
@@ -137,7 +159,8 @@ class ValidationFrontier(unittest.TestCase):
         import check_cli
         with tempfile.TemporaryDirectory(prefix='pcap-cli-origin-') as temporary:
             root = Path(temporary)/'repo'
-            stale = root/'target/debug/pcap-evidence'
+            filename = 'pcap-evidence.exe' if os.name=='nt' else 'pcap-evidence'
+            stale = root/'target/debug'/filename
             stale.parent.mkdir(parents=True)
             stale.write_bytes(b'stale must never execute')
             configured = Path(temporary)/'configured'
@@ -145,8 +168,9 @@ class ValidationFrontier(unittest.TestCase):
             with mock.patch.dict(os.environ,{'CARGO_TARGET_DIR':str(configured)}), mock.patch.object(check_cli,'__file__',str(root/'scripts/check_cli.py')), mock.patch.object(sys,'argv',['check_cli.py']), mock.patch.object(check_cli,'check') as native, contextlib.redirect_stdout(output):
                 self.assertEqual(check_cli.main(),2)
             native.assert_not_called()
-            self.assertIn(str(configured/'debug/pcap-evidence'),output.getvalue())
-            self.assertIn('BLOCKED',output.getvalue())
+            report = __import__('json').loads(output.getvalue())
+            self.assertEqual(report['binary'],str((configured/'debug'/filename).resolve()))
+            self.assertEqual(report['status'],'BLOCKED')
 
     def test_manifest_paths_close_over_local_dependencies(self):
         manifests = {manifest for _, manifest in frontier.WORKSPACES}
