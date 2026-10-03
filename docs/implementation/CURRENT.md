@@ -1,5 +1,14 @@
 # Current implementation pointer
 
+## Active objective work
+
+The repository-owner-authorized objectives 1–4 implementation and exact
+evidence record are tracked in the [objective ledger](OBJECTIVES_1_4.md). The
+ledger records source ownership, implementation progress, receipts, and
+remaining qualification gaps; it does not change the acceptance conditions in
+the [BGP completion contract](../product/BGP_COMPLETION.md). Until accepted
+receipts are recorded there, in-progress work does not close a gate.
+
 ## Repository review
 
 The [2026-10-02 repository review](REPOSITORY_REVIEW_2026-10-02.md) inventories
@@ -16,23 +25,40 @@ normative authority and other analyzers as disagreement probes only. The design
 docs remain authoritative for product intent. This pointer is the concise
 current-state view; older slice receipts are historical unless cited below.
 
-## Current local slice
+## Current implementation candidate
 
-The latest audit-fix slice adds a versioned, source-neutral BGP semantic identity
-for the supported captured and TABLE_DUMP_V2 route subset; validates supplied
-complete identities against the normalized route envelope and retained captured
-attribute occurrences; preserves unsupported MRT RIB entries as opaque-only
-evidence; and charges their processing/output against bounded budgets before
-materialization. Equal fingerprints do not merge sources or establish router
-acceptance, installation, or reachability. The controlling details and known
-cross-check gaps are in [semantic identity](../product/BGP_SEMANTIC_IDENTITY.md).
+The current O14-1 candidate extends imported BGP4MP replay into the canonical
+source-scoped Adj-RIB-In reducer, preserves malformed complete embedded records
+as rejected evidence, and advances only the matching peer partition at reset
+boundaries. A generation boundary retains history and does not invent
+per-prefix withdrawal evidence. Captured, MRT, and BMP route producers now use
+the versioned source-neutral semantic identity for its supported profile;
+persisted consumers provide bounded replay, state, query, policy, export, and
+cross-source association paths for captured, MRT, and BMP stores. These remain
+offline candidate-evidence paths: equal identities do not merge partitions or
+establish endpoint negotiation, source authenticity, installation, or
+reachability. The owning contracts are [MRT ingestion](../product/BGP_MRT.md),
+[MRT source storage](../product/BGP_MRT_STORE.md), [BMP ingestion](../product/BGP_BMP.md),
+[persisted consumers](../product/BGP_PERSISTED.md), and
+[semantic identity](../product/BGP_SEMANTIC_IDENTITY.md).
 
-The slice also retains the earlier BGP4MP source-ordered candidate replay and
-DNP3 source-span/workflow hardening. It does not complete imported BGP4MP
-Adj-RIB-In semantics, full DNP3 object/device semantics, or the declared BGP
-profile.
+The same candidate includes work across the repository-owner-selected storage,
+bounded-listing, validation/package, CLI parsing, and operator-truth objectives.
+The [objectives 1–4 ledger](OBJECTIVES_1_4.md) records those source seams,
+component receipts, and remaining gates. Implementation scope and validation
+outcome are separate; use the receipt below for the exact assembled generation.
 
-## Fresh local validation
+## Current validation status
+
+The authoritative assembled-source selector and resource result is the
+[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json).
+It binds its outcome to the recorded source inventory; component observations
+and finite synthetic evidence are not a substitute for that same-generation
+result. Open normative, real-corpus, sustained-fuzz, scale/RSS, security, and
+exact-head platform gates remain unqualified unless their own receipts say
+otherwise. The historical results below apply only to their stated revisions.
+
+## Historical validation receipts (not current candidate validation)
 
 Windows-only evidence, collected 2026-09-25 with Rust 1.85.1:
 
@@ -77,22 +103,18 @@ is not a production-readiness claim.
 
 ## Remaining work and priority
 
-1. Complete imported BGP4MP session state: apply announcements/withdrawals to
-   imported Adj-RIB-In, derive reset/teardown behavior, and retain malformed
-   records through archive/replay with exact source ranges.
-2. Close semantic identity gaps before claiming full cross-source parity:
-   define and test source-bound AS4_PATH/AS4_AGGREGATOR identity; reconcile every
-   supported attribute/NLRI row against the matrix. Incomplete routes must stay
-   ambiguous rather than acquire a fingerprint.
-3. Connect persisted external/captured evidence to common query, policy, and
-   association paths while keeping source, clock, checkpoint, and trust
-   partitions separate; then implement the bounded BMP adapter.
-4. Add independent RFC/IANA vectors, lawful real-capture/collector disagreement
-   cases, minimized regressions, and sustained stateful fuzz campaigns.
-5. Require fresh exact-commit Windows/Linux CI (and macOS where claimed),
-   measured scale/RSS/performance evidence, and security/normative review before
-   raising qualification claims.
-6. Continue the separate DNP3 non-secure profile toward its documented
+1. Close the assembled-source O14-1 test and integration gates with the exact
+   source inventory and outcomes in the [authoritative receipt](../../evidence/objectives-1-4-validation.json).
+   A pending or partial receipt does not establish a final validation pass.
+2. Complete independent RFC/IANA review and broader executable coverage for
+   every declared BGP profile row. Registration and typed parsing do not by
+   themselves establish full semantic support.
+3. Retain sustained stateful fuzzing and lawful capture/collector disagreement
+   evidence, adjudicated from original bytes and primary specifications.
+4. Measure representative scale, memory, and throughput; obtain fresh exact-head
+   Windows/Linux CI (and macOS where claimed), plus security review, before
+   raising the corresponding qualification claims.
+5. Continue the separate DNP3 non-secure profile toward its documented
    completion criteria; secure authentication, device truth, and unsupported
    vendor semantics remain outside current proof.
 

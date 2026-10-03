@@ -90,6 +90,22 @@ fn decode(bytes: &[u8], direction: Option<u8>, frame: u64, state: &mut SessionSt
     )
     .unwrap()
 }
+fn two_octet_context() -> SessionState {
+    let mut state = SessionState::default();
+    for direction in 0..2u8 {
+        let mut body = vec![4];
+        body.extend((65000 + u16::from(direction)).to_be_bytes());
+        body.extend(90u16.to_be_bytes());
+        body.extend([192, 0, 2, 1 + direction, 0]);
+        decode(
+            &message(1, &body),
+            Some(direction),
+            900 + u64::from(direction),
+            &mut state,
+        );
+    }
+    state
+}
 fn get<'a>(value: &'a Json, key: &str) -> &'a Json {
     let Json::Object(fields) = value else {
         panic!("expected object")
@@ -307,7 +323,7 @@ fn duplicate_origin_and_wrong_flags_remain_individual_occurrences() {
     attrs.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
     attrs.extend(attribute(0x40, 3, &[192, 0, 2, 1]));
     let raw = update(&attrs, &[24, 203, 0, 113]);
-    let value = decode(&raw, Some(0), 1, &mut SessionState::default());
+    let value = decode(&raw, Some(0), 1, &mut two_octet_context());
     let items = ranges(&value);
     assert_eq!(items.len(), 5);
     assert_eq!(get(&items[0], "start"), &Json::from(23usize));
@@ -347,7 +363,7 @@ fn duplicate_origin_and_wrong_flags_remain_individual_occurrences() {
         &update(&baseline_attributes, &[24, 203, 0, 113]),
         Some(0),
         1,
-        &mut SessionState::default(),
+        &mut two_octet_context(),
     );
     let baseline_route = &array(get(&baseline, "routes"))[0];
     assert_eq!(
@@ -476,9 +492,9 @@ fn old_new_as4_suffix_and_aggregator_are_reconstructed_from_raw_occurrences() {
     let state_route = &state_observation.routes()[0];
     assert_eq!(
         get(state_route.semantic_identity(), "completeness"),
-        &Json::from("incomplete")
+        &Json::from("complete")
     );
-    assert!(state_route.ambiguous_attributes());
+    assert!(!state_route.ambiguous_attributes());
 }
 
 #[test]

@@ -1089,6 +1089,31 @@ fn policy_complete_trace_exact_limit_and_one_below() {
     let canonical = reference.encode_canonical(&Limits::default()).unwrap();
     let size = canonical.len();
     assert_eq!(reference.encoded_len(size).unwrap(), size);
+    // The additive typed carrier must retain the canonical trace byte-for-byte.
+    assert_eq!(reference.to_json().encode_bounded(size).unwrap(), canonical);
+    // Parse the actual canonical bytes with the same standard JSON parser used
+    // by repository validation, rather than accepting a string-shaped trace.
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let mut parser = Command::new(python).args(["-c",
+        "import json,sys; value=json.load(sys.stdin); assert isinstance(value['comparisons'],list); assert isinstance(value['excluded'],list); assert isinstance(value['unresolved'],list)"])
+        .stdin(Stdio::piped()).spawn().unwrap();
+    parser
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(canonical.as_bytes())
+        .unwrap();
+    assert!(parser.wait().unwrap().success());
     assert!(canonical.starts_with("{\"candidate_set_fingerprint_sha256\":"));
     assert!(canonical.contains("\"schema\":\"pcap-evidence.bgp.policy-result.v1\""));
     assert!(canonical.contains("\"candidate_store_binding\":\"not_provided_by_policy_api\""));

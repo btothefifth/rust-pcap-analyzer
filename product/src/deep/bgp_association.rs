@@ -14,11 +14,16 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub const SCHEMA: &str = "pcap-evidence.bgp.association.v1";
 pub const INPUT_SCHEMA: &str = "pcap-evidence.association-input.v1";
+pub const ROUTE_INPUT_SCHEMA: &str = "pcap-evidence.association-input.v2";
+pub const ROUTE_REPORT_SCHEMA: &str = "pcap-evidence.bgp.association.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalKind {
     Flow,
     Security,
+    /// A source-bound route projection, with prefix equality as its only
+    /// spatial semantics. It carries no flow or endpoint observation.
+    RouteEvidence,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Coverage {
@@ -561,6 +566,60 @@ impl RouteEvidence {
             action: r.action(),
         })
     }
+    /// Attach a caller-verified native reducer disposition without replacing
+    /// original source identity, normalized bytes, or clock metadata.
+    pub fn with_store_selection(mut self, current: bool, seal: &str, l: &Limits) -> Result<Self> {
+        hash(seal)?;
+        if !current {
+            self.reasons.push(Reason::NotCurrentCandidate);
+        }
+        normalize_reasons(&mut self.reasons);
+        let mut data = self.frozen.data;
+        replace(
+            &mut data,
+            "selection",
+            if current {
+                "current_native_candidate_witness"
+            } else {
+                "inactive_or_unresolved_native_observation"
+            }
+            .into(),
+        );
+        replace(&mut data, "selection_snapshot_sha256", seal.into());
+        self.frozen = freeze(
+            data,
+            self.frozen.record_identity,
+            self.frozen.record_content,
+            self.frozen.spans,
+            l,
+        )?;
+        Ok(self)
+    }
+    /// Qualify a retained source occurrence without rewriting original packet
+    /// locators or normalized record labels. Sealed replay owns this binding.
+    pub fn with_source_occurrence(mut self, binding: &str, l: &Limits) -> Result<Self> {
+        identity(binding, l)?;
+        let record_identity = Json::object([
+            (
+                "original_identity",
+                self.frozen.record_identity.clone().into(),
+            ),
+            ("source_occurrence", binding.into()),
+        ])
+        .encode_bounded(l.input_bytes)?;
+        let Json::Object(mut fields) = self.frozen.data else {
+            unreachable!()
+        };
+        fields.push(("source_occurrence", binding.into()));
+        self.frozen = freeze(
+            Json::Object(fields),
+            record_identity,
+            self.frozen.record_content,
+            self.frozen.spans,
+            l,
+        )?;
+        Ok(self)
+    }
     pub fn data(&self) -> &Json {
         &self.frozen.data
     }
@@ -582,6 +641,7 @@ impl RouteEvidence {
 pub struct InternalEvidence {
     frozen: Frozen,
     input: InternalInput,
+    native_reasons: Vec<Reason>,
 }
 impl InternalEvidence {
     pub fn new(input: InternalInput, l: &Limits) -> Result<Self> {
@@ -606,7 +666,15 @@ impl InternalEvidence {
         ]))
         .encode_bounded(l.input_bytes)?;
         let data = Json::object([
-            ("schema", INPUT_SCHEMA.into()),
+            (
+                "schema",
+                if input.kind == InternalKind::RouteEvidence {
+                    ROUTE_INPUT_SCHEMA
+                } else {
+                    INPUT_SCHEMA
+                }
+                .into(),
+            ),
             ("side", internal_name(input.kind).into()),
             ("source", source_identity_json(&input.source)),
             ("dimensions", dimensions_json(&input.dimensions)),
@@ -634,10 +702,69 @@ impl InternalEvidence {
             return Err(Error::limit("bgp_association_spans"));
         }
         let frozen = freeze(data, record_identity, content, spans, l)?;
-        Ok(Self { frozen, input })
+        let native_reasons = if input.kind == InternalKind::RouteEvidence {
+            vec![Reason::NotCurrentCandidate]
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            frozen,
+            input,
+            native_reasons,
+        })
     }
     pub fn data(&self) -> &Json {
         &self.frozen.data
+    }
+    /// Explicit native selection owned by the verified source consumer. Generic
+    /// flow/security adapters cannot set route disposition through opaque JSON.
+    pub fn with_native_disposition(
+        mut self,
+        action: RouteAction,
+        current: bool,
+        l: &Limits,
+    ) -> Result<Self> {
+        if self.input.kind != InternalKind::RouteEvidence {
+            return Err(bad(
+                "bgp_association_native_disposition",
+                0,
+                "route evidence required",
+            ));
+        }
+        self.native_reasons.clear();
+        if action != RouteAction::Announce {
+            self.native_reasons.push(Reason::NotAnnouncement);
+        }
+        if !current {
+            self.native_reasons.push(Reason::NotCurrentCandidate);
+        }
+        normalize_reasons(&mut self.native_reasons);
+        let Json::Object(mut fields) = self.frozen.data else {
+            unreachable!()
+        };
+        fields.push((
+            "native_disposition",
+            Json::object([
+                (
+                    "action",
+                    if action == RouteAction::Announce {
+                        "announce"
+                    } else {
+                        "withdraw"
+                    }
+                    .into(),
+                ),
+                ("current", current.into()),
+            ]),
+        ));
+        self.frozen = freeze(
+            Json::Object(fields),
+            self.frozen.record_identity,
+            self.frozen.record_content,
+            self.frozen.spans,
+            l,
+        )?;
+        Ok(self)
     }
     pub fn input(&self) -> &InternalInput {
         &self.input
@@ -813,8 +940,21 @@ pub struct AssociationReport {
     associations: Vec<Association>,
     notes: Vec<SelectionNote>,
     encoded: String,
+    policy: Policy,
+    snapshot: Option<String>,
 }
 impl AssociationReport {
+    /// Typed projection, constructed by the same report owner as encoding.
+    pub fn to_json(&self) -> Json {
+        report_json(
+            &self.routes,
+            &self.internal,
+            &self.associations,
+            &self.notes,
+            policy_json(&self.policy),
+            self.snapshot.as_deref(),
+        )
+    }
     pub fn routes(&self) -> &[EvidenceEntry] {
         &self.routes
     }
@@ -948,7 +1088,11 @@ pub fn associate(
         normalize_reasons(&mut route_entries[index].reasons);
     }
     for (index, (f, _)) in ii.iter().enumerate() {
-        let i = &internal_lookup[f.encoded.as_str()].input;
+        let adapted = internal_lookup[f.encoded.as_str()];
+        internal_entries[index]
+            .reasons
+            .extend(adapted.native_reasons.iter().copied());
+        let i = &adapted.input;
         if i.coverage != Coverage::DeclaredComplete {
             internal_entries[index]
                 .reasons
@@ -1053,10 +1197,44 @@ pub fn associate(
     if output_nodes > l.fields {
         return Err(Error::limit("bgp_association_output_nodes"));
     }
-    let data = Json::object([
-        ("schema", SCHEMA.into()),
+    let data = report_json(
+        &route_entries,
+        &internal_entries,
+        &associations,
+        &notes,
+        policy_json,
+        routes.snapshot.as_deref(),
+    );
+    let output_work = inspect(&data, l)?;
+    budget.charge(output_work)?;
+    budget.charge(budget.input_bytes.saturating_mul(4))?;
+    let encoded = canonical(&data).encode_bounded(
+        l.output_bytes
+            .min(l.retained_bytes.saturating_sub(budget.retained)),
+    )?;
+    Ok(AssociationReport {
+        routes: route_entries,
+        internal: internal_entries,
+        associations,
+        notes,
+        encoded,
+        policy: policy.clone(),
+        snapshot: routes.snapshot.clone(),
+    })
+}
+
+fn report_json(
+    route_entries: &[EvidenceEntry],
+    internal_entries: &[EvidenceEntry],
+    associations: &[Association],
+    notes: &[SelectionNote],
+    policy_json: Json,
+    snapshot: Option<&str>,
+) -> Json {
+    Json::object([
+        ("schema", if internal_entries.iter().any(|entry| matches!(&entry.data, Json::Object(fields) if fields.iter().any(|(key,value)| *key == "side" && *value == Json::from("route_evidence")))) { ROUTE_REPORT_SCHEMA } else { SCHEMA }.into()),
         ("policy", policy_json),
-        ("candidate_snapshot_sha256", optional(&routes.snapshot)),
+        ("candidate_snapshot_sha256", snapshot.map_or(Json::Null, Json::from)),
         ("endpoint_state_established", false.into()),
         ("rib_established", false.into()),
         ("best_path_selected", false.into()),
@@ -1101,21 +1279,7 @@ pub fn associate(
             "associations",
             Json::array(associations.iter().map(association_json)),
         ),
-    ]);
-    let output_work = inspect(&data, l)?;
-    budget.charge(output_work)?;
-    budget.charge(budget.input_bytes.saturating_mul(4))?;
-    let encoded = canonical(&data).encode_bounded(
-        l.output_bytes
-            .min(l.retained_bytes.saturating_sub(budget.retained)),
-    )?;
-    Ok(AssociationReport {
-        routes: route_entries,
-        internal: internal_entries,
-        associations,
-        notes,
-        encoded,
-    })
+    ])
 }
 
 fn sorted_unique<'a>(values: impl Iterator<Item = &'a Frozen>) -> Vec<(&'a Frozen, usize)> {
@@ -1772,6 +1936,7 @@ fn internal_name(v: InternalKind) -> &'static str {
     match v {
         InternalKind::Flow => "internal_flow",
         InternalKind::Security => "internal_security",
+        InternalKind::RouteEvidence => "route_evidence",
     }
 }
 fn coverage_name(v: Coverage) -> &'static str {

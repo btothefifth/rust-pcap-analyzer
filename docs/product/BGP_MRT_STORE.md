@@ -48,16 +48,23 @@ Every fresh replay verifies the source store, reparses the MRT grammar,
 renormalizes safe RIB entries, replays BGP4MP messages, and admits route
 observations through `bgp_state::Observation::from_normalized` and one
 transactional `CandidateState::apply_batch` reduction. The replay output schema
-is `pcap-evidence.bgp.mrt-replay.v3`. Each collector candidate is a compact route
+is `pcap-evidence.bgp.mrt-replay.v4`. Each collector candidate is a compact route
 summary with `observation_index` and `route_index` references into the retained
 candidate-state observation journal; normalized envelopes and route attributes
-are not copied into each candidate. Candidate-query v3 includes each referenced
-normalized envelope once in its `observations` array, separate `bgp4mp_candidates`
+are not copied into each candidate. Candidate-query v4 includes each referenced
+normalized envelope and route-free reset/EOR observation once in its `observations` array, separate `bgp4mp_candidates`
 and source-ordered `bgp4mp_events` arrays, so event-only sessions remain
-queryable even without an admitted route. Export schema v3 writes a receipt
+queryable even without an admitted route. Export schema v4 writes a receipt
 header, every MRT record summary, source-ordered BGP4MP session events, each
 normalized observation once with its journal index, then RIB and BGP4MP
-candidate rows that refer to those observations and routes.
+candidate rows that refer to those observations and routes, and the native
+imported session RIB candidate projection.
+
+The raw source format remains `PCBMRT01`, version 1. Existing sealed stores are
+compatible immutable evidence and reopen by verifying and reparsing their exact
+source bytes. Their newly derived replay/query/export projection uses v4;
+saved v3 projections are historical output and never replay authority. Consumers
+that require an exact projection schema must migrate together with v4.
 
 MRT RIB entries bind to the peer-index record immediately preceding their
 series. Since parsed records are retained in source-offset order, replay locates
@@ -79,6 +86,14 @@ numeric index or a caller-supplied digest alone is not accepted as identity.
 reference. Unsupported-entry evidence is cached from that exact batch, so the
 archive does not expose a mutable source object that could make the cached
 evidence stale after validation. This is an intentional read-only API boundary.
+
+Archive, session-query, and CLI export output streams the typed BGP4MP RIB:
+entries, versions, attribute trees, and witnesses are borrowed and measured
+before writing. The native RIB line writer also performs an exact full preflight
+including its newline. No whole-RIB JSON tree or encoded attribute buffer is
+created on those bounded paths. Library `json()` and `bgp4mp_rib_json()` are
+convenience materializers; callers choosing them own that additional allocation.
+They are outside the bounded streaming writer contract.
 
 Unsupported RIB entries are discovered with a source-order zipper over the
 normalized candidate index. The bounded preflight streams rows one at a time
@@ -110,6 +125,16 @@ exact embedded-message offset range and digest. Its captured `evidence` field
 remains null. Collector metadata and hashes still do not authenticate the
 source or prove feed completeness.
 
+Each imported route's occurrence carrier also retains exact hex for the message
+prefix through the UPDATE attribute-length field and for the message suffix
+after the declared attribute block. Together with ordered raw attribute values,
+flags, types, and encoded lengths, these endpoints let the generic consumer
+reconstruct every TLV and the full BGP message digest. Omitting an unknown
+attribute row therefore cannot manufacture complete semantic identity. The
+carrier remains message-relative, with no captured packet identity. Aggregate
+endpoint/value hex growth and route fanout are preflighted against input,
+retained, output, and logical work limits before hex materialization.
+
 Replay follows record order; timestamps, including the exact BGP4MP_ET
 microseconds, are preserved but never used to sort records. State-change records
 are reported FSM evidence, not endpoint truth. The replay validates reported
@@ -125,9 +150,11 @@ evidence is retained as a quarantine event rather than guessed through.
 The subtype's ADD-PATH bit selects how that message's NLRI is decoded, but does
 not establish bilateral negotiation: parsed path-ID presence is checked against
 directional OPEN capability evidence, and a mismatch is quarantined. Likewise,
-the BGP4MP AS4 subtype describes the width of the outer MRT peer/local ASN
-fields; the UPDATE's AS_PATH width comes from the shared bilateral OPEN
-capability context. For 2-byte MRT subtypes, OPEN identity comparison uses the
+the BGP4MP message subtype selects both the outer MRT peer/local ASN width and
+the embedded UPDATE's AS_PATH wire width: MESSAGE uses two octets and
+AS4_MESSAGE uses four octets. Bilateral OPEN evidence independently corroborates
+that context; a contradiction is quarantined instead of changing the subtype's
+wire grammar. For 2-byte MRT subtypes, OPEN identity comparison uses the
 legacy 2-byte ASN field (including AS_TRANS), not the four-byte capability
 value.
 
@@ -144,13 +171,36 @@ range, partition, direction, and message identity. Candidate resolution checks
 those bindings before query deduplication. This is candidate analysis, not proof
 of an installed route or endpoint state.
 
+`MrtReplayArchive::bgp4mp_rib` is the typed canonical `AdjRibIn` reducer, not
+the legacy read-only projection of generic candidate alternatives. Each
+admitted imported UPDATE reduces atomically as one record. Announcements
+replace versions, withdrawals change only the exact direction/family/path-ID
+key, and reannouncements create new retained versions. Valid route-free EOR
+UPDATEs retain their source observation and mark only the declared supported
+family, direction, generation, and partition. The `bgp4mp_adj_rib_in` field in
+state and session query exposes versions, dispositions, EOR, gap and rejection
+evidence. Policy and association consumers must use these native dispositions
+when deciding whether an imported candidate is current; generic observations
+remain an immutable evidence journal.
+
+Reset events verify source/checkpoint and the exact predecessor, advance only
+the matching tracked session partitions by one generation, and supersede old
+versions. Historical observations and versions remain. The reset carries no
+invented per-prefix withdrawal. A terminal Idle transition affects only its own
+peer; failed attempts and tuple reuse cannot borrow sibling OPEN context. No
+graceful-restart or LLGR wall-clock timer expiry is inferred.
+
 The message-range helper validates structural and byte consistency. Persisted
 replay additionally verifies/reparses the original sealed source before it
-uses a range. The source parser currently rejects a malformed BGP frame before
-an archive exists; semantically invalid but structurally framed messages can be
-retained as rejected events. BMP ingestion, captured-versus-imported semantic
-equivalence, persisted policy/cross-source
-association, multi-checkpoint chronology, crash-resume indexing, broad
+uses a range. A complete MRT container with malformed embedded BGP bytes is
+retained, sealed and replayed into an explicit rejected event with the exact
+record/message ranges and digests. A rejected or context-quarantined message
+marks continuity uncertain only in its tracked native RIB session partition;
+it does not fabricate reset or withdrawal. Empty embedded messages and malformed
+BGP4MP preambles retain exact opaque record bytes. Truncation of the outer MRT
+header or declared body remains fail-closed before destination creation.
+Neither quarantine nor opaque evidence is a successful normalized route.
+Multi-checkpoint chronology, crash-resume indexing, broad
 real-corpus/scale evidence, and sustained fuzzing remain completion gates.
 Full protocol-FSM reproduction—including TCP connection identity/collisions,
 timer events, and deciding whether missing state-change records may be inferred
@@ -159,7 +209,7 @@ from messages—also remains out of scope for this slice.
 `MrtBatch::bgp4mp_message_source_range` locates the exact embedded BGP message
 bytes for BGP4MP/BGP4MP_ET message subtypes 1, 4, and 6–11 (including AS4,
 locally generated, and ADD-PATH container variants). It checks the embedded
-message boundary, subtype-derived layout, address family, and enclosing record
+byte extent, subtype-derived layout, address family, and enclosing record
 length, then returns absolute source offsets and a digest of the message bytes.
 `verified_bgp4mp_message_source_range` additionally binds the batch digest,
 original record header/body digest, and message bytes against caller-supplied
@@ -187,7 +237,7 @@ sized staging, record, peer, RIB, message and sealed-store byte buffers use
 fallible reservation/copy paths before growth. This does not make every nested
 allocator operation recoverable or establish a process-RSS ceiling.
 
-MRT report and imported-session query v3 use bounded projections instead of
+MRT report and imported-session query v4 use bounded projections instead of
 building an archive-sized JSON tree. The existing NDJSON export remains
 row-oriented and lazy over record summaries; each row uses the shared bounded
 JSON encoder, while the CLI's byte-budget writer caps the complete output.
@@ -196,7 +246,7 @@ newlines. Session-query output validates candidate references before
 deduplicating observations and retains a fallibly grown set of observation
 indexes, so its temporary memory still scales with unique observations.
 The new BGP4MP event projection borrows retained events during output rather
-than cloning them. Schema v3 is intentionally distinct from the previous
+than cloning them. Schema v4 is intentionally distinct from the previous
 projection and the bounded-allocation regression checks escaping, exact limits,
 and limit rejection without partial append. These deterministic contract tests
 do not establish an RSS, throughput, or real-corpus ceiling.
@@ -210,3 +260,16 @@ serialized output growth to stay below a 3x ratio when records double.
 This is a synthetic regression for the former quadratic admission path and
 duplicate materialization and peer-table rescan, not a real-corpus throughput,
 peak-RSS, sustained fuzz, or production scale qualification. Those remain open.
+
+The native BGP4MP RIB currently applies source events sequentially through the
+canonical transactional reducer. Its cumulative logical work and retained
+state, versions and projections are charged with the archive against the caller
+limits; larger batches may reject rather than evade those limits. The indexed
+TABLE_DUMP_V2 reduction does not prove equivalent BGP4MP scale or RSS behavior.
+Current authored imported-state selectors cover announce/replace/withdraw,
+reannouncement, reset/sibling isolation, supported EOR and unsupported neighbors,
+malformed record retention, altered-store rejection, exact output/store limits,
+and fresh-process state/query/export. Their executed status belongs in the
+current validation receipt. All output remains offline candidates with source
+authentication, negotiated endpoint state, installed routes, reachability and
+normative qualification unestablished.

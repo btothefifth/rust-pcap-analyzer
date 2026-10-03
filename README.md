@@ -1,6 +1,26 @@
 # rust-pcap-analyzer
 
-## Restartable captured and MRT BGP state — source candidate
+## O14-1 implementation candidate — operator status
+
+The current worktree candidate extends BGP4MP source-ordered replay through the
+imported Adj-RIB-In reducer, adds the bounded BMP v1 file/store/replay path, and
+provides persisted query, policy, export, and caller-scoped association across
+captured, MRT, and BMP stores. Captured, MRT, and BMP producers share the
+versioned semantic identity for its supported profile while keeping source,
+checkpoint, session, clock, and policy partitions distinct. Exact source limits,
+ownership, and candidate boundaries are described in the linked leaf contracts;
+none of these offline routes establishes endpoint negotiation, collector
+authenticity, installed routes, or reachability.
+
+The same O14-1 change set includes desktop storage admission, bounded research
+listing, validation/package-frontier, generation-CLI, and documentation work.
+See the [objectives 1–4 ledger](docs/implementation/OBJECTIVES_1_4.md),
+[BGP completion contract](docs/product/BGP_COMPLETION.md), and
+[current implementation pointer](docs/implementation/CURRENT.md). The
+authoritative [same-generation validation receipt](evidence/objectives-1-4-validation.json)
+controls which assembled-source checks have passed. Full declared-profile,
+normative, sustained-fuzz, lawful real-corpus, scale/RSS, security, and
+exact-head platform qualification remain separate gates.
 
 `deep::bgp_pipeline::CapturedSessionPipeline` now joins one framed captured BGP
 message atomically across the wire decoder, offline session observer, and
@@ -14,11 +34,14 @@ TCP directions in capture-record order without disturbing per-direction TCP
 sequence reassembly. Successful depth runs also publish a sealed, hash-chained
 `bgp.journal` containing exact reconstructed message bytes, packet spans, and
 continuity boundaries. A fresh process can verify and replay that journal into
-queryable candidate state. The same commands now accept a sealed `bgp.mrt`
-source store created from bounded TABLE_DUMP_V2/BGP4MP input. Safe collector RIB
-entries use the same normalized observation model while retaining null direction,
-source/checkpoint/range identity, and explicit non-endpoint authority. See
-[the MRT store contract](docs/product/BGP_MRT_STORE.md).
+queryable candidate state. The same commands also accept sealed `bgp.mrt` and
+`bgp.bmp` source stores. TABLE_DUMP_V2 entries remain directionless collector
+candidates; BGP4MP route events retain source order, session context, and
+imported Adj-RIB-In dispositions; BMP monitoring uses its reported peer and
+pre/post-policy scope. Fresh replay verifies original source bytes and emits
+candidate evidence with explicit non-endpoint authority. See [the MRT
+contract](docs/product/BGP_MRT_STORE.md), [the BMP contract](docs/product/BGP_BMP.md),
+and [the persisted consumer contract](docs/product/BGP_PERSISTED.md).
 
 ## Captured BGP producer parity — source candidate
 
@@ -96,19 +119,21 @@ Prepared as a generic offline capture-analysis foundation. This is an original,
 dependency-free Rust library and command-line repository, not a wrapper around Arkime,
 Wireshark, libpcap, or `pcap-parser`.
 
-> **Delivery status: local validation PASS; broader qualification remains open.** The
-> pinned Rust 1.85.1 toolchain and Windows native linker were available. Root and
+> **Historical local validation receipt — Windows.** The receipt recorded the
+> pinned Rust 1.85.1 toolchain and Windows native linker, and reports root and
 > streaming checks, debug/release tests, formatting, warnings-denied Clippy, the
 > compiled CLIs, the independent 93-case hardening CLI oracle, semantic mutation
 > checks, Python evidence tests, and both fuzz-manifest compile checks passed
-> locally. The root inventory has 135 selectors, 133 collected on Windows, and the
-> streaming contract suite has 40 tests. Windows/Linux/macOS CI exists for the
-> root and streaming contracts, but no sustained fuzz campaign, performance
-> qualification, security review, or representative real-world capture replay is
-> claimed. See [the exact validation boundary](docs/VALIDATION.md), the
+> locally. That receipt recorded 135 root selectors (133 collected on Windows)
+> and 40 streaming contract tests; these counts describe that historical source
+> identity, not the current selector inventory. It also records Windows/Linux/macOS
+> CI for the root and streaming contracts at their observed commits. This is not
+> current-tree or BGP qualification evidence. See [the exact validation boundary](docs/VALIDATION.md), the
 > [streaming contract](docs/streaming/CONTRACT.md), and the retained
-> [machine-readable receipt](evidence/local-validation.json). This is a working
-> source baseline, not a certified or production-ready release.
+> [machine-readable receipt](evidence/local-validation.json) for its scope; use
+> the [current implementation pointer](docs/implementation/CURRENT.md) for the
+> current status. This is a working source candidate, not a certified or
+> production-ready release.
 
 ## What is implemented
 
@@ -164,6 +189,12 @@ workbench with isolated workers, source-bound evidence, history/research views a
 bounded queries. These layers do not change the core parser's dependency or
 evidence contracts.
 
+An optional authorized OPC UA transform is isolated in the Python depth tooling,
+outside the Rust parser. Its current tests cover authorization, Sign-mode MAC
+behavior, and tamper rejection only; AES secure-channel processing and
+certificate trust are untested or unqualified. It is not an implicit parser
+dependency.
+
 ```sh
 cargo test --manifest-path product/Cargo.toml --locked --offline --all-targets
 cargo build --manifest-path product/Cargo.toml --locked --offline --release
@@ -173,8 +204,11 @@ python -m unittest discover -s tools/tests -p 'test_*.py' -v
 node --test desktop/web/model.test.mjs
 ```
 
-Read [`docs/product/IMPLEMENTATION_HANDOFF.md`](docs/product/IMPLEMENTATION_HANDOFF.md)
-for the design reconciliation, remaining gaps and the next implementation package.
+Use [`docs/implementation/CURRENT.md`](docs/implementation/CURRENT.md) and
+[`docs/product/BGP_COMPLETION.md`](docs/product/BGP_COMPLETION.md) for current
+status and the active implementation package. The
+[`implementation handoff`](docs/product/IMPLEMENTATION_HANDOFF.md) preserves the
+original design reconciliation and earlier sequencing.
 
 ## Get started
 
@@ -198,6 +232,19 @@ Adj-RIB-In state:
     cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp state mrt-run/bgp.mrt --output mrt-state.json
     cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp query mrt-run/bgp.mrt --session mrt:0:0 --output mrt-peer.json
     cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp export mrt-run/bgp.mrt --output mrt-export.ndjson
+
+Import a BMP v3 file into its own sealed source store and query or analyze it
+with the persisted consumers:
+
+    cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp import-bmp monitor.bmp --workspace bmp-run --source-id router-a --checkpoint monitor-1
+    cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp state bmp-run/bgp.bmp --output bmp-state.json
+    cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp query bmp-run/bgp.bmp --prefix 203.0.113.0/24 --output bmp-prefix.json
+    cargo run --manifest-path product/Cargo.toml --locked --offline --bin pcap-depth -- bgp policy bmp-run/bgp.bmp --policy-profile policy.txt --output bmp-policy.json
+
+Persisted consumers can compare two sealed stores only under an explicit
+comparison namespace and clock policy. Their strict policy-profile format,
+filters, status meanings, and association options are specified in
+[the persisted consumer contract](docs/product/BGP_PERSISTED.md).
 
 The default parser remains the right starting point for general capture
 inspection; depth is an explicit second pass and remains partial.
@@ -307,7 +354,9 @@ bounded state and payload, rather than advertising end-to-end zero-copy.
 - `tools/`: optional evidence indexing, qualification, corpus, differential and
   minimization tooling.
 - `docs/`: controlling engineering contract, API, formats, limits, validation and
-  source references. `docs/CURRENT.md` is the thin current-state pointer.
+  source references. [`docs/implementation/CURRENT.md`](docs/implementation/CURRENT.md)
+  is the thin current-state pointer; [`docs/CURRENT.md`](docs/CURRENT.md) is a
+  dated baseline snapshot.
 - `evidence/`: actual local receipts and source-file integrity manifest; never a
   substitute for missing native or representative-corpus evidence.
 

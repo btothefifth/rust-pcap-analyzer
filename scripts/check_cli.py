@@ -13,6 +13,7 @@ import sys
 import tempfile
 sys.dont_write_bytecode = True
 from reference_verify import FIX, parse, verify
+from validation_frontier import native_artifact
 
 
 def run(binary: Path, *args: str) -> dict:
@@ -102,7 +103,7 @@ def check(binary: Path) -> dict:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--binary", type=Path, default=Path("target/debug/pcap-evidence"))
+    p.add_argument("--binary", type=Path, default=native_artifact(Path(__file__).resolve().parents[1], "Cargo.toml", "pcap-evidence.exe" if os.name == "nt" else "pcap-evidence", profile="debug"))
     args = p.parse_args()
     binary = args.binary.resolve()
     if os.name == "nt" and not binary.exists():

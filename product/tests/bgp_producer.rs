@@ -110,6 +110,24 @@ fn paired() -> SessionState {
     decode("open_four_b", &mut state, Some(1), 2);
     state
 }
+fn paired_two() -> SessionState {
+    let mut state = SessionState::default();
+    decode("open_two", &mut state, Some(0), 900);
+    let mut peer_open = wire("open_two");
+    peer_open[20..22].copy_from_slice(&65001u16.to_be_bytes());
+    peer_open[27] = 2;
+    let value = bgp::decode_pcap(
+        &evidence(&peer_open, 901),
+        metadata(Some(1), 901),
+        &mut state,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(opens(&value).len(), 2);
+    assert_eq!(get(context(&value), "asn_width"), &Json::from(2usize));
+    assert_eq!(get(&value, "negotiation_established"), &Json::Bool(false));
+    state
+}
 fn changed_update(attributes: &[u8], prefixes: &[u8]) -> Vec<u8> {
     let length = 23 + attributes.len() + prefixes.len();
     let mut raw = vec![255; 16];
@@ -649,7 +667,7 @@ fn ordinary_scalar_duplicates_keep_the_first_effective_value_and_every_source_ra
 
             let decode_values = |values: &[u8], frame| {
                 let raw = changed_update(values, &[24, 203, 0, 113]);
-                let mut state = SessionState::default();
+                let mut state = paired_two();
                 state.set_peer_relationship(PeerRelationship::Internal);
                 bgp::decode_pcap(
                     &evidence(&raw, frame),
@@ -725,7 +743,7 @@ fn duplicate_path_and_collection_attributes_keep_the_first_value_without_concate
         duplicate_values.extend(wire_attribute(flags, code, &second));
         let decode_values = |values: &[u8], frame| {
             let raw = changed_update(values, &[24, 203, 0, 113]);
-            let mut state = SessionState::default();
+            let mut state = paired_two();
             state.set_peer_relationship(PeerRelationship::Internal);
             bgp::decode_pcap(
                 &evidence(&raw, frame),
@@ -840,7 +858,7 @@ fn source_ranges_and_payload_hashes_survive_a_split_inside_the_asn() {
 }
 #[test]
 fn source_movement_does_not_turn_the_same_path_into_a_conflicting_candidate() {
-    let mut decoder = SessionState::default();
+    let mut decoder = paired_two();
     let a = decode("announce_two", &mut decoder, Some(0), 1);
     let raw = wire("announce_two");
     // Add a withdrawal before the unchanged attributes. Every attribute offset moves.
@@ -1063,7 +1081,7 @@ fn existing_candidate_admission_and_exact_normalized_replay_are_unchanged() {
 #[test]
 fn current_association_accepts_the_new_occurrence_shape_without_mutating_state() {
     let l = Limits::default();
-    let value = decode("announce_two", &mut SessionState::default(), Some(0), 1);
+    let value = decode("announce_two", &mut paired_two(), Some(0), 1);
     let mut state = CandidateState::new(l.clone()).unwrap();
     state
         .apply(Observation::from_normalized(&value, None, &l).unwrap())

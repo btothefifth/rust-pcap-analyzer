@@ -88,38 +88,38 @@
     {
       "id": "BGP-S008",
       "area": "route_state",
-      "feature": "path-ID-aware candidate reduction and opt-in versioned Adj-RIB-In model with atomic captured wire join, multi-action records, permanent identity quarantine, immutable peer binding, and explicit legacy adapter",
+      "feature": "path-ID-aware capture reduction, source-ordered imported BGP4MP Adj-RIB-In, and peer/policy-stream-scoped BMP reported RIB candidates, with atomic records, EOR, generation boundaries, quarantine, and immutable source partitions",
       "state": "partial",
-      "code": ["product/src/deep/bgp_state.rs", "product/src/deep/bgp_replay.rs", "product/src/deep/bgp_session.rs", "product/src/deep/bgp_rib.rs", "product/src/deep/bgp_pipeline.rs", "product/src/deep/bgp_manager.rs", "product/src/deep/sink.rs"],
-      "tests": ["product/tests/bgp_state.rs", "product/tests/bgp_replay.rs", "product/tests/bgp_session_rib_policy.rs", "product/tests/bgp_pipeline.rs", "product/tests/bgp_manager.rs", "product/tests/pcap_depth_cli.rs"],
-      "remaining": "restartable persistent replay/query/export integration and independent qualification"
+      "code": ["product/src/deep/bgp_state.rs", "product/src/deep/bgp_replay.rs", "product/src/deep/bgp_session.rs", "product/src/deep/bgp_rib.rs", "product/src/deep/bgp_pipeline.rs", "product/src/deep/bgp_manager.rs", "product/src/deep/bgp_mrt_rib.rs", "product/src/deep/bgp_bmp_store.rs", "product/src/deep/bgp_persisted.rs", "product/src/deep/sink.rs"],
+      "tests": ["product/tests/bgp_state.rs", "product/tests/bgp_replay.rs", "product/tests/bgp_session_rib_policy.rs", "product/tests/bgp_pipeline.rs", "product/tests/bgp_manager.rs", "product/tests/pcap_depth_cli.rs", "product/tests/bgp_mrt_bgp4mp_replay.rs", "product/tests/bgp_bmp.rs", "product/tests/bgp_persisted_cli.rs"],
+      "remaining": "The current source candidate includes imported BGP4MP route reduction, exact malformed-record retention, scoped reset/EOR/gap dispositions, and BMP candidate-state projection. Consult evidence/objectives-1-4-validation.json for the exact current-generation source and selector outcome. Full endpoint-FSM reproduction, automatic graceful/LLGR expiry, normative profile coverage, real-corpus parity, and qualification remain open. Generation boundaries retain history and never fabricate per-prefix withdrawals."
     },
     {
       "id": "BGP-S009",
       "area": "policy",
-      "feature": "deterministic explainable best-path candidate policy with reached-only inputs and explicit absent-versus-unknown MED evidence",
+      "feature": "deterministic explainable best-path candidate policy, strict persisted profile and exact filters, source-scoped decisions, and explicit absent-versus-unknown inputs",
       "state": "partial",
-      "code": ["product/src/deep/bgp_policy.rs"],
-      "tests": ["product/tests/bgp_session_rib_policy.rs"],
-      "remaining": "independent router-policy vectors, direct RIB-to-policy integration, and persistent product exposure"
+      "code": ["product/src/deep/bgp_policy.rs", "product/src/deep/bgp_persisted.rs"],
+      "tests": ["product/tests/bgp_session_rib_policy.rs", "product/tests/bgp_persisted_cli.rs"],
+      "remaining": "The current candidate exposes bounded persisted policy and association while retaining alternatives and native source partitions. Consult evidence/objectives-1-4-validation.json for current-generation validation; broader independent router-policy vectors and qualification remain open. Cross-partition global ranking and inferred clock calibration are unsupported."
     },
     {
       "id": "BGP-S010",
       "area": "external_input",
-      "feature": "source-partitioned normalized import and bounded MRT TABLE_DUMP_V2/BGP4MP adapter",
+      "feature": "source-partitioned normalized import with bounded MRT TABLE_DUMP_V2/BGP4MP and BMP v1 adapters, sealed source stores, and fresh replay",
       "state": "partial",
-      "code": ["product/src/deep/bgp_import.rs", "product/src/deep/bgp_replay.rs", "product/src/deep/bgp_mrt.rs"],
-      "tests": ["product/tests/bgp_import.rs", "product/tests/bgp_replay.rs", "product/tests/bgp_mrt.rs", "product/tests/bgp_mrt_vectors.py"],
-      "remaining": "MRT message-to-imported-wire normalization, full attribute conversion, capture/MRT equivalence and non-collapse at replay, source-byte verification at an import CLI boundary, and BMP"
+      "code": ["product/src/deep/bgp_import.rs", "product/src/deep/bgp_replay.rs", "product/src/deep/bgp_mrt.rs", "product/src/deep/bgp_mrt_store.rs", "product/src/deep/bgp_bmp.rs", "product/src/deep/bgp/bmp.rs", "product/src/deep/bgp_bmp_store.rs"],
+      "tests": ["product/tests/bgp_import.rs", "product/tests/bgp_replay.rs", "product/tests/bgp_mrt.rs", "product/tests/bgp_mrt_vectors.py", "product/tests/bgp_mrt_bgp4mp_replay.rs", "product/tests/bgp_bmp.rs", "product/tests/bgp_bmp_vectors.py", "product/tests/pcap_depth_cli.rs"],
+      "remaining": "The current candidate retains original MRT/BMP bytes, source ranges, clocks, checkpoints, unsupported neighbors, and source-ordered route events through sealed fresh replay. Consult evidence/objectives-1-4-validation.json for current-generation validation; broader cross-source fixtures, sustained fuzzing, lawful real-corpus parity, scale/RSS, and normative qualification remain open. Collector labels and hashes do not authenticate a source."
     },
     {
       "id": "BGP-S011",
       "area": "product_integration",
-      "feature": "captured evidence through the opt-in pcap-depth boundary with bounded multi-session wire-to-Adj-RIB-In ownership, capture-ordered bidirectional protocol events, per-message receipts, and flow-end summaries",
+      "feature": "captured, MRT and BMP evidence through bounded fresh-process replay and ordinary state/query/export/policy/association CLI consumers, with source-specific candidate reducers",
       "state": "partial",
-      "code": ["product/src/deep/sink.rs", "product/src/bin/pcap-depth.rs", "product/src/deep/bgp_pipeline.rs", "product/src/deep/bgp_manager.rs"],
-      "tests": ["product/tests/pcap_depth_cli.rs", "product/tests/bgp_pipeline.rs", "product/tests/bgp_manager.rs"],
-      "remaining": "restartable state replay, direct policy output, imported-source join, query, and export"
+      "code": ["product/src/bin/pcap-depth.rs", "product/src/deep/sink.rs", "product/src/deep/bgp_pipeline.rs", "product/src/deep/bgp_manager.rs", "product/src/deep/bgp_store.rs", "product/src/deep/bgp_mrt_store.rs", "product/src/deep/bgp_bmp_store.rs", "product/src/deep/bgp_persisted.rs"],
+      "tests": ["product/tests/pcap_depth_cli.rs", "product/tests/bgp_pipeline.rs", "product/tests/bgp_manager.rs", "product/tests/bgp_mrt_bgp4mp_replay.rs", "product/tests/bgp_bmp.rs", "product/tests/bgp_persisted_cli.rs"],
+      "remaining": "The candidate implements fresh captured/MRT/BMP replay, rich query, policy, export, and caller-scoped association, with atomic bounded outputs and no overwrite. Consult evidence/objectives-1-4-validation.json for assembled-source CLI and package-frontier results. These commands expose offline evidence only and do not establish endpoint state, source authenticity, route installation, or reachability."
     },
     {
       "id": "BGP-S012",
@@ -128,7 +128,7 @@
       "state": "partial",
       "code": ["scripts/validate_product.py"],
       "tests": ["tools/tests/test_bgp_support_matrix.py", "product/tests/bgp_producer_vectors.py"],
-      "remaining": "Linux CI sustained fuzz real lawful corpus differential minimization scale and complete normative review"
+      "remaining": "An exact-current-source BGP/product/history platform matrix, sustained fuzzing, lawful real-corpus differential/minimization, measured scale, and complete normative review remain open. Earlier Linux/macOS root and streaming CI receipts cover only their recorded commits and selected surfaces."
     }
   ]
 }

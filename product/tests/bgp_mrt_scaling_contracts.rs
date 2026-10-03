@@ -333,7 +333,7 @@ fn session_query_preserves_schema_and_preflights_before_writing() {
     let expected = Json::object([
         (
             "schema",
-            "pcap-evidence.bgp.imported-session-query.v3".into(),
+            "pcap-evidence.bgp.imported-session-query.v4".into(),
         ),
         ("session", id.clone().into()),
         (
@@ -354,6 +354,7 @@ fn session_query_preserves_schema_and_preflights_before_writing() {
         ("bgp4mp_candidates", Json::array([])),
         ("bgp4mp_events", Json::array([])),
         ("endpoint_state_claimed", false.into()),
+        ("bgp4mp_adj_rib_in", archive.bgp4mp_rib_json(Some(&id))),
     ])
     .encode_bounded_line(limits().output_bytes)
     .unwrap();
@@ -414,6 +415,7 @@ fn output_and_combined_retention_failures_precede_destination_creation() {
     let archive = build(&temp.file("reference"), &raw, limits());
     let output_size = archive.encoded_len_bounded(limits().output_bytes).unwrap();
     let retained = archive.state.retained_bytes()
+        + archive.bgp4mp_rib.retained_bytes()
         + archive.batch().retained_bytes
         + archive
             .candidates
@@ -701,9 +703,19 @@ fn fresh_cli_import_state_query_export_and_failed_publication_contracts() {
                 .unwrap();
             assert_eq!(actual, expected);
         } else {
+            let actual = String::from_utf8(actual).unwrap();
+            assert!(actual
+                .lines()
+                .next()
+                .unwrap()
+                .contains("pcap-evidence.bgp.export-header.v4"));
             assert_eq!(
-                String::from_utf8(actual).unwrap().lines().count(),
-                1 + archive.batch().records.len()
+                actual.lines().nth(1),
+                Some(archive.bgp4mp_rib_json(None).encode().as_str())
+            );
+            assert_eq!(
+                actual.lines().count(),
+                2 + archive.batch().records.len()
                     + archive.state.observations().len()
                     + archive.candidates.len()
             );

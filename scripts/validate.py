@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+from validation_frontier import native_artifact
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -25,9 +26,15 @@ def receipt_command(command: list[str]) -> list[str]:
 
 def source_identity() -> str:
     digest = hashlib.sha256()
-    for file in sorted(ROOT.rglob("*")):
+    files = []
+    excluded = {"target", "evidence", ".git", "__pycache__", ".pytest_cache",
+                ".local-tooling", ".local-build"}
+    for directory, subdirs, names in os.walk(ROOT, followlinks=False):
+        subdirs[:] = [name for name in subdirs if name not in excluded]
+        files.extend(Path(directory) / name for name in names)
+    for file in sorted(files):
         relative = file.relative_to(ROOT)
-        if not file.is_file() or file.is_symlink() or set(relative.parts) & {"target", "evidence", ".git", "__pycache__", ".pytest_cache"} or file.suffix in {".zip", ".pyc"}:
+        if not file.is_file() or file.is_symlink() or set(relative.parts) & excluded or file.suffix in {".zip", ".pyc"}:
             continue
         digest.update(relative.as_posix().encode() + b"\0" + hashlib.sha256(file.read_bytes()).digest())
     return digest.hexdigest()
@@ -52,7 +59,7 @@ def main() -> int:
         start = time.monotonic()
         try:
             result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, timeout=300, check=False)
-            step = {"command": receipt_command(command), "status": "PASS" if result.returncode == 0 else "FAIL", "exit_code": result.returncode,
+            step = {"command": receipt_command(command), "status": "PASS" if result.returncode == 0 else "BLOCKED" if result.returncode == 2 and command[1:2] in [["scripts/check_cli.py"], ["scripts/check_hardening_cli.py"], ["scripts/mutation_check.py"]] else "FAIL", "exit_code": result.returncode,
                     "stdout": sanitize_output(result.stdout), "stderr": sanitize_output(result.stderr),
                     "elapsed_seconds": round(time.monotonic()-start, 3)}
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -76,7 +83,7 @@ def main() -> int:
             receipt["steps"].append({"status": "BLOCKED", "command": ["cargo", "test", "--locked", "--offline"],
                                      "reason": "Rust compiler/Cargo absent; native checks were not run"})
         else:
-            binary_name = "target/debug/pcap-evidence.exe" if os.name == "nt" else "target/debug/pcap-evidence"
+            binary_name = str(native_artifact(ROOT, "Cargo.toml", "pcap-evidence.exe" if os.name == "nt" else "pcap-evidence", profile="debug"))
             commands = [["rustc", "--version"], ["cargo", "check", "--locked", "--offline", "--all-targets"],
                         ["cargo", "test", "--locked", "--offline", "--all-targets"],
                         ["cargo", "test", "--locked", "--offline", "--release", "--all-targets"],
@@ -88,7 +95,7 @@ def main() -> int:
             receipt["status"] = "PASS"
             for command in commands:
                 if not execute(command, native=command[:2] == ["cargo", "test"]):
-                    receipt["status"] = "FAIL"
+                    receipt["status"] = receipt["steps"][-1]["status"]
                     break
     receipt["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     receipt["source_unchanged"] = source_identity() == receipt["source_identity"]

@@ -138,6 +138,45 @@ fn attr(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
 }
 
 fn capture_update(attributes: &[u8]) -> Json {
+    // The UPDATE uses four-octet AS_PATH syntax. Establish that interpretation
+    // from independently constructed bilateral OPEN evidence first.
+    let mut state = SessionState::default();
+    for direction in [0u8, 1] {
+        let asn = 65_551u32 + u32::from(direction);
+        let mut open_body = vec![4];
+        open_body.extend(23_456u16.to_be_bytes());
+        open_body.extend(90u16.to_be_bytes());
+        open_body.extend([192, 0, 2, 1 + direction]);
+        open_body.extend([8, 2, 6, 65, 4]);
+        open_body.extend(asn.to_be_bytes());
+        let mut open = vec![0xff; 16];
+        open.extend(u16::try_from(19 + open_body.len()).unwrap().to_be_bytes());
+        open.push(1);
+        open.extend(open_body);
+        bgp::decode_pcap(
+            &EvidenceBytes::from_packet(
+                &open,
+                PacketId {
+                    capture: sha256::digest(b"semantic-identity-capture-fixture"),
+                    frame: 35 + u64::from(direction),
+                    record_offset: 64 + 32 * u64::from(direction),
+                },
+                54,
+            ),
+            PcapMetadata {
+                source_id: "packet-capture-fixture".into(),
+                record_id: format!("capture-open-{direction}"),
+                observed_at_ns: Some(9_876_543_208 + i64::from(direction)),
+                session: Some(44),
+                direction: Some(direction),
+                peer: Some("192.0.2.9:179".into()),
+                local: Some("192.0.2.1:179".into()),
+            },
+            &mut state,
+            &Limits::default(),
+        )
+        .unwrap();
+    }
     let mut body = vec![0, 0];
     body.extend(u16::try_from(attributes.len()).unwrap().to_be_bytes());
     body.extend(attributes);
@@ -162,7 +201,7 @@ fn capture_update(attributes: &[u8]) -> Json {
             peer: Some("192.0.2.9:179".into()),
             local: Some("192.0.2.1:179".into()),
         },
-        &mut SessionState::default(),
+        &mut state,
         &Limits::default(),
     )
     .unwrap()
@@ -518,10 +557,29 @@ fn unknown_types_families_and_attribute_semantics_remain_source_bound() {
     assert!(matches!(b.records[1].body, MrtBody::Rib(_)));
     let mut atomic = vec![0, 0, 0, 7, 8, 10, 0, 1, 0, 0];
     atomic.extend(10u32.to_be_bytes());
-    atomic.extend(3u16.to_be_bytes());
-    atomic.extend([0x40, 6, 0]);
+    let mut atomic_attributes = attrs();
+    atomic_attributes.extend([0x40, 6, 0]);
+    atomic.extend((atomic_attributes.len() as u16).to_be_bytes());
+    atomic.extend(&atomic_attributes);
     let b = parse(&[table(), record(2, 13, 2, &atomic)].concat());
-    assert!(b
+    let normalized = b
+        .normalize_rib_entry(1, 0, &Limits::default())
+        .unwrap()
+        .expect("valid zero-length ATOMIC_AGGREGATE is part of semantic v2");
+    assert_eq!(
+        get(identity(&normalized), "completeness"),
+        &Json::from("complete")
+    );
+    let Json::Array(routes) = get(&normalized, "routes") else {
+        panic!("routes")
+    };
+    assert_eq!(
+        get(get(&routes[0], "attributes"), "atomic_aggregate"),
+        &Json::Bool(true)
+    );
+    atomic_attributes.extend([0x80, 99, 0]);
+    let neighbor = parse(&[table(), rib_v4_with_attributes(&atomic_attributes)].concat());
+    assert!(neighbor
         .normalize_rib_entry(1, 0, &Limits::default())
         .unwrap()
         .is_none());
@@ -620,7 +678,9 @@ fn contradictory_lengths_et_and_malformed_attributes_are_rejected() {
     let mut b = bgp4mp(4, false, false);
     let end = b.len();
     b[end - 2] = 0; // BGP length no longer agrees
-    assert!(MrtBatch::parse(&b, source(), &MrtLimits::default()).is_err());
+    let malformed = MrtBatch::parse(&b, source(), &MrtLimits::default())
+        .expect("complete MRT container retains malformed embedded frame");
+    assert!(matches!(malformed.records[0].body, MrtBody::Bgp4mp(_)));
     let mut b = bgp4mp(7, true, false);
     b[12..16].copy_from_slice(&1_000_000u32.to_be_bytes());
     let parsed = MrtBatch::parse(&b, source(), &MrtLimits::default())

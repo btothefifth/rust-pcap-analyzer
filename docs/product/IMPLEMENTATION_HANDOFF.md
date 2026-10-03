@@ -1,5 +1,20 @@
 # Implementation handoff: reconcile the original design with the expanded product
 
+> **Current status:** This document preserves the original design reconciliation
+> and earlier implementation order. The O14-1 worktree candidate adds
+> source-ordered BGP4MP Adj-RIB-In replay, a bounded BMP v1 file/store/replay
+> path, and persisted capture/MRT/BMP query, policy, export, and association
+> consumers. Storage admission, bounded research listing, validation/package
+> frontier, generation-CLI, and operator-truth changes are tracked in the
+> [objective ledger](../implementation/OBJECTIVES_1_4.md). The root-owned
+> [same-generation validation receipt](../../evidence/objectives-1-4-validation.json)
+> governs executed checks; broader profile and qualification gates remain open.
+> The DNP3-first sequencing and imported-BGP4MP backlog below are historical.
+> An optional authorized OPC UA transform path is isolated in the Python depth
+> tooling. Its current tests cover authorization, Sign-mode MAC behavior, and
+> tamper rejection only; AES secure-channel processing and certificate trust
+> remain untested or unqualified, and the transform is not a parser dependency.
+
 ## DNP3 workflow candidate — native gates run locally
 
 The additive worker slice based on
@@ -24,20 +39,25 @@ has now passed fresh root format/build/test/clippy, product debug/release and
 feature-matrix gates, streaming debug/release and clippy gates, and the focused
 DNP3 workflow suites. Those results validate this candidate slice, not complete
 protocol or release qualification. Full platform/live, scale, fuzz, external
-corpus, secure and normative gates remain open. The next smallest semantic slice
-is an independent DNP3 application/object or reconciliation package with an
-explicit review of the recent streaming integration and related implemented
-pieces.
+corpus, secure and normative gates remain open. At that DNP3 checkpoint, the
+next DNP3-local slice was an independent application/object or reconciliation
+package with an explicit review of the recent streaming integration. The
+repository-wide priority at the DNP3 checkpoint captured here was imported
+BGP4MP session semantics. The active package now follows O14-1, as recorded in
+the current implementation pointer and objective ledger.
 
 The additive depth/history work is governed by
 [DEPTH_CONTRACT.md](DEPTH_CONTRACT.md). It is intentionally a partial,
 source-bound observer layered above the existing contracts. Do not infer full
 protocol support, complete TCP replay, endpoint effects, timing replay, secure
-decryption, or normative conformance from its presence.
+channel qualification, certificate trust, or normative conformance from its
+presence. The isolated OPC UA transform exception above does not qualify AES or
+make encryption part of the Rust parser.
 
-This file is the single handoff package for the next implementing agent. Apply it
-to the public `rust-pcap-analyzer` repository. The repository is the product; the
-reference parser and the supplied design documents are inputs to reconcile, not a
+This file reconciles the original design with the expanded public
+`rust-pcap-analyzer` product. Use the current pointer and BGP completion contract
+for the active work package and next action. The repository is the product; the
+reference parser and supplied design documents are inputs to reconcile, not a
 reason to rename, privatize or narrow the product.
 
 ## Mission
@@ -147,8 +167,11 @@ The following are hard requirements:
 - Preserve duplicate and ordered observations in research and differential output.
   Parser disagreement is evidence to investigate, not a vote. Agreement with an
   external tool is not proof of correctness.
-- Do not decrypt TLS or other encrypted sessions, retain secrets, emulate devices,
-  or claim attack detection/attribution merely because a message was decoded.
+- The Rust parser does not decrypt TLS or other encrypted sessions or retain
+  secrets, emulate devices, or claim attack detection/attribution merely because
+  a message was decoded. The optional authorized OPC UA transform remains a
+  separate Python depth-tooling exception; its Sign-mode tests do not qualify
+  AES secure-channel processing or certificate trust.
 - Live capture is explicit opt-in and fail-closed. The offline parser must not
   silently open an interface, inject traffic, call a remote service or fall back
   from a missing native engine to a weaker implementation.
@@ -254,11 +277,14 @@ Implement protocol families in vertical slices. Each slice must include:
 
 For industrial protocols, deepen DNP3 object/qualifier semantics, Modbus device
 semantics, BACnet services, CIP object paths, MMS presentation/COTP, GOOSE and
-sampled-value semantics only through the shared provenance API. After the DNP3
-non-secure/reconciliation gate, BGP is the next protocol priority and should be
-completed as a coherent bounded semantic package before the remaining protocol
-families. Keep secure or encrypted semantics explicitly unsupported. Do not turn
-a framing detector into a full protocol claim.
+sampled-value semantics only through the shared provenance API. This original
+sequence placed BGP after the DNP3 non-secure/reconciliation gate. The imported
+BGP4MP session work named above was an intermediate priority; the O14-1 candidate
+and its remaining BGP gates are summarized at the top. This does not imply that
+DNP3 or BGP profile qualification is complete. Keep secure or encrypted
+protocol semantics outside the parser, with the separately authorized OPC UA
+transform remaining a Sign-only tested, non-AES-qualified Python tooling path.
+Do not turn a framing detector into a full protocol claim.
 
 Acceptance: each family has a bounded conformance subset, malformed-neighbor
 tests, a documented unsupported boundary, and a receipt proving which cases were

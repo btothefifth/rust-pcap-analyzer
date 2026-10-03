@@ -1,6 +1,23 @@
 # PCAP Platform Completion Roadmap
 
-## BGP candidate route-state consumer — additive source candidate
+## Current priority
+
+[The current implementation pointer](../implementation/CURRENT.md),
+[objectives 1–4 ledger](../implementation/OBJECTIVES_1_4.md), and
+[BGP completion contract](BGP_COMPLETION.md) govern the O14-1 candidate. It
+contains source-ordered imported BGP4MP Adj-RIB-In state, the bounded BMP v1
+file/store/replay path, and persisted capture/MRT/BMP query, policy, export,
+and association consumers. Storage admission, bounded research listing,
+validation/package-frontier, generation-CLI, and operator-truth work are also
+part of this candidate. The [same-generation validation receipt](../../evidence/objectives-1-4-validation.json)
+is authoritative for executed checks. Sustained fuzzing, lawful real-corpus
+parity, scale/RSS, normative/security review, and exact-head platform gates
+remain separate, unqualified dimensions; implementation progress is not profile
+qualification.
+The support-matrix tests check row shape and referenced paths only; they do not
+establish the truth of remaining-work prose or prove that a gate executed.
+
+## Historical BGP candidate route-state consumer — pre-O14-1
 
 The separate `deep::bgp_state` API is specified in [BGP_STATE.md](BGP_STATE.md). It consumes
 normalized captured/imported observations with exact inherited provenance,
@@ -10,9 +27,12 @@ state is not an endpoint RIB, best path, causal proof or authoritative source.
 There is no automatic change to existing decoder/event/CLI output, no cross-source
 join and no new dependency.
 
-The candidate route-state API consumes normalized, source-bound observations
+This earlier candidate route-state API consumes normalized, source-bound observations
 and preserves source/session/generation/direction partitions. Its current
 behavior and limits are summarized in the product validation and BGP contracts.
+O14-1 extends this path through imported MRT/BMP reducers and persisted
+consumers; consult the current pointer and owning leaf contracts for present
+scope.
 
 ## DNP3 fragment and streaming confirmation candidates — Windows native acceptance
 
@@ -46,11 +66,12 @@ free-format file-object metadata/content-hash evidence to the root semantic
 decoder while preserving hash-only handling for opaque payloads and source-bound
 spans. The opt-in depth sink now adds conservative cross-APDU file-transfer
 candidate reconciliation with explicit gaps, conflicts, duplicates, and
-witnesses. The next priority is endpoint-authoritative transfer semantics or
-secure/authenticated semantics; each remains separately gated and must not be
-inferred from candidate source coverage.
+witnesses. At that DNP3 checkpoint, the next DNP3-local priorities were
+endpoint-authoritative transfer semantics or secure/authenticated semantics;
+both remain separately gated. At that roadmap checkpoint, the repository-wide
+priority was the imported BGP4MP work described in the then-current header.
 
-Status: active project plan  
+Status: historical plan sequence; see current priority above and the BGP completion contract.
 Owner: repository integration and review  
 Execution: bounded implementation slices with isolated integration and local acceptance
 
@@ -61,12 +82,14 @@ a thoroughly tested offline PCAP analysis platform. The repository and its
 tests are authoritative. Every change must be isolated, validated, reviewed,
 documented, and accepted before integration.
 
-The first priority is complete declared **non-secure offline DNP3** support.
-The word “complete” is intentionally bounded: it covers the protocol semantics
-that can be derived from captured bytes without secrets, device emulation,
-active traffic generation, or attack attribution. Secure authentication and
-encrypted payload recovery remain explicit later capabilities rather than
-implicit promises.
+The earlier roadmap sequence first prioritized complete declared **non-secure
+offline DNP3** support. The word “complete” is intentionally bounded: it covers
+the protocol semantics that can be derived from captured bytes without secrets,
+device emulation, active traffic generation, or attack attribution. Secure
+authentication and encrypted payload recovery remain explicit later
+capabilities rather than implicit promises. The imported-BGP4MP priority that
+followed this historical sequencing has since been superseded by the O14-1
+candidate described at the top of this document.
 
 Correctness is not defined by agreement with an existing analyzer. A separate
 first-class objective of this platform is to discover, explain, and regress
@@ -125,7 +148,7 @@ and cross-source correlation.
 
 ## Ordered implementation program
 
-### Phase DNP3 — first and highest priority
+### Historical phase DNP3 — first and highest priority in this roadmap revision
 
 Deliver a vertical slice at a time, keeping each slice independently useful
 and reviewable.
@@ -166,11 +189,11 @@ and reviewable.
    - documentation that states the supported edition/subset and every
      intentional non-goal.
 
-### Phase protocols — after DNP3’s non-secure gate
+### Historical phase protocols — after DNP3’s non-secure gate in this roadmap revision
 
 Complete each family as a coherent semantic package, not merely by adding a
-port number or a framing label. BGP is the next protocol priority after the
-DNP3 non-secure/reconciliation gate. The order is:
+port number or a framing label. In this earlier sequence BGP followed the DNP3
+non-secure/reconciliation gate. The remaining historical order is:
 
 1. BGP: complete OPEN, KEEPALIVE, NOTIFICATION, UPDATE, path-attribute,
    capability, session, stream-reassembly, and malformed/segmented semantics;
@@ -190,7 +213,9 @@ DNP3 non-secure/reconciliation gate. The order is:
    correlation.
 7. OPC UA: secure/non-secure endpoint identity, message/chunk boundaries,
    namespace/type information, and an explicit boundary for decryption and
-   certificate validation.
+   certificate validation. An optional authorized transform is isolated in the
+   Python depth tooling; its current tests cover Sign-mode behavior only, not
+   AES secure-channel qualification or certificate trust.
 8. HART-IP, FINS, ADS, MELSEC, EtherCAT, PROFINET, POWERLINK, Zigbee, and
    STP: promote each from a bounded framing subset only when semantic cases,
    independent oracles, and evidence limits exist.

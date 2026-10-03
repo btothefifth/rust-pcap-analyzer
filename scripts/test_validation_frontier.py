@@ -1,0 +1,168 @@
+"""Cheap census of the declared CI/driver frontier; no native builds."""
+import ast
+import importlib.util
+from pathlib import Path
+import sys
+import tomllib
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
+import validation_frontier as frontier
+
+
+class ValidationFrontier(unittest.TestCase):
+    def test_every_runtime_workspace_selected(self):
+        # Independent census: every non-fuzz package with an isolated workspace.
+        import os
+        manifests = set()
+        for directory, subdirs, files in os.walk(ROOT):
+            subdirs[:] = [name for name in subdirs if name not in {'target', '.git', '.local-tooling', '.local-build'}]
+            if 'Cargo.toml' in files:manifests.add((Path(directory)/'Cargo.toml').relative_to(ROOT).as_posix())
+        manifests -= set(frontier.EXCLUDED_WORKSPACES)
+        self.assertEqual(manifests, {manifest for _, manifest in frontier.WORKSPACES})
+        for _, manifest in frontier.WORKSPACES:
+            self.assertIn('workspace', tomllib.loads((ROOT / manifest).read_text()))
+
+    def test_all_declared_feature_profiles_selected_in_isolation(self):
+        features = tomllib.loads((ROOT / 'product/Cargo.toml').read_text())['features']
+        self.assertEqual(set(frontier.FEATURE_PROFILES), {''} | (set(features) - {'default'}))
+        rows = {name: command for name, command in frontier.native_commands() if name.startswith('features-')}
+        self.assertEqual(len(rows), len(features))
+        for command in rows.values():
+            self.assertIn('--no-default-features', command)
+
+    def test_independent_python_populations_are_nonempty_and_reachable(self):
+        vectors = sorted((ROOT / 'product/tests').glob('*vectors.py'))
+        self.assertEqual(len(vectors), 10)
+        self.assertEqual(sum(count_tests(path) for path in vectors), 68)
+        self.assertEqual(count_tests(ROOT / 'scripts/test_semantic_tools.py'), 15)
+        self.assertEqual(count_tests(ROOT / 'tools/depth/test_opcua_crypto.py'), 3)
+        rows = dict(frontier.portable_commands(sys.executable))
+        self.assertEqual(rows['bgp-vectors'][-3:], ['-p', '*vectors.py', '-v'])
+        self.assertIn('tools.depth.test_opcua_crypto', rows['opcua-transforms'])
+        for path in ('scripts/test_semantic_tools.py', 'scripts/test_package_contract.py'):
+            self.assertTrue((ROOT / path).is_file())
+
+    def test_product_workflow_selects_dependency_frontier_and_three_platforms(self):
+        text = (ROOT / '.github/workflows/product-qualification.yml').read_text()
+        for event in ('push:', 'pull_request:'):
+            block = text.split('  ' + event, 1)[1].split('permissions:', 1)[0]
+            if event == 'push:':block = block.split('  pull_request:', 1)[0]
+            for path in ('src/**', 'streaming/**', 'history/**', 'history-app/**',
+                         'fixtures/**', 'scripts/**', 'Cargo.toml', 'rust-toolchain.toml'):
+                self.assertIn("'" + path + "'", block)
+        self.assertIn('macos-latest', text)
+        self.assertIn('windows-latest', text)
+        self.assertIn('ubuntu-22.04', text)
+        self.assertIn('python scripts/validate_product.py', text)
+        self.assertIn('CARGO_TARGET_DIR:', text)
+
+    def test_source_identity_preserves_untracked_sources_and_prunes_tooling(self):
+        import tempfile
+        spec = importlib.util.spec_from_file_location('baseline_validator', ROOT/'scripts/validate.py')
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        with tempfile.TemporaryDirectory(prefix='pcap-source-identity-') as temporary:
+            root = Path(temporary)
+            (root/'src').mkdir()
+            (root/'src/lib.rs').write_text('original')
+            validator.ROOT = root
+            before = validator.source_identity()
+            snapshot = frontier.source_snapshot(root)
+            for name in ('.local-tooling', '.local-build', 'evidence', 'target'):
+                (root/name).mkdir()
+                (root/name/'growth.bin').write_bytes(b'x'*1024)
+            self.assertEqual(before, validator.source_identity())
+            self.assertEqual(snapshot, frontier.source_snapshot(root))
+            (root/'untracked.py').write_text('source')
+            self.assertNotEqual(before, validator.source_identity())
+            self.assertNotEqual(snapshot, frontier.source_snapshot(root))
+            after = validator.source_identity()
+            (root/'src/lib.rs').write_text('changed')
+            self.assertNotEqual(after, validator.source_identity())
+
+    def test_red_portable_preflight_suppresses_native_in_both_drivers(self):
+        import subprocess
+        import tempfile
+        import contextlib
+        import io
+        from unittest import mock
+        import validate_product
+        import validate_followup
+        for driver in (validate_product, validate_followup):
+            observed = []
+            def execute(command, **kwargs):
+                observed.append(command)
+                return subprocess.CompletedProcess(command,1 if 'scripts/test_package_contract.py' in command else 0)
+            with tempfile.TemporaryDirectory(prefix='pcap-red-preflight-') as temporary:
+                output = Path(temporary)/'receipt'
+                with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(driver.platform,'platform',return_value='test-platform'), mock.patch.object(driver.subprocess,'run',execute), mock.patch.object(driver.shutil,'which',side_effect=lambda name:'/unexecuted/'+name):
+                    result = driver.main(['--output',str(output)]) if driver is validate_product else driver.run(output)
+                self.assertEqual(result,1)
+                self.assertTrue(any('scripts/test_package_contract.py' in command for command in observed))
+                self.assertFalse(any(Path(command[0]).name in {'cargo','cc','cl'} for command in observed))
+                self.assertFalse(any('scripts/validate_semantic_product.py' in command or 'scripts/check_linked_abi.py' in command for command in observed))
+
+    def test_target_resolution_and_mutation_copy_preserve_runtime_origin(self):
+        import os
+        import tempfile
+        from unittest import mock
+        import mutation_check
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory(prefix='pcap-native-target-') as temporary:
+            root = Path(temporary)/'repo'
+            root.mkdir()
+            with mock.patch.dict(os.environ,{'CARGO_TARGET_DIR':'shared-target'}):
+                self.assertEqual(frontier.native_artifact(root,'Cargo.toml','pcap-evidence',profile='debug'),root/'shared-target/debug/pcap-evidence')
+            configured = Path(temporary)/'configured-target'
+            with mock.patch.dict(os.environ,{'CARGO_TARGET_DIR':str(configured)}):
+                self.assertEqual(frontier.native_artifact(root,'Cargo.toml','pcap-evidence',profile='debug'),configured/'debug/pcap-evidence')
+                with mock.patch.object(mutation_check.subprocess,'run',return_value=None) as child:
+                    mutation_check.run(root,'capture_contract','exact_test')
+                self.assertEqual(child.call_args.kwargs['env']['CARGO_TARGET_DIR'],str(root.parent/'mutation-target'))
+            # Inspect the actual copy ignore callback at the owning copytree boundary.
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(mutation_check.shutil,'which',return_value='/unused/tool'), mock.patch.object(mutation_check.shutil,'copytree') as copied, mock.patch.object(mutation_check,'MUTANTS',[]):
+                self.assertEqual(mutation_check.main(),0)
+            ignored = copied.call_args.kwargs['ignore'](str(root),['src','.local-tooling','.local-build','target','.git'])
+            self.assertEqual(set(ignored),{'.local-tooling','.local-build','target','.git'})
+
+    def test_missing_configured_cli_is_blocked_without_stale_fallback(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        from unittest import mock
+        import check_cli
+        with tempfile.TemporaryDirectory(prefix='pcap-cli-origin-') as temporary:
+            root = Path(temporary)/'repo'
+            stale = root/'target/debug/pcap-evidence'
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b'stale must never execute')
+            configured = Path(temporary)/'configured'
+            output = io.StringIO()
+            with mock.patch.dict(os.environ,{'CARGO_TARGET_DIR':str(configured)}), mock.patch.object(check_cli,'__file__',str(root/'scripts/check_cli.py')), mock.patch.object(sys,'argv',['check_cli.py']), mock.patch.object(check_cli,'check') as native, contextlib.redirect_stdout(output):
+                self.assertEqual(check_cli.main(),2)
+            native.assert_not_called()
+            self.assertIn(str(configured/'debug/pcap-evidence'),output.getvalue())
+            self.assertIn('BLOCKED',output.getvalue())
+
+    def test_manifest_paths_close_over_local_dependencies(self):
+        manifests = {manifest for _, manifest in frontier.WORKSPACES}
+        for _, manifest in frontier.WORKSPACES:
+            document = tomllib.loads((ROOT / manifest).read_text())
+            for dependency in document.get('dependencies', {}).values():
+                if isinstance(dependency, dict) and 'path' in dependency:
+                    target = ((ROOT / manifest).parent / dependency['path'] / 'Cargo.toml').resolve().relative_to(ROOT)
+                    self.assertIn(target.as_posix(), manifests)
+
+
+def count_tests(path):
+    tree = ast.parse(path.read_text())
+    return sum(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('test_')
+               for node in ast.walk(tree))
+
+
+if __name__ == '__main__':
+    unittest.main()

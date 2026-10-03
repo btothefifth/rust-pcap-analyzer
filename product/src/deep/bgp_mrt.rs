@@ -10,7 +10,7 @@ use super::bgp_import::{
     self, ClockPolicy, ImportContext, ObservationClock, SourceBatch, SourceRange,
 };
 use super::model::bad;
-use pcap_evidence::{json::Json, sha256, Error, Result};
+use pcap_evidence::{json::Json, sha256, Error, ErrorCode, Result};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -161,7 +161,9 @@ pub enum Bgp4mpPayload {
         old: u16,
         new: u16,
     },
-    /// Exactly one framed BGP message, preserved in source order.
+    /// Exact embedded bytes, preserved in source order. Frame syntax is
+    /// adjudicated by the shared BGP decoder during replay, including malformed
+    /// frames; container admission never promotes these bytes to a route.
     Message(Vec<u8>),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -532,14 +534,11 @@ fn parse_bgp4mp(
         Bgp4mpPayload::State { old, new }
     } else {
         let msg = c.rest();
-        if msg.len() < 19
-            || msg[..16] != [0xff; 16]
-            || usize::from(u16::from_be_bytes([msg[16], msg[17]])) != msg.len()
-        {
+        if msg.is_empty() {
             return Err(bad(
                 "mrt_bgp_message",
                 c.base + c.at - msg.len(),
-                "invalid BGP message frame",
+                "empty embedded BGP message",
             ));
         }
         m.add(0, 0, 0, msg.len(), msg.len(), msg.len() * 2)?;
@@ -634,7 +633,8 @@ impl MrtBatch {
             let digest = sha256::hex(&sha256::digest(&input[at..end]));
             let mut payload = &input[at + 12..end];
             let mut microseconds = None;
-            if record_type == 17 {
+            let malformed_et_prefix = record_type == 17 && payload.len() < 4;
+            if record_type == 17 && !malformed_et_prefix {
                 let mut et = Cursor::new(payload, at + 12);
                 let us = et.u32()?;
                 microseconds = Some(us);
@@ -647,39 +647,52 @@ impl MrtBatch {
             if record_type != 13 || !matches!(subtype, 1..=6) {
                 table = None;
             }
-            let body = match (record_type, subtype) {
-                (13, 1) => {
-                    let p = parse_peers(payload, base, &mut m)?;
-                    table = Some((at as u64, digest.clone(), p.peers.len()));
-                    MrtBody::PeerIndex(p)
+            let body = if malformed_et_prefix {
+                m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+                MrtBody::Opaque {
+                    reason: "malformed_bgp4mp_record",
+                    bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
                 }
-                (13, 2 | 4 | 6) => {
-                    match parse_rib(payload, base, subtype, table.as_ref(), &mut m)? {
-                        Some(r) => MrtBody::Rib(r),
-                        None => {
-                            m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
-                            MrtBody::Opaque {
-                                reason: "unsupported_afi_safi",
-                                bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+            } else {
+                match (record_type, subtype) {
+                    (13, 1) => {
+                        let p = parse_peers(payload, base, &mut m)?;
+                        table = Some((at as u64, digest.clone(), p.peers.len()));
+                        MrtBody::PeerIndex(p)
+                    }
+                    (13, 2 | 4 | 6) => {
+                        match parse_rib(payload, base, subtype, table.as_ref(), &mut m)? {
+                            Some(r) => MrtBody::Rib(r),
+                            None => {
+                                m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+                                MrtBody::Opaque {
+                                    reason: "unsupported_afi_safi",
+                                    bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+                                }
                             }
                         }
                     }
-                }
-                (16 | 17, _) => match parse_bgp4mp(payload, base, subtype, &mut m)? {
-                    Some(b) => MrtBody::Bgp4mp(b),
-                    None => {
+                    (16 | 17, _) => match parse_bgp4mp(payload, base, subtype, &mut m) {
+                        Ok(Some(b)) => MrtBody::Bgp4mp(b),
+                        Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
+                        result => {
+                            m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+                            MrtBody::Opaque {
+                                reason: if result.is_err() {
+                                    "malformed_bgp4mp_record"
+                                } else {
+                                    "unsupported_bgp4mp_subtype_or_afi"
+                                },
+                                bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+                            }
+                        }
+                    },
+                    _ => {
                         m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
                         MrtBody::Opaque {
-                            reason: "unsupported_bgp4mp_subtype_or_afi",
+                            reason: "unsupported_type_or_subtype",
                             bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
                         }
-                    }
-                },
-                _ => {
-                    m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
-                    MrtBody::Opaque {
-                        reason: "unsupported_type_or_subtype",
-                        bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
                     }
                 }
             };
@@ -838,6 +851,7 @@ impl MrtBatch {
                 large_communities: &parsed_attributes.large_communities,
                 incompleteness_reasons: &reasons,
                 opaque_occurrences: &[],
+                atomic_aggregate: parsed_attributes.seen.contains(&6),
             },
             limits,
         )?;
@@ -874,6 +888,10 @@ impl MrtBatch {
                 "route attributes are not an object",
             ));
         };
+        attributes.push((
+            "atomic_aggregate",
+            parsed_attributes.seen.contains(&6).into(),
+        ));
         let mut normalized_large_communities = parsed_attributes.large_communities.clone();
         normalized_large_communities.sort_unstable();
         normalized_large_communities.dedup();
@@ -957,7 +975,7 @@ fn semantic_attributes(
         }
         seen[usize::from(code)] = true;
         let expected_flags = match code {
-            1 | 2 | 3 | 5 => 0x40,
+            1 | 2 | 3 | 5 | 6 => 0x40,
             4 | 9 | 10 => 0x80,
             8 | 32 => 0xc0,
             _ => return Ok(None),
@@ -1013,6 +1031,7 @@ fn semantic_attributes(
                         .map_err(|_| Error::limit("mrt_attribute"))?,
                 ))
             }
+            6 if len == 0 => {}
             8 if len != 0 && len % 4 == 0 => {
                 if len / 4 > limits.elements.saturating_sub(out.communities.len()) {
                     return Err(Error::limit("mrt_import_communities"));

@@ -37,16 +37,31 @@ and is owned by the capture/MRT normalizers and the shared route-evidence model.
 ## Versioned representation
 
 The compatible additive representation is
-`pcap-evidence.bgp.semantic-route-identity.v1` with these logical fields:
+`pcap-evidence.bgp.semantic-route-identity.v2` with these logical fields:
 
 | Field | Rule |
 | --- | --- |
 | `schema` | Exact version above. |
 | `completeness` | `complete`, `incomplete`, or `unresolved`; never infer `complete` from a successful outer parse alone. |
 | `fingerprint_sha256` | Present only for `complete`; hash the canonical semantic payload with a domain separator and explicit length framing. |
-| `opaque_occurrence_fingerprints` | Optional, per-occurrence hashes for unsupported values; labeled byte-evidence only and excluded from the semantic fingerprint. |
+| `opaque_occurrence_fingerprints` | Required array of per-occurrence hashes for unsupported or unresolved values; labeled byte-evidence only and excluded from the semantic fingerprint. |
 | `incompleteness_reasons` | Deterministically sorted codes naming unknown, unsupported, malformed, duplicate, or unresolved-context causes. |
-| `canonical_payload` | Optional bounded diagnostic projection. It contains normalized route key and supported semantic values, never source identity or wire offsets. |
+| `canonical_payload` | Required field, null unless complete. A complete payload contains normalized route key and supported semantic values, never source identity or wire offsets. |
+
+The exact complete payload contains `route_key` and `attributes`. Its eleven
+attribute fields are `origin`, `as_path`, `next_hop`, `med`, `local_preference`,
+`aggregator`, `atomic_aggregate`, `communities`, `large_communities`,
+`originator_id`, and `cluster_list`. `atomic_aggregate` is a Boolean derived from
+valid effective type-6 presence. The digest input is the exact schema string,
+one zero octet, an eight-octet big-endian encoded-payload length, and the fixed
+canonical JSON payload bytes. A v1 fingerprint and v2 fingerprint are different
+versioned identities even when the ten legacy values agree.
+
+The consumer retains legacy v1 reads with their original ten-field payload and
+v1 domain, but refuses a complete v1 sidecar when retained occurrences contain
+types 6, 17, or 18, or the imported projection asserts ATOMIC_AGGREGATE. Legacy
+receipts remain evidence of their original version and supported scope; they do
+not establish current v2 parity. Fresh source replay produces v2.
 
 The canonical payload uses a fixed schema and field order. Scalar values use
 their protocol-domain numeric/string representations. Sets are sorted and
@@ -69,6 +84,34 @@ Communities (RFC 1997) are also set-valued. Do not generalize these rules to
 another attribute without an explicit standards basis. A field named
 `value_sha256` hashes only the attribute value bytes, not the attribute TLV.
 
+The complete profile inventory is deliberately finite:
+
+| Attribute or NLRI | v2 meaning and boundary |
+| --- | --- |
+| 1 ORIGIN, 2 AS_PATH, 3 NEXT_HOP | Mandatory supported values; ASN wire layout must be resolved from valid bilateral context. A unique byte shape alone cannot supply negotiation. |
+| 4 MED, 5 LOCAL_PREF | Scalar values; LOCAL_PREF requires resolved peer relationship and is absent from effective semantics when validly discarded for an external peer. |
+| 6 ATOMIC_AGGREGATE, 7 AGGREGATOR | Valid type-6 presence and effective aggregator, including RFC 6793 resolution. |
+| 8 COMMUNITIES, 32 LARGE_COMMUNITY | Sets with the normalization rules above. |
+| 9 ORIGINATOR_ID, 10 CLUSTER_LIST | Scalar and ordered list; require resolved peer relationship or a validated external-peer discard. |
+| 14 MP_REACH_NLRI, 15 MP_UNREACH_NLRI | Valid negotiated grammar contributes next hop and route prefixes; unresolved grammar or duplicate MP attributes prevents completeness. |
+| 17 AS4_PATH, 18 AS4_AGGREGATOR | Raw transition evidence is retained; only verified effective RFC 6793 reconstruction or a valid prescribed discard contributes meaning. |
+| 16 Extended Communities, 26 AIGP, 35 OTC | Structural projections can be retained, but semantic coverage is incomplete; no complete fingerprint. |
+| Other attribute types | Opaque evidence; no complete fingerprint. |
+| IPv4/IPv6 unicast NLRI, SAFI 1 | Family, canonical prefix length, and address contribute to route identity. |
+| ADD-PATH identifiers | Retained as source state keys; excluded from semantic meaning after grammar context is resolved. |
+| SAFI 2 or other families | Outside this semantic profile; no complete fingerprint. |
+
+RFC 6793 reconstruction discards transition attributes on a resolved NEW/NEW
+session. For OLD/NEW, AS_SET contributes one to path count and confederation
+segments contribute zero; retain the required leading AS_PATH portion and
+leading confederation segments before appending the usable AS4_PATH suffix.
+AS4_PATH confederation segments are filtered. A longer AS4_PATH is ignored. If
+both aggregators are present and the old AGGREGATOR ASN is not AS_TRANS (23456),
+ignore AS4_PATH and AS4_AGGREGATOR. An AS_TRANS AGGREGATOR selects the valid
+AS4_AGGREGATOR. Malformed first transition occurrences remain incomplete even
+when the protocol's error disposition discards them. A valid discard does not
+erase the source occurrence or its disposition.
+
 ## Producer-to-consumer procedure
 
 1. **Capture producer:** retain each attribute occurrence, exact byte range,
@@ -81,6 +124,26 @@ another attribute without an explicit standards basis. A field named
    entry is emitted as `opaque_only` evidence with a null semantic fingerprint
    and is not admitted as a route candidate; supported but Partial attributes
    may retain a normalized projection but remain incomplete and untrusted.
+   BGP4MP uses the shared capture UPDATE decoder with imported session context,
+   then supplies `imported_attribute_occurrences` rather than captured packet
+   spans. This carrier has schema
+   `pcap-evidence.bgp.imported-attribute-occurrences.v1`, coordinate system
+   `bgp-message-relative`, exact `message_length` and `message_sha256`, and an
+   ordered `occurrences` array with raw lower-case `value_hex` alongside each
+   occurrence's value digest. `message_prefix_hex` preserves the raw message
+   through the start of the attribute block, including the header, withdrawals,
+   and declared attribute length; `message_suffix_hex` preserves all bytes after
+   that block. Reconstructed ordered TLVs between these endpoints must cover
+   the entire declared attribute block and reproduce the exact message digest.
+   Thus deleting an unsupported tail, a middle occurrence, or the entire
+   inventory cannot promote an incomplete message into a complete identity.
+   A complete directed imported wire UPDATE requires the carrier and both raw
+   endpoints; a legacy carrier without endpoints may retain incomplete evidence.
+   Directionless TABLE_DUMP_V2 has no enclosing BGP message and retains its
+   separately validated normalized profile. Direction labels remain assertions.
+   The message extent and digest must match an exact
+   enclosing source range in `ImportContext.provenance`. Imported route field
+   spans remain zero and captured `attribute_ranges` remain empty.
 3. **Identity:** canonicalize the route key and supported semantics using this
    versioned contract. Exclude all source/provenance/time/wire-encoding fields.
    If any route-affecting input is unresolved, omit the complete fingerprint.
@@ -138,17 +201,18 @@ not evidence for the intended downstream behavior.
   provenance, source partitions, and false authority flags remain intact.
 
 Use RFC 4271 for UPDATE attribute ordering/encoding rules, RFC 7606 for error
-and duplicate dispositions, and RFC 8092 for Large Community set semantics.
+and duplicate dispositions, RFC 6793 for AS4 reconstruction/discard, and RFC
+8092 for Large Community set semantics.
 These primary specifications—not agreement with another dissector—adjudicate
 the expected result.
 
 ## Promotion criteria and current limitations
 
-Capture and TABLE_DUMP_V2 now emit the same versioned identity for the locally
-tested supported subset; the replay also exposes unsupported RIB entries as
+Capture, TABLE_DUMP_V2, and native BGP4MP emit the same versioned identity for the
+locally tested supported subset; the replay also exposes unsupported RIB entries as
 opaque-only evidence without admitting candidates. This is a local
 implementation slice, not full BGP-C08 qualification: complete profile
-coverage, cross-source join/query/export, BGP4MP semantic parity, executable
+coverage, cross-source join/query/export, complete BGP4MP profile parity, executable
 coverage of every row, exact-commit cross-platform CI, fuzzing, real-corpus
 parity, and scale remain separate gates. A normalized complete identity is
 validated against its schema, route key, domain-framed payload digest, and the
@@ -162,8 +226,26 @@ fingerprints. Large Communities are checked against the first effective type-32
 occurrence retained in captured attribute evidence. For TABLE_DUMP_V2, the MRT
 normalizer retains a separate sorted/deduplicated Large Communities projection
 in the route attribute envelope, and the consumer requires it to agree with
-the identity payload. The consumer does not independently re-decode the
-original source bytes; this consistency check is not source authentication.
+the identity payload. For BGP4MP, the state consumer verifies imported raw-value
+digests and message-relative occurrence extents/order, independently re-decodes
+supported scalar, collection, path, and MP projections, recomputes effective
+AS4 values and valid discard categories, closes whole-message inventory
+membership against the raw endpoints and source digest, and checks complete-field admission against source flags and first
+effective occurrences. It does not infer negotiated grammar from raw byte
+shape. Caller-supplied import context remains an assertion: the generic
+normalized-envelope boundary cannot authenticate an external file from its
+digest alone. Sealed MRT store replay separately verifies its source file and
+rebuilds the imported projection from those bytes. Neither boundary establishes
+endpoint state or route authority.
+
+The finite `bgp_semantic_parity` regression target includes an independently
+encoded transition capture and native four-octet BGP4MP file through capture
+journal replay and sealed MRT store replay, rebuilt-fingerprint adversaries,
+atomic/AS4 legacy compatibility, malformed neighbors, valid discard categories,
+relabeling of a required AS4 aggregator as discarded, unsupported occurrence
+omission, missing closure, forged raw flags/endpoints/declarations, and preserved
+occurrence evidence. Authored tests and local passing selectors
+must be reported separately from exact-commit CI or broader qualification.
 
 The generic `ImportedRouteObservation` adapter deliberately does not emit this
 identity. Its typed input does not retain a validated occurrence inventory for

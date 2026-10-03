@@ -4,9 +4,15 @@ This page preserves chronological implementation receipts. Statements below
 that say a worker could not run Rust or list issues as still open are
 point-in-time findings, not the current backlog. Use
 [the current implementation pointer](../implementation/CURRENT.md) and the
-[BGP completion contract](BGP_COMPLETION.md) for current status; the later audit
-fix records duplicate-attribute and producer-boundary changes validated on
-2026-09-25.
+[BGP completion contract](BGP_COMPLETION.md) and
+[objectives 1–4 ledger](../implementation/OBJECTIVES_1_4.md) for current status.
+The O14-1 worktree candidate includes imported BGP4MP Adj-RIB-In replay, bounded
+BMP v1 source/replay, persisted capture/MRT/BMP query, policy, export and
+association consumers, plus storage, listing, validation/package, CLI parsing,
+and operator-truth changes. The exact assembled-source result is in the
+[same-generation validation receipt](../../evidence/objectives-1-4-validation.json).
+The earlier audit fix recorded duplicate-attribute and producer-boundary
+changes validated on 2026-09-25; its remaining-work prose is historical.
 
 ## Captured BGP producer parity — source candidate
 
@@ -171,7 +177,7 @@ receipts before relying on any older result.
 |---|---|---|
 | Rust-owned TCP history | New `history/` workspace: source-bound journal, automatic scoped generation/epoch hypotheses, bounded tuple eviction/reload, source spans, external interval sort, late conflicts, quotas, cancellation, replay verification and prefix recovery | Integrated Windows format, debug/release test, example-build and Clippy gates pass; unlimited IP/application history, arbitrary endpoint truth and O(1) resume are not implemented |
 | Deeper protocol semantics | BACnet services and CIP path/status fields wired into `Protocol::decode`; Tier-A adds source-bound DNP3 per-fragment object reports and Modbus bit/register semantics through root and streaming consumers | Partial subsets only; no normative edition approval, deep multi-APDU DNP3 object completion or complete MMS stack; root complete-message decoding is already available |
-| Opt-in depth/history addendum | Bounded deep reports across industrial, fieldbus, ISO/MMS/S7, OPC UA and IEEE 802.15.4/Zigbee families; verified packet-map sink; bounded Group 70 file-transfer candidate reconciliation; typed history ranges; stateful history-app consumer; explicit optional OPC UA transform boundary | Ten direct depth tests plus reconciler unit cases, product/history compiles and real PCAP/history smoke runs pass; no complete TCP replay, timing replay, secure decryption, endpoint-authoritative transfer state or normative qualification |
+| Opt-in depth/history addendum | Bounded deep reports across industrial, fieldbus, ISO/MMS/S7, OPC UA and IEEE 802.15.4/Zigbee families; verified packet-map sink; bounded Group 70 file-transfer candidate reconciliation; typed history ranges; stateful history-app consumer; explicit optional OPC UA transform boundary | Ten direct depth tests plus reconciler unit cases, product/history compiles and real PCAP/history smoke runs pass; no complete TCP replay, timing replay, endpoint-authoritative transfer state or normative qualification. The isolated authorized OPC UA transform tests cover Sign-mode behavior and tamper rejection; AES secure-channel processing and certificate trust remain untested or unqualified. |
 | Semantic evidence depth | 18 native semantic cases, malformed/ambiguous/conflict fixtures, five semantic PCAPs, and complete NDJSON/TLV projection parity | No normative protocol qualification; the five captures are targeted regression evidence, not representative coverage |
 | First divergence | Comparison v2 considers earlier uncovered fields in the same layer and partial current-layer coverage | Not complete adapters for every protocol; no consensus or correctness winner |
 | Old research artifacts | Exact v1 comparison algorithm retained; bundle verification dispatches by recorded report schema | Producer authentication remains outside a hash-only bundle |
@@ -203,16 +209,19 @@ feature profiles, machine-readable output, FFI/live adapters and conformance wor
 remain design inputs. Their former GUI, storage and breadth exclusions do not limit
 this product. Their broad performance and completeness claims are not inherited.
 
-## Required next native action
+## Historical required next native action
 
-The integrated checkout has completed the new native matrices and repaired the
-validator/fixture portability defects found during that run. The Windows linked
-C-ABI gate now has a real PASS receipt; the next required engineering action is
-sustained-fuzz, large-capture, normative-protocol and installation qualification.
-The browser smoke gate has a direct PASS receipt, but its full accessibility,
-packaging and upgrade coverage remains open. Fix compiler, borrow, lint or
-semantic failures without relaxing assertions; preserve fresh receipts during
-each gate.
+At this integration checkpoint the checkout had completed the new native
+matrices and repaired the validator/fixture portability defects found during
+that run. The Windows linked C-ABI gate had a real PASS receipt; the next action
+in that checkpoint was sustained-fuzz, large-capture, normative-protocol and
+installation qualification. The browser smoke gate had a direct PASS receipt,
+but its full accessibility, packaging and upgrade coverage remained open. These
+are dated follow-up receipts. Imported BGP4MP session semantics was the priority
+at that earlier checkpoint; the current package and remaining gates are in the
+implementation pointer, objective ledger, and BGP completion contract. Fix
+compiler, borrow, lint or semantic failures without relaxing
+assertions; preserve fresh receipts during each gate.
 
 Commands and promotion conditions: `FOLLOWUP_QUALIFICATION.md`.
 Depth contract and current evidence: docs/product/DEPTH_CONTRACT.md.

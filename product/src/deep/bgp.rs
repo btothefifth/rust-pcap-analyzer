@@ -9,11 +9,13 @@ use pcap_evidence::{json::Json, provenance::EvidenceBytes, sha256, Error, Result
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+pub(crate) mod bmp;
 pub(crate) mod mrt;
 mod producer;
 
 pub const SCHEMA: &str = "pcap-evidence.bgp.route-evidence.v1";
-pub const SEMANTIC_IDENTITY_SCHEMA: &str = "pcap-evidence.bgp.semantic-route-identity.v1";
+pub const LEGACY_SEMANTIC_IDENTITY_SCHEMA: &str = "pcap-evidence.bgp.semantic-route-identity.v1";
+pub const SEMANTIC_IDENTITY_SCHEMA: &str = "pcap-evidence.bgp.semantic-route-identity.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceKind {
@@ -167,6 +169,7 @@ pub struct PathAttributes {
 /// This fingerprint is never route authority.
 pub(crate) struct SemanticIdentityEvidence<'a> {
     pub attributes_present: &'a BTreeSet<u8>,
+    pub atomic_aggregate: bool,
     pub large_communities: &'a [[u32; 3]],
     pub incompleteness_reasons: &'a BTreeSet<&'static str>,
     pub opaque_occurrences: &'a [Json],
@@ -238,6 +241,7 @@ pub(crate) fn semantic_route_identity(
                 "attributes",
                 Json::object([
                     ("origin", attributes.origin.map_or(Json::Null, Json::from)),
+                    ("atomic_aggregate", evidence.atomic_aggregate.into()),
                     (
                         "as_path",
                         Json::array(attributes.as_path.iter().map(|segment| {
@@ -296,7 +300,7 @@ pub(crate) fn semantic_route_identity(
         let encoded = payload.encode_bounded(limits.output_bytes)?;
         let payload_len =
             u64::try_from(encoded.len()).map_err(|_| Error::limit("bgp_semantic_identity"))?;
-        let domain = b"pcap-evidence.bgp.semantic-route-identity.v1\0";
+        let domain = b"pcap-evidence.bgp.semantic-route-identity.v2\0";
         let total = domain
             .len()
             .checked_add(8)
@@ -628,7 +632,7 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
     let mut seen = BTreeSet::new();
     let mut large_communities = Vec::new();
     let mut opaque = Vec::new();
-    let supported = [1, 2, 3, 4, 5, 7, 8, 9, 10, 14, 15, 32];
+    let supported = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 17, 18, 32];
 
     for range in &record.attribute_ranges {
         let is_supported = supported.contains(&range.code);
@@ -640,6 +644,10 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
             discarded_by_duplicate_rule
         } else {
             range.disposition == "accept_evidence_only"
+                || (range.disposition == "attribute_discard"
+                    && (matches!(range.code, 17 | 18)
+                        || (matches!(range.code, 5 | 9 | 10)
+                            && range.interpretation == "decoded_but_discarded_for_external_peer")))
         };
         let multiplicity_valid = if is_later_occurrence {
             validation_bool(&range.validation, "multiplicity_valid") == Some(false)
@@ -661,7 +669,11 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
                 && range.flags & 0x20 == 0
                 && !matches!(
                     range.interpretation,
-                    "unresolved_asn_width" | "unresolved_next_hop_context"
+                    "unresolved_asn_width"
+                        | "wire_shape_only_not_negotiated"
+                        | "unresolved_capability_context"
+                        | "unresolved_next_hop_context"
+                        | "opaque_family_capability_or_add_path_layout"
                 ));
 
         if !is_supported {
@@ -675,7 +687,12 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
                 "peer_relationship_unresolved"
             } else if range.flags & 0x20 != 0 {
                 "partial_attribute_value"
-            } else if range.interpretation == "unresolved_asn_width" {
+            } else if matches!(
+                range.interpretation,
+                "unresolved_asn_width"
+                    | "wire_shape_only_not_negotiated"
+                    | "unresolved_capability_context"
+            ) {
                 "asn_width_unresolved"
             } else if range.interpretation == "unresolved_next_hop_context" {
                 "next_hop_context_unresolved"
@@ -739,6 +756,7 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
         &record.attributes,
         SemanticIdentityEvidence {
             attributes_present: &seen,
+            atomic_aggregate: seen.contains(&6),
             large_communities: &large_communities,
             incompleteness_reasons: &reasons,
             opaque_occurrences: &opaque,
@@ -1027,7 +1045,7 @@ type AttributeParse = (
     Vec<&'static str>,
 );
 
-fn attribute_flags(code: u8) -> Option<u8> {
+pub(crate) fn attribute_flags(code: u8) -> Option<u8> {
     match code {
         1 | 2 | 3 | 5 | 6 => Some(0x40),
         4 | 9 | 10 | 14 | 15 | 26 => Some(0x80),
@@ -1107,6 +1125,33 @@ fn leading_path(path: &[AsPathSegment], mut count: usize) -> Vec<AsPathSegment> 
     leading
 }
 
+/// RFC 6793 transition normalization. The input inventories remain unchanged.
+/// AS_SET counts as one hop; confederation segments do not contribute hops.
+pub(crate) fn reconstruct_as4_suffix(
+    base: &[AsPathSegment],
+    as4: &[AsPathSegment],
+) -> (Vec<AsPathSegment>, &'static str) {
+    let discarded_confederation = as4.iter().any(|segment| matches!(segment.kind, 3 | 4));
+    let suffix: Vec<_> = as4
+        .iter()
+        .filter(|segment| !matches!(segment.kind, 3 | 4))
+        .cloned()
+        .collect();
+    if path_count(&suffix) > path_count(base) {
+        (base.to_vec(), "longer_as4_path_ignored")
+    } else {
+        let prefix = leading_path(base, path_count(base) - path_count(&suffix));
+        (
+            prefix.into_iter().chain(suffix).collect(),
+            if discarded_confederation {
+                "old_new_reconstructed_confederation_discarded"
+            } else {
+                "old_new_reconstructed"
+            },
+        )
+    }
+}
+
 fn as4_reconstruction(
     b: &[u8],
     ranges: &[AttributeRange],
@@ -1130,9 +1175,7 @@ fn as4_reconstruction(
         if any_as4 {
             status = "new_new_discard_as4_attributes";
         }
-    } else if let Some(base_range) = base {
-        let base_path = parse_as_path(&b[base_range.value_start..base_range.end], 2, limits)?;
-        effective = base_path.clone();
+    } else {
         let base_agg_asn = agg
             .map(|r| be16(b, r.value_start))
             .transpose()?
@@ -1145,6 +1188,7 @@ fn as4_reconstruction(
         if status != "non_as_trans_aggregator_discard_as4" {
             if let (Some(number), Some(r)) = (base_agg_asn, as4_agg) {
                 if number == 23456 {
+                    status = "old_new_aggregator_reconstructed";
                     effective_aggregator = Some(format!(
                         "{}:{}",
                         be32(b, r.value_start)?,
@@ -1152,27 +1196,19 @@ fn as4_reconstruction(
                     ));
                 }
             }
-            if let Some(as4_range) = as4 {
-                let mut four_path =
-                    parse_as_path(&b[as4_range.value_start..as4_range.end], 4, limits)?;
-                let discarded_confederation = four_path.iter().any(|s| matches!(s.kind, 3 | 4));
-                four_path.retain(|s| !matches!(s.kind, 3 | 4));
-                if path_count(&four_path) > path_count(&base_path) {
-                    status = "longer_as4_path_ignored";
-                } else {
-                    let lead =
-                        leading_path(&base_path, path_count(&base_path) - path_count(&four_path));
-                    effective = lead.into_iter().chain(four_path).collect();
-                    status = if discarded_confederation {
-                        "old_new_reconstructed_confederation_discarded"
-                    } else {
-                        "old_new_reconstructed"
-                    };
-                }
+            if let (Some(base_range), Some(as4_range)) = (base, as4) {
+                let base_path =
+                    parse_as_path(&b[base_range.value_start..base_range.end], 2, limits)?;
+                let four_path = parse_as_path(&b[as4_range.value_start..as4_range.end], 4, limits)?;
+                let (reconstructed, reconstruction_status) =
+                    reconstruct_as4_suffix(&base_path, &four_path);
+                effective = reconstructed;
+                status = reconstruction_status;
             }
         }
-    } else if as4.is_some() {
-        status = "as4_without_base_path";
+        if base.is_none() && as4.is_some() {
+            status = "as4_without_base_path";
+        }
     }
     if width != 0 {
         attrs.as_path = effective.clone();
@@ -1242,9 +1278,10 @@ fn parse_update(
     if let Json::Object(fields) = &as4_reconstruction {
         if let Some((_, Json::String(status))) = fields.iter().find(|(key, _)| *key == "status") {
             for range in &mut ranges {
-                if (status == "longer_as4_path_ignored" && range.code == 17)
-                    || (status == "non_as_trans_aggregator_discard_as4"
-                        && matches!(range.code, 17 | 18))
+                if range.disposition == "accept_evidence_only"
+                    && ((status == "longer_as4_path_ignored" && range.code == 17)
+                        || (status == "non_as_trans_aggregator_discard_as4"
+                            && matches!(range.code, 17 | 18)))
                 {
                     range.disposition = "attribute_discard";
                     range.action = Some(UpdateAction::AttributeDiscard);
@@ -2023,7 +2060,7 @@ fn parse_attributes(
     Ok((attrs, ranges, mp_withdrawn, mp_announced, issues))
 }
 
-fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<Vec<AsPathSegment>> {
+pub(crate) fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<Vec<AsPathSegment>> {
     if !matches!(width, 2 | 4) {
         return Err(Error::limit("bgp_asn_width"));
     }
@@ -2165,6 +2202,32 @@ fn parse_mp_unreach(
         add_path,
         limits,
     )
+}
+
+/// Re-decode a retained known MP value for projection consistency. This does
+/// not grant capability or ADD-PATH context; the caller validates that context
+/// separately and never promotes a successful byte shape into negotiation.
+pub(crate) fn source_mp_value(
+    value: &[u8],
+    code: u8,
+    add_path: bool,
+    limits: &Limits,
+) -> Result<Json> {
+    if code == 14 {
+        let (next_hop, prefixes) = parse_mp_reach(value, 0, value.len(), add_path, limits)?;
+        Ok(Json::object([
+            ("next_hop", next_hop.into()),
+            (
+                "prefixes",
+                Json::array(prefixes.iter().map(|prefix| prefix.prefix.json())),
+            ),
+        ]))
+    } else {
+        let prefixes = parse_mp_unreach(value, 0, value.len(), add_path, limits)?;
+        Ok(Json::array(
+            prefixes.iter().map(|prefix| prefix.prefix.json()),
+        ))
+    }
 }
 
 fn payload_sha256(data: &[u8]) -> String {

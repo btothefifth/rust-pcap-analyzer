@@ -103,12 +103,44 @@ fn get_mut<'a>(value: &'a mut Json, key: &str) -> &'a mut Json {
         .1
 }
 
+// Semantic identity comparisons require an observed bilateral layout, even
+// when an AS_PATH happens to admit only one width from its byte shape. The
+// relationship-only fixtures below intentionally retain their own context.
+fn semantic_state() -> SessionState {
+    let mut state = SessionState::default();
+    for direction in 0..=1u8 {
+        let frame = 9000 + u64::from(direction);
+        let bytes = open(65000 + u16::from(direction), [192, 0, 2, direction + 1]);
+        let packet = PacketId {
+            capture: sha256::digest(b"bgp-attribute-context-test"),
+            frame,
+            record_offset: frame * 128,
+        };
+        bgp::decode_pcap(
+            &EvidenceBytes::from_packet(&bytes, packet, 54),
+            PcapMetadata {
+                source_id: "attribute-context-test".into(),
+                record_id: format!("semantic-open-{direction}"),
+                observed_at_ns: Some(0),
+                session: Some(7),
+                direction: Some(direction),
+                peer: Some("198.51.100.10:179".into()),
+                local: Some("192.0.2.20:179".into()),
+            },
+            &mut state,
+            &Limits::default(),
+        )
+        .unwrap();
+    }
+    state
+}
+
 fn refresh_identity_fingerprint(identity: &mut Json) {
     let payload = get_mut(identity, "canonical_payload")
         .encode_bounded(1_000_000)
         .expect("test identity payload is bounded");
     let length = u64::try_from(payload.len()).expect("test payload length fits u64");
-    let mut preimage = b"pcap-evidence.bgp.semantic-route-identity.v1\0".to_vec();
+    let mut preimage = b"pcap-evidence.bgp.semantic-route-identity.v2\0".to_vec();
     preimage.extend_from_slice(&length.to_be_bytes());
     preimage.extend_from_slice(payload.as_bytes());
     *get_mut(identity, "fingerprint_sha256") = Json::from(sha256::hex(&sha256::digest(&preimage)));
@@ -198,8 +230,8 @@ fn semantic_identity_is_source_neutral_and_state_consumer_verifies_it() {
     reordered.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
     reordered.extend(attribute(0x40, 1, &[0]));
 
-    let mut state_a = SessionState::default();
-    let mut state_b = SessionState::default();
+    let mut state_a = semantic_state();
+    let mut state_b = semantic_state();
     let a = decode_with_attributes_and_prefix(&first, &mut state_a, 101, [203, 0, 113, 0]);
     let b = decode_with_attributes_and_prefix(&reordered, &mut state_b, 909, [203, 0, 113, 0]);
     let identity_a = first_route_identity(&a);
@@ -221,7 +253,7 @@ fn semantic_identity_is_source_neutral_and_state_consumer_verifies_it() {
         "wire occurrence evidence remains distinct despite semantic equality"
     );
 
-    let mut different_prefix_state = SessionState::default();
+    let mut different_prefix_state = semantic_state();
     let different_prefix = decode_with_attributes_and_prefix(
         &first,
         &mut different_prefix_state,
@@ -333,8 +365,8 @@ fn large_communities_use_set_semantics_but_keep_occurrence_evidence() {
     let mut reordered = mandatory_attributes();
     reordered.extend(attribute(0xc0, 32, &encode(&[b, a, a])));
 
-    let mut state_a = SessionState::default();
-    let mut state_b = SessionState::default();
+    let mut state_a = semantic_state();
+    let mut state_b = semantic_state();
     let decoded_a = decode_with_attributes(&first, &mut state_a, 201);
     let decoded_b = decode_with_attributes(&reordered, &mut state_b, 202);
     let identity_a = first_route_identity(&decoded_a);
@@ -359,7 +391,7 @@ fn large_communities_use_set_semantics_but_keep_occurrence_evidence() {
     let changed_tuple = [3u32, 65000, 11];
     let mut changed = mandatory_attributes();
     changed.extend(attribute(0xc0, 32, &encode(&[a, changed_tuple])));
-    let mut changed_state = SessionState::default();
+    let mut changed_state = semantic_state();
     let changed_decoded = decode_with_attributes(&changed, &mut changed_state, 203);
     assert_ne!(
         identity_fingerprint(identity_a),
@@ -369,7 +401,7 @@ fn large_communities_use_set_semantics_but_keep_occurrence_evidence() {
 
     let mut truncated = mandatory_attributes();
     truncated.extend(attribute(0xc0, 32, &[0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]));
-    let mut truncated_state = SessionState::default();
+    let mut truncated_state = semantic_state();
     let truncated_decoded = decode_with_attributes(&truncated, &mut truncated_state, 204);
     let truncated_identity = first_route_identity(&truncated_decoded);
     assert_eq!(
@@ -383,7 +415,7 @@ fn large_communities_use_set_semantics_but_keep_occurrence_evidence() {
 fn unknown_attribute_is_opaque_and_cannot_claim_semantic_equality() {
     let mut attributes = mandatory_attributes();
     attributes.extend(attribute(0xc0, 99, &[1, 2, 3, 4]));
-    let mut state = SessionState::default();
+    let mut state = semantic_state();
     let decoded = decode_with_attributes(&attributes, &mut state, 301);
     let identity = first_route_identity(&decoded);
     assert_eq!(get(identity, "completeness"), &Json::from("incomplete"));
@@ -407,8 +439,8 @@ fn reserved_flag_nibble_is_ignored_but_partial_attributes_are_not_complete() {
     let baseline_attributes = mandatory_attributes();
     let mut reserved_bits = attribute(0x4f, 1, &[0]);
     reserved_bits.extend_from_slice(&baseline_attributes[4..]);
-    let mut baseline_state = SessionState::default();
-    let mut reserved_state = SessionState::default();
+    let mut baseline_state = semantic_state();
+    let mut reserved_state = semantic_state();
     let baseline = decode_with_attributes(&baseline_attributes, &mut baseline_state, 401);
     let reserved = decode_with_attributes(&reserved_bits, &mut reserved_state, 402);
     assert_eq!(
@@ -419,7 +451,7 @@ fn reserved_flag_nibble_is_ignored_but_partial_attributes_are_not_complete() {
 
     let mut partial_attributes = mandatory_attributes();
     partial_attributes.extend(attribute(0xe0, 8, &[0, 1, 0, 42]));
-    let mut partial_state = SessionState::default();
+    let mut partial_state = semantic_state();
     let partial = decode_with_attributes(&partial_attributes, &mut partial_state, 403);
     let identity = first_route_identity(&partial);
     assert_eq!(get(identity, "completeness"), &Json::from("incomplete"));
@@ -433,8 +465,8 @@ fn ordinary_duplicate_uses_first_effective_value_and_retains_both_occurrences() 
     let single = mandatory_attributes();
     let mut duplicate = single.clone();
     duplicate.extend(attribute(0x40, 1, &[2]));
-    let mut single_state = SessionState::default();
-    let mut duplicate_state = SessionState::default();
+    let mut single_state = semantic_state();
+    let mut duplicate_state = semantic_state();
     let baseline = decode_with_attributes(&single, &mut single_state, 501);
     let with_duplicate = decode_with_attributes(&duplicate, &mut duplicate_state, 502);
     let baseline_route = array(get(&baseline, "routes")).first().unwrap();
@@ -470,7 +502,7 @@ fn as_set_members_are_order_insensitive_but_as_sequence_order_is_preserved() {
         attributes.extend(attribute(0x40, 3, &[192, 0, 2, 1]));
         attributes
     };
-    let mut states = [SessionState::default(), SessionState::default()];
+    let mut states = [semantic_state(), semantic_state()];
     let set_a = decode_with_attributes(&path(1, 64_512, 64_513), &mut states[0], 601);
     let set_b = decode_with_attributes(&path(1, 64_513, 64_512), &mut states[1], 602);
     assert_eq!(
@@ -479,7 +511,7 @@ fn as_set_members_are_order_insensitive_but_as_sequence_order_is_preserved() {
         "AS_SET members are a set"
     );
 
-    let mut states = [SessionState::default(), SessionState::default()];
+    let mut states = [semantic_state(), semantic_state()];
     let sequence_a = decode_with_attributes(&path(2, 64_512, 64_513), &mut states[0], 603);
     let sequence_b = decode_with_attributes(&path(2, 64_513, 64_512), &mut states[1], 604);
     assert_ne!(

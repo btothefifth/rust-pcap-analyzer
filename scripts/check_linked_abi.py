@@ -28,7 +28,9 @@ def check(destination,compiler=None,library=None):
             'compiler':None,'library_sha256':None,'commands':[], 'status':'BLOCKED'}
     compiler=compiler or shutil.which('cl' if os.name=='nt' else 'cc')
     suffix='pcap_evidence_ffi.dll.lib' if os.name=='nt' else 'libpcap_evidence_ffi.dylib' if platform.system()=='Darwin' else 'libpcap_evidence_ffi.so'
-    library=Path(library)if library else ROOT/'product/ffi/target/debug'/suffix
+    target=Path(os.environ.get('CARGO_TARGET_DIR', 'product/ffi/target'))
+    if not target.is_absolute():target=ROOT/target
+    library=Path(library)if library else target/'debug'/suffix
     def finish():
         (destination/'receipt.json').write_text(json.dumps(result,indent=2)+'\n')
         return 0 if result['status']=='PASS' else 2 if result['status']=='BLOCKED' else 1

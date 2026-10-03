@@ -3,18 +3,38 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'src/**'
+      - 'tests/**'
+      - 'streaming/**'
       - 'product/**'
+      - 'history/**'
+      - 'history-app/**'
       - 'tools/**'
       - 'desktop/**'
-      - 'scripts/*product*'
-      - '.github/workflows/product-qualification.yml'
+      - 'fixtures/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - '.github/workflows/**'
   pull_request:
     paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'src/**'
+      - 'tests/**'
+      - 'streaming/**'
       - 'product/**'
+      - 'history/**'
+      - 'history-app/**'
       - 'tools/**'
       - 'desktop/**'
-      - 'scripts/*product*'
-      - '.github/workflows/product-qualification.yml'
+      - 'fixtures/**'
+      - 'scripts/**'
+      - 'docs/**'
+      - '.github/workflows/**'
 permissions:
   contents: read
 jobs:
@@ -22,9 +42,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
+        os: [ubuntu-22.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,36 +57,28 @@ jobs:
           node-version: '22'
       - name: Explicit toolchain provisioning (not part of runtime build)
         run: rustup toolchain install 1.85.1 --profile minimal --component clippy --component rustfmt
-      - name: Product Rust format, debug and release
+      - name: Initialize the Windows C toolchain for linked ABI execution
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cargo fmt --manifest-path product/Cargo.toml --all -- --check
-          cargo test --manifest-path product/Cargo.toml --locked --offline --all-targets
-          cargo test --manifest-path product/Cargo.toml --locked --offline --release --all-targets
-          cargo clippy --manifest-path product/Cargo.toml --locked --offline --all-targets -- -D warnings
-          cargo build --manifest-path product/Cargo.toml --locked --offline --release --all-targets
-          cargo test --manifest-path product/Cargo.toml --locked --offline --no-default-features --all-targets
-      - name: Isolated FFI crate
-        run: |
-          cargo fmt --manifest-path product/ffi/Cargo.toml --all -- --check
-          cargo test --manifest-path product/ffi/Cargo.toml --locked --offline --all-targets
-          cargo build --manifest-path product/ffi/Cargo.toml --locked --offline --release
-      - name: Python and JS models (not browser/native qualification)
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw "Required Visual C toolchain unavailable" }
+          $setup = Join-Path $installation 'Common7/Tools/VsDevCmd.bat'
+          cmd /s /c "`"$setup`" -arch=x64 >nul && set" | ForEach-Object {
+            if ($_ -match '^(PATH|INCLUDE|LIB|LIBPATH)=(.*)$') {
+              Add-Content -Path $env:GITHUB_ENV -Value "$($matches[1])=$($matches[2])"
+            }
+          }
+      - name: Complete offline workspace, feature and independent-selector frontier
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          python -m unittest discover -s tools/tests -v
-          python -m tools.research audit
-          node --test desktop/web/model.test.mjs
-      - name: Existing baseline regression gates
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          cargo test --locked --offline --all-targets
-          cargo test --manifest-path streaming/Cargo.toml --locked --offline --all-targets
-      - name: Linux C ABI link and client run
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          cc -std=c11 -Wall -Wextra -Werror product/ffi/harness.c -Lproduct/ffi/target/release -lpcap_evidence_ffi -Wl,-rpath,"${PWD}/product/ffi/target/release" -o /tmp/pcap-ffi-client
-          /tmp/pcap-ffi-client
-          cc -std=c11 -Wall -Wextra -Werror product/live/capture_linux.c -o /tmp/pcap-capture-compile-only
+          CARGO_TARGET_DIR: ${{ runner.temp }}/pcap-qualification-target
+        run: python scripts/validate_product.py --output "${{ runner.temp }}/pcap-product-qualification"
+      - name: Retain exact-source qualification receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: offline-product-qualification-${{ runner.os }}
+          path: ${{ runner.temp }}/pcap-product-qualification
+          if-no-files-found: error

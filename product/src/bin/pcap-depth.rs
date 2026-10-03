@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 fn usage() -> Error {
-    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --session ID --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N]")
+    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N]")
 }
 
 fn parse_peer_relationship(value: &str) -> Result<deep::bgp::PeerRelationship> {
@@ -471,6 +471,76 @@ fn import_mrt(v: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn import_bmp(v: &[String]) -> Result<()> {
+    if v.len() < 9 {
+        return Err(usage());
+    }
+    let input = PathBuf::from(&v[2]);
+    let mut workspace = None;
+    let mut source_id = None;
+    let mut checkpoint = None;
+    let mut peer_relationship = None;
+    let mut max_bmp = 8 * 1024 * 1024;
+    let mut max_store = 128 * 1024 * 1024;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut index = 3;
+    while index < v.len() {
+        let flag = v[index].as_str();
+        if !seen.insert(flag) {
+            return Err(usage());
+        }
+        let value = v.get(index + 1).ok_or_else(usage)?;
+        match flag {
+            "--workspace" => workspace = Some(PathBuf::from(value)),
+            "--source-id" => source_id = Some(value.clone()),
+            "--checkpoint" => checkpoint = Some(value.clone()),
+            "--peer-relationship" => peer_relationship = Some(parse_peer_relationship(value)?),
+            "--max-bmp-bytes" => max_bmp = value.parse().map_err(|_| usage())?,
+            "--max-journal-bytes" => max_store = value.parse().map_err(|_| usage())?,
+            _ => return Err(usage()),
+        }
+        index += 2;
+    }
+    let workspace = workspace.ok_or_else(usage)?;
+    let source = deep::bgp_bmp::BmpSource {
+        source_id: source_id.ok_or_else(usage)?,
+        checkpoint_id: checkpoint.ok_or_else(usage)?,
+    };
+    let (mrt, limits) = mrt_profiles(max_bmp)?;
+    let bmp_limits = deep::bgp_persisted::bmp_profile(&mrt);
+    let bytes = deep::bgp_bmp_store::read_source(&input, max_bmp)?;
+    fs::create_dir(&workspace)?;
+    let partial = workspace.join("bgp.bmp.partial");
+    let archive = deep::bgp_bmp_store::create_with_options(
+        &partial,
+        &bytes,
+        source,
+        max_store,
+        bmp_limits,
+        limits.clone(),
+        deep::bgp_bmp_store::BmpReplayOptions { peer_relationship },
+    )?;
+    let receipt = Json::object([
+        ("schema", "pcap-evidence.bgp.bmp-import-receipt.v1".into()),
+        ("store", archive.receipt.json()),
+        ("source_authenticated", false.into()),
+        ("endpoint_state_claimed", false.into()),
+    ])
+    .encode_bounded(limits.output_bytes)?;
+    let receipt_partial = workspace.join("receipt.json.partial");
+    let mut receipt_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&receipt_partial)?;
+    receipt_file.write_all(receipt.as_bytes())?;
+    receipt_file.sync_all()?;
+    fs::hard_link(&partial, workspace.join("bgp.bmp"))?;
+    fs::remove_file(partial)?;
+    fs::hard_link(&receipt_partial, workspace.join("receipt.json"))?;
+    fs::remove_file(receipt_partial)?;
+    Ok(())
+}
+
 fn persisted_magic(path: &Path, maximum: u64) -> Result<[u8; 8]> {
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
@@ -498,15 +568,28 @@ fn bgp(v: &[String]) -> Result<()> {
         return Err(usage());
     }
     let command = v[1].as_str();
+    if command == "import-bmp" {
+        return import_bmp(v);
+    }
     if command == "import-mrt" {
         return import_mrt(v);
     }
-    if !matches!(command, "replay" | "state" | "query" | "export") {
+    if !matches!(
+        command,
+        "replay" | "state" | "query" | "export" | "policy" | "associate"
+    ) {
         return Err(usage());
     }
     let journal = PathBuf::from(&v[2]);
     let mut output = None;
     let mut session = None;
+    let mut filters = deep::bgp_persisted::Query::default();
+    let mut rich_query = false;
+    let mut profile = None;
+    let mut other_store = None;
+    let mut namespace = None;
+    let mut clock_policy = None;
+    let mut clock_basis = None;
     let mut peer_relationship = None;
     let mut maximum = 8u64 * 1024 * 1024 * 1024;
     let mut max_output = 8u64 * 1024 * 1024 * 1024;
@@ -521,7 +604,43 @@ fn bgp(v: &[String]) -> Result<()> {
         let value = v.get(i).ok_or_else(usage)?;
         match flag {
             "--output" => output = Some(PathBuf::from(value)),
-            "--session" => session = Some(value.clone()),
+            "--session" => {
+                session = Some(value.clone());
+                filters.session = Some(value.clone());
+            }
+            "--prefix" => {
+                filters.prefix = Some(value.clone());
+                rich_query = true;
+            }
+            "--afi" => {
+                filters.afi = Some(value.parse().map_err(|_| usage())?);
+                rich_query = true;
+            }
+            "--safi" => {
+                filters.safi = Some(value.parse().map_err(|_| usage())?);
+                rich_query = true;
+            }
+            "--peer" => {
+                filters.peer = Some(value.clone());
+                rich_query = true;
+            }
+            "--source" => {
+                filters.source = Some(value.clone());
+                rich_query = true;
+            }
+            "--checkpoint" => {
+                filters.checkpoint = Some(value.clone());
+                rich_query = true;
+            }
+            "--status" => {
+                filters.status = Some(value.clone());
+                rich_query = true;
+            }
+            "--policy-profile" => profile = Some(PathBuf::from(value)),
+            "--with-store" => other_store = Some(PathBuf::from(value)),
+            "--comparison-namespace" => namespace = Some(value.clone()),
+            "--clock-policy" => clock_policy = Some(value.clone()),
+            "--clock-basis" => clock_basis = Some(value.clone()),
             "--peer-relationship" => peer_relationship = Some(parse_peer_relationship(value)?),
             "--max-journal-bytes" => maximum = value.parse().map_err(|_| usage())?,
             "--max-output-bytes" => max_output = value.parse().map_err(|_| usage())?,
@@ -530,7 +649,98 @@ fn bgp(v: &[String]) -> Result<()> {
         i += 1;
     }
     let output = output.ok_or_else(usage)?;
-    if maximum < 128 || max_output == 0 || (command == "query") != session.is_some() {
+    if maximum < 128 || max_output == 0 {
+        return Err(usage());
+    }
+    if matches!(command, "policy" | "associate")
+        || command == "query" && (rich_query || session.is_none())
+    {
+        if command != "policy" && profile.is_some()
+            || command != "associate"
+                && (other_store.is_some()
+                    || namespace.is_some()
+                    || clock_policy.is_some()
+                    || clock_basis.is_some())
+            || command == "associate" && (rich_query || session.is_some())
+        {
+            return Err(usage());
+        }
+        let (mrt_limits, mut limits) = mrt_profiles(MAX_MRT_SOURCE_BYTES)?;
+        let consumer_output_limit = limits
+            .output_bytes
+            .min(bounded_usize(max_output, "bgp_output")?);
+        let options = deep::bgp_mrt_store::MrtReplayOptions { peer_relationship };
+        let store = deep::bgp_persisted::VerifiedStore::load(
+            &journal,
+            maximum,
+            mrt_limits.clone(),
+            limits.clone(),
+            options,
+        )?;
+        let load_limits = limits.clone();
+        limits.output_bytes = consumer_output_limit;
+        let encoded = if command == "policy" {
+            let profile =
+                deep::bgp_persisted::PolicyProfile::read(&profile.ok_or_else(usage)?, &limits)?;
+            store.policy(&filters, &profile, &limits)?
+        } else if command == "associate" {
+            use deep::bgp_association::*;
+            let time = match clock_policy.as_deref().ok_or_else(usage)? {
+                "same-clock" if clock_basis.is_none() => TimePolicy::Window {
+                    max_distance_ns: 0,
+                    clocks: ClockRelation::SamePolicyAndId,
+                    missing: MissingClockHandling::Unresolved,
+                    semantics: WindowSemantics::AllReportedBounds,
+                },
+                "ignore" => TimePolicy::Ignore {
+                    reason: clock_basis
+                        .filter(|v| !v.trim().is_empty())
+                        .ok_or_else(usage)?,
+                },
+                _ => return Err(usage()),
+            };
+            let other = deep::bgp_persisted::VerifiedStore::load(
+                &other_store.ok_or_else(usage)?,
+                maximum,
+                mrt_limits,
+                load_limits,
+                options,
+            )?;
+            let namespace = namespace.ok_or_else(usage)?;
+            let policy = Policy {
+                policy_id: "persisted-route-evidence-association-v1".into(),
+                session: DimensionRule::Ignore,
+                generation: DimensionRule::Ignore,
+                flow: DimensionRule::Ignore,
+                direction: DirectionRule::Ignore,
+                spatial: SpatialRule::EqualPrefix,
+                time,
+            };
+            store.associate(&other, &namespace, &policy, &limits)?
+        } else {
+            store.query(&filters, &limits)?
+        };
+        let line_bytes = encoded
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| Error::limit("bgp_output"))?;
+        if line_bytes as u64 > max_output {
+            return Err(Error::limit("bgp_output"));
+        }
+        return publish(&output, max_output, |writer| {
+            writer.write_all(encoded.as_bytes())?;
+            writer.write_all(b"\n")?;
+            Ok(())
+        });
+    }
+    if rich_query
+        || profile.is_some()
+        || other_store.is_some()
+        || namespace.is_some()
+        || clock_policy.is_some()
+        || clock_basis.is_some()
+        || (command == "query") != session.is_some()
+    {
         return Err(usage());
     }
     match persisted_magic(&journal, maximum)? {
@@ -605,20 +815,22 @@ fn bgp(v: &[String]) -> Result<()> {
                 limits.clone(),
                 deep::bgp_mrt_store::MrtReplayOptions { peer_relationship },
             )?;
+            let effective = bounded_usize(max_output, "bgp_output_bytes")?.min(limits.output_bytes);
             publish(&output, max_output, |writer| {
                 if command == "query" {
                     let id = session.expect("validated query session");
-                    archive.write_session_query_bounded_line(&id, writer, limits.output_bytes)?;
+                    archive.write_session_query_bounded_line(&id, writer, effective)?;
                 } else if command == "export" {
                     writer.write_all(
                         Json::object([
-                            ("schema", "pcap-evidence.bgp.export-header.v3".into()),
+                            ("schema", "pcap-evidence.bgp.export-header.v4".into()),
                             ("source_kind", "imported".into()),
                             ("journal", archive.receipt.json()),
                         ])
                         .encode_bounded_line(limits.output_bytes)?
                         .as_bytes(),
                     )?;
+                    archive.write_bgp4mp_rib_bounded_line(None, writer, effective)?;
                     for record in archive.record_summaries() {
                         writer.write_all(
                             record.encode_bounded_line(limits.output_bytes)?.as_bytes(),
@@ -659,7 +871,32 @@ fn bgp(v: &[String]) -> Result<()> {
                         )?;
                     }
                 } else {
-                    archive.write_bounded_line(writer, limits.output_bytes)?;
+                    archive.write_bounded_line(writer, effective)?;
+                }
+                Ok(())
+            })
+        }
+        magic if magic == *deep::bgp_bmp_store::MAGIC => {
+            let (mrt, limits) = mrt_profiles(MAX_MRT_SOURCE_BYTES)?;
+            let archive = deep::bgp_bmp_store::replay_with_options(
+                &journal,
+                maximum,
+                deep::bgp_persisted::bmp_profile(&mrt),
+                limits.clone(),
+                deep::bgp_bmp_store::BmpReplayOptions { peer_relationship },
+            )?;
+            let effective = bounded_usize(max_output, "bgp_output_bytes")?.min(limits.output_bytes);
+            publish(&output, max_output, |writer| {
+                if command == "query" {
+                    archive.write_session_query_bounded_line(
+                        &session.expect("validated query session"),
+                        writer,
+                        effective,
+                    )?;
+                } else if command == "export" {
+                    archive.write_export_ndjson(writer, effective)?;
+                } else {
+                    archive.write_bounded_line(writer, effective)?;
                 }
                 Ok(())
             })

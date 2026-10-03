@@ -1,0 +1,5 @@
+{
+  "schema": "pcap-evidence.objectives-1-4-validation.v1",
+  "status": "PENDING",
+  "reason": "Final frozen-source integration and selector frontier has not completed."
+}

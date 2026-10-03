@@ -13,6 +13,11 @@ describes a problem already repaired in a later accepted slice, this contract
 and current code/tests govern current status and the stale leaf must be
 reconciled in the same phase that touches it.
 
+The repository-owner-authorized objectives 1–4 implementation and its exact
+evidence are tracked in the [objective ledger](../implementation/OBJECTIVES_1_4.md).
+That ledger records progress and receipts without changing the acceptance
+conditions or qualification boundary defined here.
+
 BMAD qualification: this program crosses captured wire decoding, capability and
 session state, route-state reduction, external-source ingestion, persistent
 replay, policy, product output, and independent qualification. A shallow
@@ -80,7 +85,7 @@ minimum profile is:
 | Refresh/restart | normal/enhanced route refresh markers, graceful-restart families/flags/timers, LLGR tuples, stale/EOR evidence without invented wall-clock expiry |
 | Route state | per source/session/generation/direction/peer/AFI/SAFI/path-id Adj-RIB-In candidates, withdrawals, replacements, EOR/reset/stale transitions |
 | Policy | deterministic, configurable best-path candidate evaluation with a complete ordered decision trace and unresolved result when required inputs are absent/ambiguous |
-| External input | bounded MRT TABLE_DUMP_V2 and BGP4MP ingestion first; BMP is the next adapter. Original record identity, peer table, timestamps, sequence/checkpoint, source bytes/hash, and unsupported records remain explicit |
+| External input | bounded MRT TABLE_DUMP_V2/BGP4MP and BMP v1 adapters; source record identity, peer context, clocks, checkpoint, source bytes/hash, and unsupported or malformed records remain explicit. BMP Route Monitoring is a reported, state-compressed view, not a verbatim endpoint UPDATE history. |
 
 Supporting additional AFI/SAFI families or attributes means adding their own
 semantic contract and independent fixtures; registering a numeric code is not
@@ -93,13 +98,13 @@ semantic support.
 | BGP-C01 | Source/provenance conservation | hard | every interpreted value maps to exact captured/imported bytes and immutable source identity | split one field across packets and rebuild its bytes | producer/import adapters | baseline partial |
 | BGP-C02 | No false negotiation or authority | hard | unilateral, missing, duplicate, or conflicting OPEN evidence never selects negotiated semantics or route truth | one-sided/conflicting capability vectors | session observer | baseline partial |
 | BGP-C03 | Complete declared wire profile | hard | every profile row has valid, boundary, malformed, duplicate, and unsupported-neighbor tests | delete one profile matrix row/test link | wire decoder | open |
-| BGP-C04 | AS4 correctness | hard | NEW/NEW, NEW/OLD, AS_TRANS, AS4_PATH and AS4_AGGREGATOR reconstruction/discard rules match independent vectors | path with longer AS4_PATH than AS_PATH | AS semantic reducer | open |
-| BGP-C05 | Attribute conformance | hard | flags, length, multiplicity, mandatory attributes and treat-as-withdraw/discard/session-reset dispositions are explicit | wrong flags or duplicate mandatory attribute | UPDATE validator | open |
-| BGP-C06 | Stateful replay fidelity | hard | gaps/conflicts/resets/reordered records never manufacture continuous session or current route state | changed historical record after reset | session/RIB/replay | baseline partial |
-| BGP-C07 | Explainable route policy | hard | every selected/unresolved candidate has deterministic ordered reasons and all alternatives remain available | equal candidates differing at final tie-break | policy engine | open |
-| BGP-C08 | Cross-source normalization without collapse | hard | capture, MRT, BMP and future adapters share route semantics but cannot merge source partitions implicitly | same route bytes from two sources | import/adapters | partial: capture and TABLE_DUMP_V2 emit a shared v1 semantic identity for the supported subset and retain distinct source partitions; imported session Adj-RIB-In, BGP4MP parity, BMP, and persisted semantic joins remain open |
-| BGP-C09 | Bounded atomic publication | hard | every public operation fails without partial state/output under each lower budget | one-below output/work/retained budget | every producer/consumer | baseline strong |
-| BGP-C10 | Operational end-to-end path | hard | CLI capture/import -> evidence -> state -> persisted receipt -> replay/query/association succeeds and exposes cuts | force a boundary between UPDATEs | sink/CLI/history | open |
+| BGP-C04 | AS4 correctness | hard | NEW/NEW, NEW/OLD, AS_TRANS, AS4_PATH and AS4_AGGREGATOR reconstruction/discard rules match independent vectors | path with longer AS4_PATH than AS_PATH | AS semantic reducer | current candidate implements versioned AS4 reconstruction/discard; the O14-1 receipt reports executed scope, while broader normative coverage remains open |
+| BGP-C05 | Attribute conformance | hard | flags, length, multiplicity, mandatory attributes and treat-as-withdraw/discard/session-reset dispositions are explicit | wrong flags or duplicate mandatory attribute | UPDATE validator | current candidate includes typed occurrences, dispositions, and source-bound semantic checks; the O14-1 receipt reports executed scope, while complete profile coverage remains open |
+| BGP-C06 | Stateful replay fidelity | hard | gaps/conflicts/resets/reordered records never manufacture continuous session or current route state | changed historical record after reset | session/RIB/replay | current candidate includes scoped capture, MRT, and BMP replay/RIB boundaries; the O14-1 receipt reports current execution, while full endpoint-FSM qualification remains open |
+| BGP-C07 | Explainable route policy | hard | every selected/unresolved candidate has deterministic ordered reasons and all alternatives remain available | equal candidates differing at final tie-break | policy engine | current candidate implements bounded persisted policy and ordered traces; the O14-1 receipt reports current execution, while independent full-policy qualification remains open |
+| BGP-C08 | Cross-source normalization without collapse | hard | capture, MRT, BMP and future adapters share route semantics but cannot merge source partitions implicitly | same route bytes from two sources | import/adapters | current candidate implements v2 semantic identity for the supported capture/MRT/BGP4MP/BMP subset and persisted source-scoped joins; the O14-1 receipt reports current execution and full cross-source qualification remains open |
+| BGP-C09 | Bounded atomic publication | hard | every public operation fails without partial state/output under each lower budget | one-below output/work/retained budget | every producer/consumer | current candidate defines bounded and atomic producer/consumer paths; see the O14-1 receipt for the exact executed scope |
+| BGP-C10 | Operational end-to-end path | hard | CLI capture/import -> evidence -> state -> persisted receipt -> replay/query/association succeeds and exposes cuts | force a boundary between UPDATEs | sink/CLI/history | current candidate includes fresh captured/MRT/BMP replay and persisted query, policy, and association commands; see the O14-1 receipt for exact assembled-source coverage |
 | BGP-C11 | Cross-platform and adversarial qualification | hard for qualified claim | Windows/Linux native matrices, macOS compatibility, sustained fuzz, real corpus and scale receipts retained | Linux runner or fuzz crash | validation/CI | open: exact checkpoint `ed4350e` passed native-validation on Windows/Linux/macOS and streaming CI; sustained fuzz, corpus, and scale remain unqualified |
 | BGP-C12 | Maintainable extension model | optimization | new opaque capability/attribute requires no decoder rewrite; semantic support is registry-driven and isolated | add synthetic unknown code | typed registries | open |
 
@@ -135,6 +140,15 @@ Wire parsing owns byte syntax only. Session observation owns capability and
 generation context. RIB reduction owns route replacement/withdrawal state.
 Policy owns ranking. Adapters own external container truth and source identity.
 No layer may promote a weaker layer's label into endpoint authority.
+
+Implementation contracts for the external-source, persisted-consumer,
+semantic-identity, and profile-evidence seams are maintained in
+[MRT ingestion](BGP_MRT.md), [MRT source storage](BGP_MRT_STORE.md),
+[BMP ingestion](BGP_BMP.md), [persisted consumers](BGP_PERSISTED.md),
+[semantic identity](BGP_SEMANTIC_IDENTITY.md), and
+[profile evidence](BGP_PROFILE_EVIDENCE.md). Each leaf defines its own producer,
+carrier, consumer, and falsifiers; these links do not imply that its gates have
+passed.
 
 ## Producer/carrier/consumer proof obligations
 
@@ -222,12 +236,18 @@ Exit: BGP-C07 passes independent decision vectors and replay invariance tests.
   Unknown/unsupported/malformed or unresolved values cannot receive a complete
   fingerprint; matching identities must never merge source partitions or
   promote candidate evidence to installed-route truth.
-- Add BMP only after MRT and capture normalization share one accepted route-event
-  contract.
+- The current candidate also adds a bounded BMP v1 file adapter, sealed source
+  store, fresh replay, and source-scoped route-monitoring state. Its reported
+  events reuse shared BGP semantics; unsupported types and values remain opaque.
 - Verify source bytes/hash independently; never treat collector labels as
   authentication.
 
-Exit: BGP-C08 passes capture/MRT equivalence and non-collapse tests.
+Exit: accept the frozen same-generation capture/MRT/BMP producer and consumer
+receipt, then complete the broader cross-source equivalence and non-collapse
+qualification. The current candidate's source and persisted consumer contracts
+are [MRT](BGP_MRT.md), [MRT storage](BGP_MRT_STORE.md), [BMP](BGP_BMP.md),
+[semantic identity](BGP_SEMANTIC_IDENTITY.md), and
+[persisted consumers](BGP_PERSISTED.md).
 
 #### Peer-dependent UPDATE attributes
 
@@ -263,13 +283,16 @@ evidence retention.
 
 ### Phase 5 — product integration and persistence
 
-- Wire session/RIB/replay into the opt-in depth/history path.
-- Add CLI import, replay, state, policy, query, and export commands with atomic
-  no-overwrite output.
-- Persist versioned receipts/checkpoints and surface boundaries, incomplete
-  coverage, conflicts and resource cuts in the desktop/query model.
+- The current candidate wires capture, MRT, and BMP source stores through fresh
+  replay, state, query, export, persisted policy, and cross-source association
+  commands. Inputs and outputs remain bounded, source-scoped evidence; failed
+  output publication does not replace an existing file.
+- Final acceptance must bind the ordinary CLI workflows to exact source
+  inventories, selector results, and output-budget receipts.
 
-Exit: BGP-C10 passes a fresh-process black-box capture and MRT workflow.
+Exit: BGP-C10 passes the final same-generation fresh-process capture/import,
+replay, query, policy, export, and association workflows in the authoritative
+[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json).
 
 ### Phase 6 — qualification and promotion
 
@@ -324,6 +347,40 @@ cannot compensate for a stale fixture rejected by an earlier valid guard.
 | cross-source collapse | capture and MRT records share bytes/hash | source partitions remain immutable | equal route from two sources |
 | resource amplification | one UPDATE replicates many large attribute trees | preflight aggregate work/retention before cloning/publication | exact-limit and one-below route fanout |
 | formatter/document drift | tests pass while active docs describe repaired defects | current pointer and touched contracts must agree with code | doc consistency check |
+
+## Current implementation candidate — O14-1
+
+The frozen O14-1 candidate extends source-ordered BGP4MP replay through the
+canonical imported Adj-RIB-In reducer. Announcements, replacement, withdrawal,
+supported EOR, gaps, malformed complete frames, and scoped reset evidence stay
+bound to their MRT source ranges and peer/checkpoint partitions. Reset advances
+only the matching tracked session generation; historical routes remain
+evidenced and no per-prefix withdrawal is fabricated.
+
+The candidate also adds a bounded BMP v1 file adapter and sealed source store.
+Fresh replay shares the BGP OPEN/UPDATE decoders, normalizes reported
+Route-Monitoring events, and reduces them into peer- and policy-stream-scoped
+candidate state. Unsupported BMP types, TLVs, flags, and incomplete semantics
+remain opaque or unresolved. BMP reported clocks and transitions do not
+establish endpoint negotiation, source authenticity, monitoring completeness,
+or installed routes.
+
+Captured, MRT, and BMP producers use versioned semantic identity for the
+supported profile, and the persisted consumer exposes bounded replay, state,
+query, policy, export, and caller-scoped association over sealed stores. These
+paths retain distinct source, checkpoint, session, clock, and policy partitions;
+fingerprint equality only links comparable evidence. Their concrete contracts
+are [MRT ingestion](BGP_MRT.md), [MRT storage](BGP_MRT_STORE.md),
+[BMP ingestion](BGP_BMP.md), [persisted consumers](BGP_PERSISTED.md), and
+[semantic identity](BGP_SEMANTIC_IDENTITY.md).
+
+Final source-generation validation is governed by the root-owned
+[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json).
+Its status and source inventory determine the current candidate's validated
+scope. Full declared-profile conformance, sustained fuzzing, lawful real-corpus
+parity, measured scale/RSS, security review, exact-head platform CI, and source
+authenticity remain separate dimensions; this implementation candidate does
+not close them.
 
 ## Historical checkpoint evidence (not current validation)
 
@@ -383,7 +440,7 @@ future claimed gate. Completion is
 recorded only when code, direct consumer, docs, and acceptance evidence all
 agree.
 
-## Current local audit-fix slice
+## Historical local audit-fix slice (pre-O14-1)
 
 The current local integration adds a versioned cross-source semantic identity
 for the supported capture and TABLE_DUMP_V2 route subset. The identity excludes
@@ -406,15 +463,11 @@ Capture and imported observations remain separate even when their semantic
 fingerprints match. Details and falsifiers are in
 [BGP semantic identity](BGP_SEMANTIC_IDENTITY.md).
 
-This is a focused implementation slice, not completion of BGP-C03/C05/C08 or
-the declared full offline profile. BGP4MP does not yet reduce imported UPDATEs
-into a complete session Adj-RIB-In, and BMP, persisted policy/cross-source
-association, broad profile-driven tests, sustained fuzzing, lawful real-corpus
-parity, scale qualification, and fresh exact-commit cross-platform CI remain
-open. Local synthetic tests do not establish external-source authenticity,
-negotiated endpoint state, installed routes, reachability, or complete normative
-conformance. The fresh Windows-only audit-fix validation is recorded in the
-[current implementation pointer](../implementation/CURRENT.md) and the dated
-[validation receipt](VALIDATION.md); it does not close the remaining profile or
-qualification gaps. The repository commit and remote publication identity are
-reported separately after publication, not embedded in this source document.
+This section preserves the status of that earlier slice; its remaining-work
+list was superseded by the O14-1 candidate summary above. The fresh Windows-only
+audit-fix validation is recorded in the historical
+[current implementation pointer](../implementation/CURRENT.md) and dated
+[validation receipt](VALIDATION.md). It does not validate the O14-1 source
+generation or close its remaining profile and qualification gates. The
+repository commit and remote publication identity are reported separately
+after publication, not embedded in this source document.

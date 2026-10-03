@@ -560,7 +560,7 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
     );
     let state_bytes = fs::read(&state).expect("MRT state output");
     let state_text = String::from_utf8(state_bytes.clone()).expect("MRT state is UTF-8");
-    assert!(state_text.contains("pcap-evidence.bgp.mrt-replay.v3"));
+    assert!(state_text.contains("pcap-evidence.bgp.mrt-replay.v4"));
     assert!(state_text.contains("\"status\":\"collector_candidate\""));
     assert!(state_text.contains("\"status\":\"missing_scope\""));
     assert!(state_text.contains("\"address\":\"203.0.113.0\""));
@@ -582,7 +582,7 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
         .expect("MRT query process runs");
     assert!(queried.status.success());
     let query_text = fs::read_to_string(&query).expect("MRT query output");
-    assert!(query_text.contains("pcap-evidence.bgp.imported-session-query.v3"));
+    assert!(query_text.contains("pcap-evidence.bgp.imported-session-query.v4"));
     assert!(query_text.contains("collector_candidate"));
     assert!(query_text.contains("\"observation_index\":\"0\""));
     assert!(query_text.contains("\"observations\":["));
@@ -600,12 +600,19 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
         .expect("MRT export process runs");
     assert!(exported.status.success());
     let export_text = fs::read_to_string(&export).expect("MRT export output");
-    assert!(export_text.contains("pcap-evidence.bgp.export-header.v3"));
+    assert!(export_text.contains("pcap-evidence.bgp.export-header.v4"));
     assert!(export_text.contains("\"source_kind\":\"imported\""));
     assert!(export_text.contains("pcap-evidence.bgp.mrt-record-summary.v1"));
     assert!(export_text.contains("pcap-evidence.bgp.mrt-observation.v1"));
     assert!(export_text.contains("pcap-evidence.bgp.collector-candidate.v2"));
     assert_eq!(export_text.matches("\"normalized_observation\"").count(), 1);
+    let export_lines: Vec<_> = export_text.lines().collect();
+    assert_eq!(export_lines.len(), 6);
+    assert!(export_lines[0].contains("pcap-evidence.bgp.export-header.v4"));
+    assert!(export_lines[1].contains("pcap-evidence.bgp.adj-rib-in-candidate.v1"));
+    assert!(export_lines[1].contains("\"entries\":[]"));
+    assert!(export_lines[1].contains("\"end_of_rib\":[]"));
+    assert!(export_lines[1].contains("\"endpoint_state_claimed\":false"));
 
     let overwrite = Command::new(env!("CARGO_BIN_EXE_pcap-depth"))
         .args([

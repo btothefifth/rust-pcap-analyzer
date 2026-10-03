@@ -1,5 +1,32 @@
 # Bounded BGP candidate evidence association
 
+## Sealed route evidence association (v2)
+
+`InternalKind::RouteEvidence` represents a source-bound BGP route projection on
+another association side. It uses `pcap-evidence.association-input.v2` with side
+`route_evidence`. Its spatial relation is explicit prefix equality; it does not
+represent a flow or a newly observed endpoint. Reports containing this new side
+use `pcap-evidence.bgp.association.v2`. Existing Flow/Security inputs and reports
+retain their v1 schemas and behavior. The structural schema rejects mixed side
+and version declarations.
+
+`RouteEvidence::with_store_selection` attaches an explicitly supplied native
+candidate disposition and seal without altering the original normalized source,
+namespace, occurrence, clock, or provenance. A withdrawn, superseded, stale,
+rejected, or unresolved native entry is labeled non-current. In particular, a
+native BGP4MP gap cannot leave its earlier generic observation labeled current.
+This label remains offline candidate analysis and supplies no endpoint truth.
+`AssociationReport::to_json` returns the typed projection of that report's own
+policy, snapshot, evidence and decisions; it cannot substitute another policy.
+
+The persisted consumer and CLI paths are specified in
+[BGP_PERSISTED.md](BGP_PERSISTED.md). They require verified sealed raw stores,
+explicit caller comparison namespaces and clock policies. They preserve each
+original source partition and report unknown coverage and unauthenticated trust.
+The new v2 surface is implemented and has focused synthetic native evidence only
+when accompanied by the current execution receipt; historical acceptance below
+does not qualify this new schema or imply external-source authenticity.
+
 ## Captured BGP producer parity — source candidate
 
 The captured producer extension in [BGP_PRODUCER.md](BGP_PRODUCER.md) stages
@@ -335,3 +362,11 @@ tests, APIs, dependencies or event contracts were removed or loosened.
 Platform/runtime, live/scale/fuzz/security and normative qualification remain
 open before any automatic consumer or
 production integration. External ingestion is not part of this module.
+
+The persisted route adapter supplies native action/current disposition on both
+sides through typed APIs. The report retains `native_disposition` on adapted route
+inputs and source occurrence bindings; inactive and withdrawn inputs remain
+visible with `not_current_candidate` or `not_announcement`, and are excluded from
+potential candidate multiplicity. Opaque provenance JSON never supplies these
+reducer decisions. END/CLEAR history and reused captured labels are qualified by
+source lifecycle and exact observation/packet occurrence in the persisted seam.

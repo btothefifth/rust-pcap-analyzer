@@ -9,13 +9,16 @@
 #[path = "bgp_mrt_store_io.rs"]
 mod io_support;
 #[path = "bgp_mrt_store_output.rs"]
-mod output;
+pub(crate) mod output;
+#[path = "bgp_mrt_rib.rs"]
+pub(crate) mod rib_support;
 pub use io_support::read_source;
 
 use super::{
     bgp::{self, RouteAction, SourceKind},
     bgp_import::{self, GenerationBoundary, ImportContext, ImportPartition, SourceRange},
     bgp_mrt::{Bgp4mpPayload, MrtBatch, MrtBody, MrtLimits, MrtRecord, MrtSource, Rib},
+    bgp_rib::AdjRibIn,
     bgp_state::{CandidateState, Observation, PrefixIdentity, RoutePathId},
     model::{bad, Limits},
 };
@@ -30,7 +33,7 @@ use std::{
 };
 
 pub const SCHEMA: &str = "pcap-evidence.bgp.mrt-source-store.v1";
-pub const REPLAY_SCHEMA: &str = "pcap-evidence.bgp.mrt-replay.v3";
+pub const REPLAY_SCHEMA: &str = "pcap-evidence.bgp.mrt-replay.v4";
 pub const MAGIC: &[u8; 8] = b"PCBMRT01";
 const VERSION: u16 = 1;
 const SEAL_DOMAIN: &[u8] = b"pcap-evidence/bgp-mrt-source-store/v1\0";
@@ -213,6 +216,9 @@ pub struct MrtReplayArchive {
     pub receipt: MrtStoreReceipt,
     batch: MrtBatch,
     pub state: CandidateState,
+    /// Source-ordered BGP4MP session candidates, reduced by the canonical RIB
+    /// owner. Directionless TABLE_DUMP_V2 snapshots never enter this reducer.
+    pub bgp4mp_rib: AdjRibIn,
     /// Explicit context for all BGP4MP peer sessions in this replay.
     pub peer_relationship: Option<bgp::PeerRelationship>,
     pub candidates: Vec<CollectorCandidate>,
@@ -272,6 +278,7 @@ impl MrtReplayArchive {
                 Json::array(self.bgp4mp_events.iter().cloned()),
             ),
             ("candidate_state", self.state.json()),
+            ("bgp4mp_adj_rib_in", self.bgp4mp_rib_json(None)),
             (
                 "record_summaries",
                 Json::array(self.batch.records.iter().map(record_json)),
@@ -766,6 +773,8 @@ fn build_archive(
         return Err(Error::limit("bgp_mrt_source_bytes"));
     }
     let mut state = CandidateState::new(limits.clone())?;
+    let mut bgp4mp_rib = AdjRibIn::new(limits.clone())?;
+    let mut bgp4mp_rib_work = 0usize;
     let mut candidates = Vec::new();
     let mut bgp4mp_candidates = Vec::new();
     let mut bgp4mp_events = Vec::new();
@@ -780,6 +789,8 @@ fn build_archive(
     let mut bgp4mp_messages = 0u64;
     let mut bgp4mp_state_changes = 0u64;
     for (record_index, record) in batch.records.iter().enumerate() {
+        let observations_before = observations.len();
+        let events_before = bgp4mp_events.len();
         match &record.body {
             MrtBody::Rib(rib) => {
                 for entry_index in 0..rib.entries.len() {
@@ -912,7 +923,9 @@ fn build_archive(
                     )?;
                     if let Some(normalized) = replay.observation {
                         let observation = Observation::from_normalized(&normalized, None, &limits)?;
-                        if !observation.routes().is_empty() {
+                        if !observation.routes().is_empty()
+                            || rib_support::end_of_rib_family(&observation)?.is_some()
+                        {
                             observations_work = observations_work
                                 .checked_add(observation.batch_work()?)
                                 .ok_or_else(|| Error::limit("bgp_state_work"))?;
@@ -1016,7 +1029,33 @@ fn build_archive(
             }
             MrtBody::PeerIndex(_) => {}
         }
+        if matches!(record.body, MrtBody::Bgp4mp(_)) {
+            for observation in &observations[observations_before..] {
+                if let Some(event) = rib_support::observation_event(observation, &limits)? {
+                    bgp4mp_rib.apply(event)?;
+                    bgp4mp_rib_work = bgp4mp_rib_work
+                        .checked_add(bgp4mp_rib.accounted_work())
+                        .filter(|work| *work <= limits.work)
+                        .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+                }
+            }
+            for event in &bgp4mp_events[events_before..] {
+                bgp4mp_rib_work = bgp4mp_rib_work
+                    .checked_add(rib_support::quarantine_event(
+                        &mut bgp4mp_rib,
+                        event,
+                        &bgp4mp_contexts,
+                        &limits,
+                    )?)
+                    .filter(|work| *work <= limits.work)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+            }
+        }
     }
+    observations_work = observations_work
+        .checked_add(bgp4mp_rib_work)
+        .filter(|work| *work <= limits.work)
+        .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
     let outcomes = state.apply_batch(observations)?;
     for candidate in &mut candidates {
         let outcome = outcomes.get(candidate.observation_index).ok_or_else(|| {
@@ -1102,6 +1141,7 @@ fn build_archive(
         receipt,
         batch,
         state,
+        bgp4mp_rib,
         peer_relationship: options.peer_relationship,
         candidates,
         bgp4mp_candidates,
@@ -1117,6 +1157,8 @@ fn build_archive(
     let mut retained = archive
         .state
         .retained_bytes()
+        .checked_add(archive.bgp4mp_rib.retained_bytes())
+        .ok_or_else(|| Error::limit("bgp_mrt_retained"))?
         .checked_add(archive.batch.retained_bytes)
         .ok_or_else(|| Error::limit("bgp_mrt_retained"))?;
     for candidate in &archive.candidates {
@@ -1825,8 +1867,16 @@ fn as_u64(value: usize, field: &'static str) -> Result<u64> {
 }
 
 fn decode_hex_32(value: &str) -> Result<[u8; 32]> {
-    if value.len() != 64 {
-        return Err(bad("bgp_mrt_source_sha256", 0, "invalid digest length"));
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(bad(
+            "bgp_mrt_source_sha256",
+            0,
+            "expected 64 lowercase hexadecimal digits",
+        ));
     }
     let mut output = [0u8; 32];
     for (index, byte) in output.iter_mut().enumerate() {
@@ -1914,6 +1964,16 @@ impl<'bytes, 'limits> Decoder<'bytes, 'limits> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn digest_parser_rejects_signed_and_non_ascii_hex_pairs() {
+        assert_eq!(decode_hex_32(&"0a".repeat(32)).unwrap(), [10; 32]);
+        for invalid_pair in ["+a", "-a", "AA", "é"] {
+            let invalid = format!("{invalid_pair}{}", "0a".repeat(31));
+            assert_eq!(invalid.len(), 64);
+            assert!(decode_hex_32(&invalid).is_err(), "pair {invalid_pair}");
+        }
+    }
 
     fn path(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()

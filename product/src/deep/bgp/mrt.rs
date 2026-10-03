@@ -556,12 +556,15 @@ pub(crate) fn replay_message_record(
             // ImportContext. Packet-relative route spans belong only to the
             // captured evidence carrier and must not be asserted here.
             let mut imported_records = std::mem::take(&mut parsed.records);
-            for route in &mut imported_records {
-                route.start = 0;
-                route.end = 0;
-                route.attribute_ranges.clear();
-            }
-            let normalized = envelope(
+            let occurrence_inventory = imported_attribute_inventory(
+                &parsed.attribute_ranges,
+                bytes,
+                &message_range,
+                imported_records.len(),
+                limits,
+            )?;
+            let identities = imported_route_identities(&mut imported_records, limits)?;
+            let mut normalized = envelope(
                 Source {
                     kind: SourceKind::Imported,
                     source_id: batch.source.source_id.clone(),
@@ -581,6 +584,17 @@ pub(crate) fn replay_message_record(
                     evidence: None,
                     import_context: Some(context.json()),
                 },
+                limits,
+            )?;
+            let atomic_aggregate = parsed
+                .attribute_ranges
+                .iter()
+                .any(|occurrence| occurrence.code == 6 && occurrence.disposition != "discard");
+            finish_imported_update(
+                &mut normalized,
+                identities,
+                occurrence_inventory,
+                atomic_aggregate,
                 limits,
             )?;
             Ok(ReplayRecord {
@@ -851,6 +865,283 @@ fn observation_time_ns(record: &MrtRecord) -> Option<i64> {
     seconds.checked_add(micros)
 }
 
+/// Exact imported value bytes and message-relative coordinates, with no packet
+/// carrier. The sealed store independently binds this inventory to source.
+/// Shared imported semantic donor. A sizing pass holds one identity at a time;
+/// aggregate admission precedes the retained vector and span clearing.
+pub(super) fn imported_route_identities(
+    records: &mut [RouteRecord],
+    limits: &Limits,
+) -> Result<Vec<Json>> {
+    let cap = limits
+        .input_bytes
+        .min(limits.retained_bytes)
+        .min(limits.output_bytes);
+    let mut size = 0usize;
+    for record in records.iter() {
+        let identity = capture_semantic_identity(record, limits)?;
+        size = size
+            .checked_add(identity.encoded_len_bounded(cap.saturating_sub(size))?)
+            .filter(|size| *size <= cap)
+            .ok_or_else(|| Error::limit("bgp_mrt_semantic_identity_fanout"))?;
+    }
+    if size
+        .checked_mul(2)
+        .filter(|size| *size <= limits.work)
+        .is_none()
+    {
+        return Err(Error::limit("bgp_mrt_semantic_identity_work"));
+    }
+    let mut identities = Vec::new();
+    identities
+        .try_reserve_exact(records.len())
+        .map_err(|_| Error::limit("bgp_mrt_semantic_identity"))?;
+    for route in records {
+        identities.push(capture_semantic_identity(route, limits)?);
+        route.start = 0;
+        route.end = 0;
+        route.attribute_ranges.clear();
+    }
+    Ok(identities)
+}
+
+/// Attach the preflighted source proof to an imported envelope. BMP and MRT
+/// share this join rather than maintaining separate semantic carrier rules.
+pub(super) fn finish_imported_update(
+    normalized: &mut Json,
+    identities: Vec<Json>,
+    inventory: Json,
+    atomic_aggregate: bool,
+    limits: &Limits,
+) -> Result<()> {
+    let cap = limits
+        .input_bytes
+        .min(limits.output_bytes)
+        .min(limits.retained_bytes);
+    let mut size = normalized.encoded_len_bounded(cap)?;
+    let Json::Object(fields) = normalized else {
+        return Err(bad("bgp_mrt_import", 0, "route envelope absent"));
+    };
+    let routes = fields
+        .iter_mut()
+        .find_map(|(key, value)| (*key == "routes").then_some(value))
+        .ok_or_else(|| bad("bgp_mrt_import", 0, "routes absent"))?;
+    let Json::Array(routes) = routes else {
+        return Err(bad("bgp_mrt_import", 0, "routes not array"));
+    };
+    if routes.len() != identities.len() {
+        return Err(bad(
+            "bgp_mrt_import",
+            0,
+            "identity fanout does not match routes",
+        ));
+    }
+    let inventory_size = inventory.encoded_len_bounded(cap)?;
+    let identity_key = Json::from("semantic_identity").encoded_len_bounded(cap)? + 2;
+    let inventory_key = Json::from("imported_attribute_occurrences").encoded_len_bounded(cap)? + 2;
+    let atomic_key = Json::from("atomic_aggregate").encoded_len_bounded(cap)? + 1;
+    for (route, identity) in routes.iter().zip(&identities) {
+        let Json::Object(route) = route else {
+            return Err(bad("bgp_mrt_import", 0, "route not object"));
+        };
+        let atom = route
+            .iter()
+            .find_map(|(key, value)| (*key == "attributes").then_some(value))
+            .and_then(|value| match value {
+                Json::Object(attrs) => Some(attrs),
+                _ => None,
+            });
+        let growth = identity_key
+            .checked_add(identity.encoded_len_bounded(cap)?)
+            .and_then(|size| size.checked_add(inventory_key))
+            .and_then(|size| size.checked_add(inventory_size))
+            .and_then(|size| {
+                size.checked_add(atom.map_or(0, |attrs| {
+                    atomic_key
+                        + usize::from(!attrs.is_empty())
+                        + if atomic_aggregate { 4 } else { 5 }
+                }))
+            })
+            .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrence_fanout"))?;
+        size = size
+            .checked_add(growth)
+            .filter(|size| *size <= cap.min(limits.work))
+            .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrence_fanout"))?;
+    }
+    for (route, identity) in routes.iter_mut().zip(identities) {
+        let Json::Object(route) = route else {
+            unreachable!("preflighted route")
+        };
+        route.push(("semantic_identity", identity));
+        route.push(("imported_attribute_occurrences", inventory.clone()));
+        if let Some(Json::Object(attributes)) = route
+            .iter_mut()
+            .find_map(|(key, value)| (*key == "attributes").then_some(value))
+        {
+            attributes.push(("atomic_aggregate", atomic_aggregate.into()));
+        }
+    }
+    let actual = normalized.encoded_len_bounded(cap)?;
+    if actual != size {
+        return Err(bad(
+            "bgp_mrt_import",
+            0,
+            "imported proof size changed after preflight",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn imported_attribute_inventory(
+    ranges: &[AttributeRange],
+    message: &[u8],
+    message_range: &SourceRange,
+    route_count: usize,
+    limits: &Limits,
+) -> Result<Json> {
+    let withdrawn_length = message.get(19..21).ok_or_else(|| {
+        bad(
+            "bgp_mrt_imported_occurrences",
+            19,
+            "UPDATE withdrawn length absent",
+        )
+    })?;
+    let attribute_length_start = 21usize
+        .checked_add(usize::from(u16::from_be_bytes([
+            withdrawn_length[0],
+            withdrawn_length[1],
+        ])))
+        .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrences"))?;
+    let attribute_length_end = attribute_length_start
+        .checked_add(2)
+        .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrences"))?;
+    let attribute_length = message
+        .get(attribute_length_start..attribute_length_end)
+        .ok_or_else(|| {
+            bad(
+                "bgp_mrt_imported_occurrences",
+                attribute_length_start,
+                "UPDATE attribute length absent",
+            )
+        })?;
+    let attributes_end = attribute_length_end
+        .checked_add(usize::from(u16::from_be_bytes([
+            attribute_length[0],
+            attribute_length[1],
+        ])))
+        .filter(|end| *end <= message.len())
+        .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrences"))?;
+    let prefix = &message[..attribute_length_end];
+    let suffix = &message[attributes_end..];
+
+    // Admit every raw hex byte, including endpoints and route fanout, before
+    // allocating any occurrence or hex String. Endpoint bytes close membership:
+    // the consumer can reconstruct all declared TLVs and the full message hash.
+    let mut raw_bytes = prefix
+        .len()
+        .checked_add(suffix.len())
+        .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrences"))?;
+    for range in ranges {
+        let value = message.get(range.value_start..range.end).ok_or_else(|| {
+            bad(
+                "bgp_mrt_imported_occurrences",
+                range.value_start,
+                "attribute outside message",
+            )
+        })?;
+        raw_bytes = raw_bytes
+            .checked_add(value.len())
+            .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrences"))?;
+    }
+    let hex_bytes = raw_bytes
+        .checked_mul(2)
+        .and_then(|size| size.checked_mul(route_count.max(1)))
+        .filter(|size| {
+            *size
+                <= limits
+                    .input_bytes
+                    .min(limits.retained_bytes)
+                    .min(limits.output_bytes)
+        })
+        .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrence_hex_fanout"))?;
+    if hex_bytes
+        .checked_mul(2)
+        .filter(|size| *size <= limits.work)
+        .is_none()
+    {
+        return Err(Error::limit("bgp_mrt_imported_occurrence_hex_work"));
+    }
+    let mut occurrences = Vec::new();
+    occurrences
+        .try_reserve_exact(ranges.len())
+        .map_err(|_| Error::limit("bgp_mrt_imported_occurrences"))?;
+    for range in ranges {
+        let value = message.get(range.value_start..range.end).ok_or_else(|| {
+            bad(
+                "bgp_mrt_imported_occurrences",
+                range.value_start,
+                "attribute outside message",
+            )
+        })?;
+        let value_hex = imported_hex(value)?;
+        let mut occurrence = attribute_range_json(range);
+        let Json::Object(fields) = &mut occurrence else {
+            unreachable!()
+        };
+        fields.push(("value_hex", value_hex.into()));
+        occurrences.push(occurrence);
+    }
+    let inventory = Json::object([
+        (
+            "schema",
+            "pcap-evidence.bgp.imported-attribute-occurrences.v1".into(),
+        ),
+        ("coordinate_system", "bgp-message-relative".into()),
+        ("message_length", message.len().into()),
+        (
+            "message_sha256",
+            message_range
+                .sha256
+                .clone()
+                .ok_or_else(|| bad("bgp_mrt_imported_occurrences", 0, "message digest absent"))?
+                .into(),
+        ),
+        ("occurrences", Json::Array(occurrences)),
+        ("message_prefix_hex", imported_hex(prefix)?.into()),
+        ("message_suffix_hex", imported_hex(suffix)?.into()),
+    ]);
+    let length = inventory.encoded_len_bounded(limits.input_bytes)?;
+    if length
+        .checked_mul(route_count)
+        .filter(|size| {
+            *size
+                <= limits
+                    .retained_bytes
+                    .min(limits.output_bytes)
+                    .min(limits.work)
+        })
+        .is_none()
+    {
+        return Err(Error::limit("bgp_mrt_imported_occurrence_fanout"));
+    }
+    Ok(inventory)
+}
+
+fn imported_hex(bytes: &[u8]) -> Result<String> {
+    let size = bytes
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| Error::limit("bgp_mrt_imported_occurrences"))?;
+    let mut hex = String::new();
+    hex.try_reserve_exact(size)
+        .map_err(|_| Error::limit("bgp_mrt_imported_occurrences"))?;
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").map_err(|_| Error::limit("bgp_mrt_imported_occurrences"))?;
+    }
+    Ok(hex)
+}
+
 fn import_context(
     event: EventContext<'_>,
     message_range: SourceRange,
@@ -1109,6 +1400,106 @@ fn update_detail(
                 .map_or(Json::Null, Json::String),
         ),
     ])
+}
+
+#[cfg(test)]
+mod imported_occurrence_tests {
+    use super::*;
+
+    fn message() -> Vec<u8> {
+        let mut bytes = vec![0xff; 16];
+        bytes.extend([0, 31, 2, 0, 4, 24, 192, 0, 2, 0, 0, 24, 198, 51, 100]);
+        bytes
+    }
+
+    #[test]
+    fn imported_occurrence_endpoints_cover_withdrawals_lengths_and_announcements() {
+        let message = message();
+        let range = SourceRange {
+            start: 100,
+            end: 131,
+            sha256: Some(sha256::hex(&sha256::digest(&message))),
+        };
+        let inventory =
+            imported_attribute_inventory(&[], &message, &range, 1, &Limits::default()).unwrap();
+        let Json::Object(fields) = &inventory else {
+            panic!("inventory")
+        };
+        let get = |name| &fields.iter().find(|(key, _)| *key == name).unwrap().1;
+        assert_eq!(
+            get("message_prefix_hex"),
+            &Json::from(sha256::hex(&message[..27]))
+        );
+        assert_eq!(
+            get("message_suffix_hex"),
+            &Json::from(sha256::hex(&message[27..]))
+        );
+        assert_eq!(fields.len(), 7);
+        let exact = inventory.encoded_len_bounded(usize::MAX).unwrap();
+        for limit in [exact, exact - 1] {
+            let result = imported_attribute_inventory(
+                &[],
+                &message,
+                &range,
+                1,
+                &Limits {
+                    input_bytes: limit,
+                    retained_bytes: limit,
+                    output_bytes: limit,
+                    ..Limits::default()
+                },
+            );
+            assert_eq!(result.is_ok(), limit == exact);
+        }
+    }
+
+    #[test]
+    fn imported_occurrence_endpoint_hex_fanout_is_admitted_before_materialization() {
+        let message = message();
+        let range = SourceRange {
+            start: 100,
+            end: 131,
+            sha256: Some(sha256::hex(&sha256::digest(&message))),
+        };
+        let hex = message.len() * 2;
+        for limits in [
+            Limits {
+                input_bytes: hex - 1,
+                ..Limits::default()
+            },
+            Limits {
+                retained_bytes: hex * 2 - 1,
+                ..Limits::default()
+            },
+            Limits {
+                output_bytes: hex * 2 - 1,
+                ..Limits::default()
+            },
+        ] {
+            let routes = if limits.input_bytes == hex - 1 { 1 } else { 2 };
+            assert_eq!(
+                imported_attribute_inventory(&[], &message, &range, routes, &limits)
+                    .unwrap_err()
+                    .field,
+                "bgp_mrt_imported_occurrence_hex_fanout"
+            );
+        }
+        assert_eq!(
+            imported_attribute_inventory(
+                &[],
+                &message,
+                &range,
+                2,
+                &Limits {
+                    work: hex * 4 - 1,
+                    ..Limits::default()
+                }
+            )
+            .unwrap_err()
+            .field,
+            "bgp_mrt_imported_occurrence_hex_work"
+        );
+    }
 }
 
 #[cfg(test)]

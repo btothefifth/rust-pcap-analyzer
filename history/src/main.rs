@@ -7,7 +7,7 @@ use pcap_evidence_history::{
 use std::{collections::BTreeSet, path::Path};
 const HELP:&str="pcap-history build SOURCE NEW_WORKSPACE [OPTIONS]\npcap-history verify SOURCE WORKSPACE NEW_REPLAY_WORKSPACE\npcap-history recover SOURCE OLD_WORKSPACE NEW_WORKSPACE [--allow-torn-tail]\npcap-history generations SOURCE WORKSPACE [--after GENERATION_HEX]\npcap-history range SOURCE WORKSPACE GENERATION_HEX DIRECTION START END\n\nBuild options: --nearest-frontier (explicit epoch hypothesis; default strict)\n--max-disk-bytes N --max-source-bytes N --hot-tuples N --sort-entries N\n--checkpoint-records N --max-generations N\nAll query bytes are capture-derived hypotheses, never endpoint truth.\nGeneration pages include payload-bearing hypotheses only. No live acquisition.\nAn interrupted build is unsealed; use explicit recovery to a NEW workspace.";
 fn generation(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    if s.len() != 64 || !s.is_ascii() {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("generation must be 64 hexadecimal characters".into());
     }
     let mut id = [0; 32];
