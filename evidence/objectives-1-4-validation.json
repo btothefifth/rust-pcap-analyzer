@@ -1,6 +1,27 @@
 {
   "baseline_commit": "b66e624f17e02975d5b74e0cd4e8c305a65bd4b4",
   "disk": {
+    "final_delivery_frontier": {
+      "after_allocated_bytes": 3535011840,
+      "before_allocated_bytes": 3533684736,
+      "drivers": [
+        {
+          "driver": "product",
+          "exit_code": 0
+        },
+        {
+          "driver": "root",
+          "exit_code": 0
+        }
+      ],
+      "hard_ceiling_bytes": 50000000000,
+      "headroom_stop_bytes": 45000000000,
+      "owned_external_scratch_reserved_bytes": 300000000,
+      "sample_seconds": 5,
+      "sampled_not_physical_peak_proof": true,
+      "sampled_peak_project_allocated_bytes": 3535011840,
+      "schema": "pcap-evidence.local-disk-observation.v1"
+    },
     "final_repaired_frontier": {
       "after_allocated_bytes": 3533312000,
       "before_allocated_bytes": 3531968512,
@@ -61,6 +82,12 @@
       "removed_paths": 0,
       "unchanged_previously_accepted_paths": 64
     },
+    "latest_composition": {
+      "new_or_removed_paths": 0,
+      "previous_source_manifest_sha256": "f2f482757002e96ea07b30ca97c8db769bcdbc515f356c94172377d8e1575809",
+      "reviewed_amended_paths": 2,
+      "unchanged_paths": 73
+    },
     "review_role": "Sol 6.1 XHigh",
     "reviewed_repairs": [
       "strict binary Windows READY barrier",
@@ -68,21 +95,22 @@
       "test-only dependency provisioning and package declaration",
       "canonical dependency root and path/JSON platform witnesses",
       "bounded failure diagnostics",
-      "delivery ledger truth"
+      "delivery ledger truth",
+      "complete workflow YAML parser and exact provisioning argv proof"
     ],
     "source": "ACCEPT",
-    "source_manifest_sha256": "f2f482757002e96ea07b30ca97c8db769bcdbc515f356c94172377d8e1575809",
+    "source_manifest_sha256": "04eb6fac183feac74b2a79f2848333aa3dd367beaa19dd7b52ad4d1d19c7ad6f",
     "unresolved_actionable_source_findings": []
   },
   "ordered_root_validation": {
-    "finished_utc": "2026-10-03T15:15:08.438882+00:00",
+    "finished_utc": "2026-10-03T15:28:28.391247+00:00",
     "native_rust_executed": true,
     "platform": "Linux-7.0.0-34-generic-x86_64-with-glibc2.43",
     "python": "3.14.4",
     "schema": "pcap-evidence.validation.v1",
-    "source_identity": "fcaaa67f157c3ac060d74b19f0b602b22e0b234a4380f7aa0ffdb62d8ef93ad8",
+    "source_identity": "dc69c39e8e6cd87bd27235b649cd6f8a3b42e8e0e5b901aafccda375314c0012",
     "source_unchanged": true,
-    "started_utc": "2026-10-03T15:14:38.688553+00:00",
+    "started_utc": "2026-10-03T15:27:59.299115+00:00",
     "status": "PASS",
     "steps": [
       {
@@ -90,7 +118,7 @@
           "python",
           "scripts/static_check.py"
         ],
-        "elapsed_seconds": 1.301,
+        "elapsed_seconds": 1.233,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -102,7 +130,7 @@
           "scripts/make_fixtures.py",
           "--check"
         ],
-        "elapsed_seconds": 0.109,
+        "elapsed_seconds": 0.101,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -113,7 +141,7 @@
           "python",
           "scripts/reference_verify.py"
         ],
-        "elapsed_seconds": 0.067,
+        "elapsed_seconds": 0.065,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -124,10 +152,10 @@
           "python",
           "scripts/test_oracle.py"
         ],
-        "elapsed_seconds": 0.12,
+        "elapsed_seconds": 0.115,
         "exit_code": 0,
         "status": "PASS",
-        "stderr": "test_bad_trailer_reaches_length_predicate (__main__.OracleChecks.test_bad_trailer_reaches_length_predicate) ... ok\ntest_crc_external_vector (__main__.OracleChecks.test_crc_external_vector) ... ok\ntest_decimal_and_binary_high_bit_are_different (__main__.OracleChecks.test_decimal_and_binary_high_bit_are_different) ... ok\ntest_inexact_binary_time_is_not_rounded (__main__.OracleChecks.test_inexact_binary_time_is_not_rounded) ... ok\ntest_manifest_and_hand_authored_truth (__main__.OracleChecks.test_manifest_and_hand_authored_truth) ... ok\ntest_packet_slice_excludes_record_header (__main__.OracleChecks.test_packet_slice_excludes_record_header) ... ok\ntest_rehashed_fixture_metadata_does_not_change_semantic_truth (__main__.OracleChecks.test_rehashed_fixture_metadata_does_not_change_semantic_truth) ... ok\ntest_signed_offset_not_unsigned_or_ignored (__main__.OracleChecks.test_signed_offset_not_unsigned_or_ignored) ... ok\ntest_sources_are_synthetic_and_truth_is_not_generated_receipt (__main__.OracleChecks.test_sources_are_synthetic_and_truth_is_not_generated_receipt) ... ok\ntest_truncated_record_is_rejected (__main__.OracleChecks.test_truncated_record_is_rejected) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.004s\n\nOK\n",
+        "stderr": "test_bad_trailer_reaches_length_predicate (__main__.OracleChecks.test_bad_trailer_reaches_length_predicate) ... ok\ntest_crc_external_vector (__main__.OracleChecks.test_crc_external_vector) ... ok\ntest_decimal_and_binary_high_bit_are_different (__main__.OracleChecks.test_decimal_and_binary_high_bit_are_different) ... ok\ntest_inexact_binary_time_is_not_rounded (__main__.OracleChecks.test_inexact_binary_time_is_not_rounded) ... ok\ntest_manifest_and_hand_authored_truth (__main__.OracleChecks.test_manifest_and_hand_authored_truth) ... ok\ntest_packet_slice_excludes_record_header (__main__.OracleChecks.test_packet_slice_excludes_record_header) ... ok\ntest_rehashed_fixture_metadata_does_not_change_semantic_truth (__main__.OracleChecks.test_rehashed_fixture_metadata_does_not_change_semantic_truth) ... ok\ntest_signed_offset_not_unsigned_or_ignored (__main__.OracleChecks.test_signed_offset_not_unsigned_or_ignored) ... ok\ntest_sources_are_synthetic_and_truth_is_not_generated_receipt (__main__.OracleChecks.test_sources_are_synthetic_and_truth_is_not_generated_receipt) ... ok\ntest_truncated_record_is_rejected (__main__.OracleChecks.test_truncated_record_is_rejected) ... ok\n\n----------------------------------------------------------------------\nRan 10 tests in 0.003s\n\nOK\n",
         "stdout": ""
       },
       {
@@ -135,7 +163,7 @@
           "rustc",
           "--version"
         ],
-        "elapsed_seconds": 0.071,
+        "elapsed_seconds": 0.075,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -149,7 +177,7 @@
           "--offline",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.086,
+        "elapsed_seconds": 0.085,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s\n",
@@ -163,11 +191,11 @@
           "--offline",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.939,
+        "elapsed_seconds": 0.916,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s\n     Running unittests src/lib.rs (.local-build/target/debug/deps/pcap_evidence-f97f777820e0a121)\n     Running unittests src/main.rs (.local-build/target/debug/deps/pcap_evidence-b3c86e37d91ac68f)\n     Running tests/capture_contract.rs (.local-build/target/debug/deps/capture_contract-dac499b31f880abc)\n     Running tests/cli.rs (.local-build/target/debug/deps/cli-4404a2f77fb352a6)\n     Running tests/dnp3_confirmations.rs (.local-build/target/debug/deps/dnp3_confirmations-8d961741e0731cca)\n     Running tests/dnp3_workflow.rs (.local-build/target/debug/deps/dnp3_workflow-215007aac59c33ec)\n     Running tests/hardening.rs (.local-build/target/debug/deps/hardening-5fd35c45809ae096)\n     Running tests/hostile_inputs.rs (.local-build/target/debug/deps/hostile_inputs-46107c3eaf8c26a3)\n     Running tests/integrity.rs (.local-build/target/debug/deps/integrity-2c3e5c72b243ec96)\n     Running tests/json_bounded_allocation.rs (.local-build/target/debug/deps/json_bounded_allocation-538c50c3cc4a9ebc)\n     Running tests/protocols.rs (.local-build/target/debug/deps/protocols-665716038e6eb194)\n     Running tests/reconstruction.rs (.local-build/target/debug/deps/reconstruction-39193a1749549ccb)\n     Running tests/semantic_pipeline.rs (.local-build/target/debug/deps/semantic_pipeline-d1d59bccba11116c)\n     Running tests/semantic_subset.rs (.local-build/target/debug/deps/semantic_subset-89b5bf0d2e575f20)\n     Running tests/streaming_handoff.rs (.local-build/target/debug/deps/streaming_handoff-dada325050c23bba)\n     Running tests/wire.rs (.local-build/target/debug/deps/wire-222684fe23698c1f)\n     Running unittests examples/analyze.rs (.local-build/target/debug/examples/analyze-670653f70a9e7279)\n     Running unittests examples/semantic_probe.rs (.local-build/target/debug/examples/semantic_probe-1c26f8c77b46e1bd)\n     Running unittests examples/stream_records.rs (.local-build/target/debug/examples/stream_records-fd44ca6da6f4845a)\n",
-        "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest binary_timestamp_inexactness_is_explicit ... ok\ntest bounded_salvage_identifies_section_but_does_not_invent_packets ... ok\ntest classic_link_flags_do_not_become_linktype ... ok\ntest classic_writer_rejects_precision_loss_and_accepts_exact_neighbor ... ok\ntest decoder_need_more_does_not_advance_section_state ... ok\ntest invalid_input_copy_has_no_output_effect ... ok\ntest interface_reference_cannot_escape_section_scope ... ok\ntest four_pcap_magic_forms_preserve_units_and_bytes ... ok\ntest invalid_microsecond_fraction_is_never_converted_as_nanoseconds ... ok\ntest new_writers_preserve_exact_time_and_endianness ... ok\ntest malformed_option_length_cannot_consume_following_block ... ok\ntest partial_write_poisons_writer_and_blocks_unsafe_retry ... ok\ntest malformed_trailer_and_truncated_eof_are_distinct ... ok\ntest section_endianness_interface_reset_and_signed_offset ... ok\ntest oversized_declared_packet_rejected_before_payload_allocation ... ok\ntest strict_and_evidence_modes_do_not_silently_normalize_lengths ... ok\ntest streaming_truncated_tail_terminates_without_refill_loop ... ok\ntest iterator_is_fused_after_failure ... ok\ntest unknown_blocks_secrets_and_no_copy_custom_are_preserved_archivally ... ok\ntest unlimited_snaplen_simple_packet_has_no_fabricated_time ... ok\ntest streaming_one_byte_and_interrupted_reads_equal_borrowed ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 5 tests\ntest require_clean_returns_diagnostic_status_without_hiding_report ... ok\ntest real_cli_inspects_and_does_not_modify_source ... ok\ntest help_and_invalid_flags_have_distinct_exit_status ... ok\ntest cli_index_verify_and_packet_lookup ... ok\ntest cli_pipeline_labels_and_no_clobber_output ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s\n\n\nrunning 38 tests\ntest application_list_order_does_not_change_candidate_selection ... ok\ntest budget_exhaustion_is_typed_and_never_returns_partial_candidates ... ok\ntest a_transport_complete_target_does_not_require_a_complete_application_message ... ok\ntest duplicate_confirms_remain_ambiguous_even_without_a_target ... ok\ntest conflicting_con_or_direction_headers_cannot_make_a_unique_target_win ... ok\ntest duplicate_targets_are_all_retained_without_selecting_one ... ok\ntest confirmation_targets_one_application_fragment_not_the_message_first_sequence ... ok\ntest all_budget_values_below_the_first_success_are_explicit_limits ... ok\ntest equal_not_reversed_addresses_and_other_flows_do_not_match ... ok\ntest fcb_and_fcv_do_not_select_a_partner_or_infer_link_state ... ok\ntest invalid_capture_direction_and_outer_protocol_label_are_explicit ... ok\ntest invalid_witness_taints_only_its_flow_without_using_its_forged_key ... ok\ntest all_truncated_link_and_application_prefixes_are_explicit_not_candidates ... ok\ntest every_public_fragment_metadata_field_is_rechecked_for_both_participants ... ok\ntest multiple_outstations_remain_separate ... ok\ntest missing_or_conflicting_transport_bytes_never_create_a_target ... ok\ntest observed_opposite_dir_is_used_without_inventing_a_role_mapping ... ok\ntest object_payload_does_not_become_a_decoded_value_through_confirmation_correlation ... ok\ntest public_apdu_role_rewrite_cannot_hide_a_duplicate_confirm_from_verification ... ok\ntest response_only_and_unrelated_read_do_not_create_confirmation_rows ... ok\ntest sequence_and_uns_namespace_mismatches_remain_unmatched ... ok\ntest solicited_candidate_has_exact_fragment_and_crc_checked_header_witnesses ... ok\ntest reused_frame_indices_and_post_fin_duplicates_cannot_be_laundered ... ok\ntest sequence_rollover_is_not_an_invented_transaction_epoch ... ok\ntest same_capture_direction_or_same_link_dir_is_not_a_candidate ... ok\ntest selected_application_header_source_spans_are_rechecked_not_just_bytes ... ok\ntest malformed_confirm_controls_broadcast_and_bad_uns_remain_unclassified ... ok\ntest target_without_con_is_excluded_not_promoted ... ok\ntest unmatched_confirm_is_retained_and_legacy_transaction_output_is_unchanged ... ok\ntest the_same_numeric_flow_from_different_captures_cannot_pair ... ok\ntest unsolicited_confirm_pairs_only_inside_its_separate_namespace ... ok\ntest unsupported_secure_context_is_not_silently_removed_from_the_identifier_pool ... ok\ntest transport_wrap_and_reordered_duplicates_preserve_selected_header_and_all_packets ... ok\ntest forged_public_link_fields_crc_and_source_offsets_are_not_witnesses ... ok\ntest timestamps_and_capture_order_are_not_confirmation_matching_inputs ... ok\ntest engine_limit_error_is_separate_and_survives_json_projection ... ok\ntest real_cli_emits_the_additive_section_without_changing_the_capture ... ok\ntest fixed_capture_reaches_engine_and_deterministic_root_json_with_exact_timestamps ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 25 tests\ntest all_control_bytes_preserve_raw_primary_secondary_masks ... ok\ntest class_event_scans_and_index_selectors_reuse_the_root_parser ... ok\ntest contradictory_length_and_bad_header_crc_do_not_silently_resynchronize ... ok\ntest class_controls_are_bounded_selectors_not_inferred_configuration ... ok\ntest conflicting_duplicates_and_late_continuations_never_majority_vote ... ok\ntest confirms_and_unsolicited_namespace_are_byte_derived ... ok\ntest file_control_request_reaches_bounded_group70_projection ... ok\ntest declared_crc_failure_is_not_a_license_to_scan_nested_frames ... ok\ntest all_broadcast_addresses_are_explicit_and_not_pairable ... ok\ntest cross_application_fragment_object_completion_has_exact_two_packet_spans ... ok\ntest fcb_is_retained_but_not_used_as_endpoint_state_when_fcv_is_zero ... ok\ntest fixed_vectors_have_independent_crc_and_exact_frame_extent ... ok\ntest forged_metadata_or_link_direction_cannot_authorize_pairing ... ok\ntest reordered_transport_duplicates_keep_all_witnesses_but_only_one_byte_value ... ok\ntest multiple_outstations_do_not_share_sequence_namespaces ... ok\ntest request_response_pairs_require_addresses_sequence_function_and_directions ... ok\ntest truncation_and_limits_remain_explicit_not_success ... ok\ntest missing_middle_or_first_never_decodes_partial_objects_as_a_complete_message ... ok\ntest secure_file_authentication_and_unreviewed_families_remain_opaque ... ok\ntest link_fields_have_exact_control_and_address_witnesses ... ok\ntest non_secure_time_workflows_preserve_raw_time_and_exact_spans ... ok\ntest link_subset_reports_reserved_unsupported_and_invalid_combinations ... ok\ntest unmatched_no_response_confirm_and_unsolicited_are_not_fabricated_pairs ... ok\ntest sequence_rollover_is_valid_but_reuse_stays_ambiguous ... ok\ntest workflow_json_is_deterministic_and_does_not_infer_time_or_effects ... ok\n\ntest result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 38 tests\ntest checksum_odd_byte_survives_snapshot_and_empty_updates ... ok\ntest decoder_rejects_overflowing_public_offsets_without_panicking ... ok\ntest dnp_probe_checks_all_crcs_and_does_not_require_a_standard_port ... ok\ntest dnp_public_stream_offset_overflow_is_typed_not_a_panic ... ok\ntest crc_failure_in_udp_is_a_diagnostic_not_a_clean_application ... ok\ntest earlier_payload_after_fin_observation_is_still_reconstructible ... ok\ntest dnp_reserved_and_unknown_link_controls_remain_explicit_diagnostics ... ok\ntest expired_identical_syn_creates_new_generation_but_live_retransmission_does_not ... ok\ntest failed_evidence_append_preserves_bytes_and_spans ... ok\ntest dnp_transport_gap_cannot_bridge_application_fragments ... ok\ntest fin_seen_before_payload_cannot_be_forgotten ... ok\ntest evidence_slices_and_appends_preserve_every_source_offset ... ok\ntest finite_section_length_alignment_is_owned_by_shb_decoder ... ok\ntest first_dnp_transport_segment_obeys_application_limit ... ok\ntest fragment_deadline_keeps_original_strict_boundary ... ok\ntest fragment_budget_failure_does_not_change_existing_terminal_length ... ok\ntest independent_dnp_builder_matches_published_crc_check_value ... ok\ntest independent_udp_datagrams_never_supply_a_reliable_byte_stream ... ok\ntest invalid_modbus_request_does_not_become_a_response_reference ... ok\ntest invalid_source_offset_cannot_be_laundered_by_empty_slice ... ok\ntest engine_does_not_silently_choose_between_conflicting_protocol_endpoints ... ok\ntest ipv6_empty_no_next_header_with_link_padding_is_not_jumbo ... ok\ntest ipv6_next_header_variation_cannot_hide_an_overlap ... ok\ntest ipv6_nonzero_next_header_does_not_split_reassembly_identity ... ok\ntest modbus_adu_respects_application_byte_limit ... ok\ntest malformed_modbus_quantities_counts_and_values_are_not_validated ... ok\ntest modbus_budget_includes_issues_and_messages_before_emitting ... ok\ntest modbus_probe_is_explicitly_weak_and_tcp_only ... ok\ntest payload_budget_error_does_not_leave_a_phantom_tcp_generation ... ok\ntest probe_request_for_unreachable_prefix_is_a_budget_error ... ok\ntest modbus_pairing_checks_response_size_not_just_transaction_id ... ok\ntest probe_registry_bounds_and_duplicate_names_are_explicit ... ok\ntest valid_modbus_response_matches_but_forged_flags_do_not_authorize_unknown_functions ... ok\ntest valid_modbus_boundary_quantities_still_pass ... ok\ntest rejected_fragment_admission_does_not_leave_state_or_contributors ... ok\ntest valid_dnp_application_wrap_and_other_address_pair_survive ... ok\ntest udp_dnp3_reaches_engine_and_report_with_original_contributors ... ok\ntest incremental_checksum_matches_independent_oracle_for_every_split ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s\n\n\nrunning 4 tests\ntest tiny_resource_budget_rejects_not_silently_truncates ... ok\ntest every_fixture_prefix_is_bounded_and_never_panics ... ok\ntest deterministic_arbitrary_bytes_exercise_public_read_boundaries ... ok\ntest mutate_every_capture_byte_preserves_safe_termination ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n\n\nrunning 19 tests\ntest every_resolution_octet_round_trips_without_high_bit_loss ... ok\ntest bounded_read_accepts_exact_neighbor_and_rejects_excess ... ok\ntest exact_timestamp_conserves_signed_offset_and_rejects_loss ... ok\ntest index_lookup_excludes_record_header_bytes ... ok\ntest index_wrong_source_and_truncated_sidecar_are_rejected ... ok\ntest index_time_search_handles_nonmonotonic_and_absent_times ... ok\ntest json_escaping_and_exact_size_limit ... ok\ntest concurrent_publication_has_exactly_one_winner ... ok\ntest labels_reject_duplicate_identity_inverted_time_and_wildcards ... ok\ntest missing_packet_timestamp_is_unknown_not_outside_label_window ... ok\ntest label_changes_are_semantically_inert_to_packet_stream_reconstruction ... ok\ntest publication_does_not_follow_destination_symlink ... ok\ntest output_publication_never_overwrites_existing_file ... ok\ntest sensitive_report_publication_defaults_to_owner_only_permissions ... ok\ntest sidecar_self_hash_cannot_authorize_forged_metadata ... ok\ntest secrets_are_redacted_even_with_include_payload ... ok\ntest labels_produce_candidate_edges_not_attack_truth ... ok\ntest sha256_incremental_chunking_and_empty_updates_preserve_digest ... ok\ntest sha256_independent_known_answer_vectors ... ok\n\ntest result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s\n\n\nrunning 4 tests\ntest decimal_size_boundaries_are_exact_without_temporary_strings ... ok\ntest bounded_size_and_encoding_preserve_every_json_variant ... ok\ntest line_quota_includes_the_newline_and_exact_utf8_bytes ... ok\ntest rejected_append_leaves_the_existing_destination_unchanged ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest dnp_crc_matches_external_check_vector ... ok\ntest dnp_function_catalog_names_non_secure_and_auth_boundaries ... ok\ntest bad_link_between_application_fragments_cannot_bridge_to_success ... ok\ntest crc_failure_report_does_not_reject_unrelated_valid_unsolicited_message ... ok\ntest dnp_application_sequence_15_to_0_keeps_fragment_boundaries ... ok\ntest dnp_transport_sequence_63_to_0_reassembles ... ok\ntest dnp_link_control_exposes_primary_and_secondary_semantics ... ok\ntest end_to_end_fragmentation_keeps_all_packet_dispositions_terminal ... ok\ntest modbus_inconsistent_mbap_stops_not_speculatively_resynchronizes ... ok\ntest modbus_coalesced_pdus_and_function_shapes ... ok\ntest modbus_midstream_boundary_is_not_claimed_verified ... ok\ntest unsupported_link_is_retained_as_evidence_not_dropped ... ok\ntest tcp_gap_never_crosses_a_dnp_transport_assembly ... ok\ntest independent_tcp_conflict_fixture_reaches_real_pipeline ... ok\ntest modbus_server_initiated_tcp_does_not_invert_protocol_roles ... ok\ntest end_to_end_dnp_reorders_tcp_deduplicates_and_separates_unsolicited ... ok\n\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 21 tests\ntest closed_generation_does_not_absorb_post_close_non_syn ... ok\ntest conflicting_overlap_is_an_explicit_gap_not_fabricated_payload ... ok\ntest conflicting_ipv4_fragments_quarantine_set ... ok\ntest connection_reuse_creates_generation_and_same_syn_is_not_recounted ... ok\ntest data_after_fin_position_cannot_be_called_a_valid_stream ... ok\ntest exact_final_ack_stays_with_two_sided_fin_generation ... ok\ntest fragment_expiry_is_explicit_and_uses_capture_progress_not_wall_clock ... ok\ntest explicit_first_last_policies_preserve_conflict_diagnostics ... ok\ntest fragment_out_of_order_assembly_conserves_every_packet_reference ... ok\ntest identical_ipv4_fragment_duplicate_is_preserved_as_observation ... ok\ntest interface_and_vlan_identity_do_not_merge_flows ... ok\ntest identical_ipv6_overlaps_are_still_rejected ... ok\ntest nearby_generations_leave_ambiguous_segment_unassigned ... ok\ntest no_payload_with_observed_syn_fin_still_reports_missing_bytes ... ok\ntest missing_middle_keeps_two_contiguous_chunks ... ok\ntest out_of_order_and_identical_retransmission_do_not_duplicate_stream ... ok\ntest payload_before_syn_and_excessive_span_rejected ... ok\ntest provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection ... ok\ntest sequence_wrap_and_half_space_ambiguity ... ok\ntest syn_and_fin_expose_missing_edges ... ok\ntest unknown_time_does_not_trigger_idle_expiry_or_time_zero ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest snapshot_padding_bad_response_does_not_pair_as_consistent ... ok\ntest snapshot_modbus_semantic_fields_reach_actual_report ... ok\ntest snapshot_dnp_gap_or_conflict_cannot_create_response_values ... ok\ntest snapshot_dnp_split_reordered_duplicate_retains_semantic_objects ... ok\ntest snapshot_semantic_extension_output_is_deterministic ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 65 tests\ntest dnp_absolute_time_preserves_48_bit_quantity ... ok\ntest dnp_count_without_index_does_not_invent_one ... ok\ntest dnp_all_object_response_is_not_inferred ... ok\ntest dnp_deadband_unsigned_and_variable_octets_keep_wire_identity ... ok\ntest dnp_duplicate_prefixed_indices_remain_ordered ... ok\ntest dnp_each_additional_fixed_width_variant_has_a_value_case ... ok\ntest dnp_flags_retained_and_bit_seven_decoded ... ok\ntest dnp_fragment_helper_rejects_forged_context ... ok\ntest dnp_group0_all_attributes_request_is_header_only_evidence ... ok\ntest dnp_four_byte_ranges_preserve_wide_point_indices ... ok\ntest dnp_counter_event_variations5_and6_decode_timestamps_with_exact_boundaries ... ok\ntest dnp_group0_boolean_attribute_uses_declared_variation_and_signed_wire_type ... ok\ntest dnp_group0_decodes_numeric_attribute_types_without_semantic_names ... ok\ntest dnp_group0_attribute_list_preserves_entries_and_exact_spans ... ok\ntest dnp_group0_hashes_visible_string_and_preserves_exact_envelope ... ok\ntest dnp_group0_invalid_known_width_is_explicitly_unsupported ... ok\ntest dnp_group0_odd_attribute_list_is_unsupported_without_resynchronizing ... ok\ntest dnp_group0_range_selector_keeps_each_attribute_source_bound ... ok\ntest dnp_group0_unknown_data_type_is_hashed_and_flagged_opaque ... ok\ntest dnp_group0_truncated_value_stops_without_resynchronizing ... ok\ntest dnp_group70_descriptor_offsets_and_lengths_are_not_guessed ... ok\ntest dnp_group4_event_variations_decode_all_double_bit_states_and_align_sibling ... ok\ntest dnp_group40_and_41_variation4_decode_float64_and_keep_sibling_alignment ... ok\ntest dnp_group70_transport_and_status_variants_keep_block_and_hash_content ... ok\ntest dnp_group70_file_requests_are_bounded_and_opaque_neighbors_stop ... ok\ntest dnp_group70_variations3_to7_decode_exact_minimum_adjacent_children_with_bounded_spans ... ok\ntest dnp_float_nan_payload_and_negative_zero_are_bits ... ok\ntest dnp_inverted_range_rejected ... ok\ntest dnp_no_cross_fragment_object_stitching ... ok\ntest dnp_indexed_reads_and_control_functions_are_explicit ... ok\ntest dnp_read_classes_have_no_invented_values ... ok\ntest dnp_packed_nonrange_is_explicitly_unsupported ... ok\ntest dnp_range16_count16_and_output_packed_cases ... ok\ntest dnp_packed_range_does_not_emit_padding_points ... ok\ntest dnp_signed_analogs_are_exact ... ok\ntest dnp_sixteen_bit_qualifiers_are_little_endian ... ok\ntest dnp_record_limit_is_observable ... ok\ntest dnp_two_and_four_byte_index_prefixes_are_little_endian ... ok\ntest dnp_unknown_qualifier_does_not_publish_a_header ... ok\ntest dnp_truncated_object_retains_prior_complete_value ... ok\ntest dnp_relative_time_is_not_promoted_to_absolute ... ok\ntest dnp_unsigned_integer_object_is_not_treated_as_a_counter ... ok\ntest dnp_unknown_width_stops_without_magic_resync ... ok\ntest modbus_address_range_edges_are_checked ... ok\ntest invalid_provenance_is_not_laundered ... ok\ntest dnp_group70_variations3_to7_reject_every_short_declared_child_before_sibling_bytes ... ok\ntest modbus_all_existing_functions_and_roles_have_decoded_cases ... ok\ntest modbus_bit_response_preserves_octets_without_fake_padding_coils ... ok\ntest modbus_fc16_register_values_are_network_order ... ok\ntest modbus_requires_exact_one_mbap_message ... ok\ntest modbus_read_response_padding_checked_only_with_request_quantity ... ok\ntest dnp_group70_file_command_retains_metadata_and_hashes_sensitive_fields ... ok\ntest modbus_spec_fc15_values_and_zero_based_addresses ... ok\ntest modbus_response_values_do_not_invent_register_addresses ... ok\ntest modbus_write_padding_recommendation_is_warning_not_framing_failure ... ok\ntest semantic_source_span_budget_cannot_be_bypassed_with_many_fragments ... ok\ntest streaming_padding_tokens_match_root_policy ... ok\ntest modbus_exception_is_not_successful_execution ... ok\ntest semantic_input_and_json_limits_fail_explicitly ... ok\ntest dnp_group70_descriptor_and_specification_variants_are_bounded_and_hash_only ... ok\ntest systematic_padding_property_all_quantities ... ok\ntest semantic_witness_spans_cross_packet_boundary_exactly ... ok\ntest modbus_unknown_role_retains_both_valid_echo_interpretations ... ok\ntest deterministic_prefix_and_mutation_properties ... ok\ntest modbus_default_budget_covers_maximum_fc15_bit_count ... ok\n\ntest result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s\n\n\nrunning 5 tests\ntest empty_port_list_is_usage_error ... ok\ntest repeated_and_csv_ports_share_transactional_semantics ... ok\ntest invalid_port_does_not_partially_update ... ok\ntest timestamp_secondary_index_preserves_file_order_and_unknowns ... ok\ntest root_engine_recognizes_modbus_without_configured_fixture_port ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 9 tests\ntest ipv6_atomic_fragment_not_queued_for_other_fragments ... ok\ntest ipv6_extension_length_is_checked_before_dereference ... ok\ntest ipv6_zero_checksum_is_not_ipv4_optional_checksum_semantics ... ok\ntest invalid_checksum_can_be_observed_without_silent_packet_loss ... ok\ntest unknown_ether_type_is_typed_not_guessed_as_ip ... ok\ntest sll_sll2_raw_and_loopback_use_their_own_header_sizes ... ok\ntest ethernet_ipv4_udp_checksum_and_payload ... ok\ntest original_length_never_authorizes_read_beyond_captured_bytes ... ok\ntest vlan_and_double_vlan_shift_offsets_without_changing_payload ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
+        "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest classic_link_flags_do_not_become_linktype ... ok\ntest binary_timestamp_inexactness_is_explicit ... ok\ntest bounded_salvage_identifies_section_but_does_not_invent_packets ... ok\ntest classic_writer_rejects_precision_loss_and_accepts_exact_neighbor ... ok\ntest decoder_need_more_does_not_advance_section_state ... ok\ntest four_pcap_magic_forms_preserve_units_and_bytes ... ok\ntest interface_reference_cannot_escape_section_scope ... ok\ntest invalid_microsecond_fraction_is_never_converted_as_nanoseconds ... ok\ntest iterator_is_fused_after_failure ... ok\ntest invalid_input_copy_has_no_output_effect ... ok\ntest malformed_trailer_and_truncated_eof_are_distinct ... ok\ntest malformed_option_length_cannot_consume_following_block ... ok\ntest oversized_declared_packet_rejected_before_payload_allocation ... ok\ntest new_writers_preserve_exact_time_and_endianness ... ok\ntest section_endianness_interface_reset_and_signed_offset ... ok\ntest strict_and_evidence_modes_do_not_silently_normalize_lengths ... ok\ntest unlimited_snaplen_simple_packet_has_no_fabricated_time ... ok\ntest unknown_blocks_secrets_and_no_copy_custom_are_preserved_archivally ... ok\ntest streaming_truncated_tail_terminates_without_refill_loop ... ok\ntest streaming_one_byte_and_interrupted_reads_equal_borrowed ... ok\ntest partial_write_poisons_writer_and_blocks_unsafe_retry ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 5 tests\ntest real_cli_inspects_and_does_not_modify_source ... ok\ntest help_and_invalid_flags_have_distinct_exit_status ... ok\ntest require_clean_returns_diagnostic_status_without_hiding_report ... ok\ntest cli_index_verify_and_packet_lookup ... ok\ntest cli_pipeline_labels_and_no_clobber_output ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s\n\n\nrunning 38 tests\ntest a_transport_complete_target_does_not_require_a_complete_application_message ... ok\ntest duplicate_targets_are_all_retained_without_selecting_one ... ok\ntest application_list_order_does_not_change_candidate_selection ... ok\ntest conflicting_con_or_direction_headers_cannot_make_a_unique_target_win ... ok\ntest duplicate_confirms_remain_ambiguous_even_without_a_target ... ok\ntest equal_not_reversed_addresses_and_other_flows_do_not_match ... ok\ntest budget_exhaustion_is_typed_and_never_returns_partial_candidates ... ok\ntest all_budget_values_below_the_first_success_are_explicit_limits ... ok\ntest invalid_witness_taints_only_its_flow_without_using_its_forged_key ... ok\ntest invalid_capture_direction_and_outer_protocol_label_are_explicit ... ok\ntest confirmation_targets_one_application_fragment_not_the_message_first_sequence ... ok\ntest all_truncated_link_and_application_prefixes_are_explicit_not_candidates ... ok\ntest observed_opposite_dir_is_used_without_inventing_a_role_mapping ... ok\ntest object_payload_does_not_become_a_decoded_value_through_confirmation_correlation ... ok\ntest fcb_and_fcv_do_not_select_a_partner_or_infer_link_state ... ok\ntest multiple_outstations_remain_separate ... ok\ntest same_capture_direction_or_same_link_dir_is_not_a_candidate ... ok\ntest selected_application_header_source_spans_are_rechecked_not_just_bytes ... ok\ntest public_apdu_role_rewrite_cannot_hide_a_duplicate_confirm_from_verification ... ok\ntest missing_or_conflicting_transport_bytes_never_create_a_target ... ok\ntest malformed_confirm_controls_broadcast_and_bad_uns_remain_unclassified ... ok\ntest response_only_and_unrelated_read_do_not_create_confirmation_rows ... ok\ntest solicited_candidate_has_exact_fragment_and_crc_checked_header_witnesses ... ok\ntest target_without_con_is_excluded_not_promoted ... ok\ntest the_same_numeric_flow_from_different_captures_cannot_pair ... ok\ntest timestamps_and_capture_order_are_not_confirmation_matching_inputs ... ok\ntest reused_frame_indices_and_post_fin_duplicates_cannot_be_laundered ... ok\ntest unsolicited_confirm_pairs_only_inside_its_separate_namespace ... ok\ntest unmatched_confirm_is_retained_and_legacy_transaction_output_is_unchanged ... ok\ntest transport_wrap_and_reordered_duplicates_preserve_selected_header_and_all_packets ... ok\ntest sequence_and_uns_namespace_mismatches_remain_unmatched ... ok\ntest unsupported_secure_context_is_not_silently_removed_from_the_identifier_pool ... ok\ntest every_public_fragment_metadata_field_is_rechecked_for_both_participants ... ok\ntest forged_public_link_fields_crc_and_source_offsets_are_not_witnesses ... ok\ntest sequence_rollover_is_not_an_invented_transaction_epoch ... ok\ntest engine_limit_error_is_separate_and_survives_json_projection ... ok\ntest real_cli_emits_the_additive_section_without_changing_the_capture ... ok\ntest fixed_capture_reaches_engine_and_deterministic_root_json_with_exact_timestamps ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 25 tests\ntest all_control_bytes_preserve_raw_primary_secondary_masks ... ok\ntest class_event_scans_and_index_selectors_reuse_the_root_parser ... ok\ntest class_controls_are_bounded_selectors_not_inferred_configuration ... ok\ntest file_control_request_reaches_bounded_group70_projection ... ok\ntest all_broadcast_addresses_are_explicit_and_not_pairable ... ok\ntest declared_crc_failure_is_not_a_license_to_scan_nested_frames ... ok\ntest fixed_vectors_have_independent_crc_and_exact_frame_extent ... ok\ntest contradictory_length_and_bad_header_crc_do_not_silently_resynchronize ... ok\ntest fcb_is_retained_but_not_used_as_endpoint_state_when_fcv_is_zero ... ok\ntest conflicting_duplicates_and_late_continuations_never_majority_vote ... ok\ntest confirms_and_unsolicited_namespace_are_byte_derived ... ok\ntest cross_application_fragment_object_completion_has_exact_two_packet_spans ... ok\ntest forged_metadata_or_link_direction_cannot_authorize_pairing ... ok\ntest secure_file_authentication_and_unreviewed_families_remain_opaque ... ok\ntest truncation_and_limits_remain_explicit_not_success ... ok\ntest link_fields_have_exact_control_and_address_witnesses ... ok\ntest multiple_outstations_do_not_share_sequence_namespaces ... ok\ntest non_secure_time_workflows_preserve_raw_time_and_exact_spans ... ok\ntest unmatched_no_response_confirm_and_unsolicited_are_not_fabricated_pairs ... ok\ntest reordered_transport_duplicates_keep_all_witnesses_but_only_one_byte_value ... ok\ntest request_response_pairs_require_addresses_sequence_function_and_directions ... ok\ntest link_subset_reports_reserved_unsupported_and_invalid_combinations ... ok\ntest missing_middle_or_first_never_decodes_partial_objects_as_a_complete_message ... ok\ntest sequence_rollover_is_valid_but_reuse_stays_ambiguous ... ok\ntest workflow_json_is_deterministic_and_does_not_infer_time_or_effects ... ok\n\ntest result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 38 tests\ntest decoder_rejects_overflowing_public_offsets_without_panicking ... ok\ntest checksum_odd_byte_survives_snapshot_and_empty_updates ... ok\ntest dnp_probe_checks_all_crcs_and_does_not_require_a_standard_port ... ok\ntest dnp_public_stream_offset_overflow_is_typed_not_a_panic ... ok\ntest dnp_reserved_and_unknown_link_controls_remain_explicit_diagnostics ... ok\ntest earlier_payload_after_fin_observation_is_still_reconstructible ... ok\ntest crc_failure_in_udp_is_a_diagnostic_not_a_clean_application ... ok\ntest dnp_transport_gap_cannot_bridge_application_fragments ... ok\ntest expired_identical_syn_creates_new_generation_but_live_retransmission_does_not ... ok\ntest failed_evidence_append_preserves_bytes_and_spans ... ok\ntest evidence_slices_and_appends_preserve_every_source_offset ... ok\ntest finite_section_length_alignment_is_owned_by_shb_decoder ... ok\ntest fin_seen_before_payload_cannot_be_forgotten ... ok\ntest fragment_deadline_keeps_original_strict_boundary ... ok\ntest fragment_budget_failure_does_not_change_existing_terminal_length ... ok\ntest first_dnp_transport_segment_obeys_application_limit ... ok\ntest independent_dnp_builder_matches_published_crc_check_value ... ok\ntest engine_does_not_silently_choose_between_conflicting_protocol_endpoints ... ok\ntest independent_udp_datagrams_never_supply_a_reliable_byte_stream ... ok\ntest invalid_modbus_request_does_not_become_a_response_reference ... ok\ntest invalid_source_offset_cannot_be_laundered_by_empty_slice ... ok\ntest ipv6_empty_no_next_header_with_link_padding_is_not_jumbo ... ok\ntest ipv6_next_header_variation_cannot_hide_an_overlap ... ok\ntest ipv6_nonzero_next_header_does_not_split_reassembly_identity ... ok\ntest modbus_adu_respects_application_byte_limit ... ok\ntest malformed_modbus_quantities_counts_and_values_are_not_validated ... ok\ntest modbus_budget_includes_issues_and_messages_before_emitting ... ok\ntest modbus_probe_is_explicitly_weak_and_tcp_only ... ok\ntest payload_budget_error_does_not_leave_a_phantom_tcp_generation ... ok\ntest modbus_pairing_checks_response_size_not_just_transaction_id ... ok\ntest probe_registry_bounds_and_duplicate_names_are_explicit ... ok\ntest probe_request_for_unreachable_prefix_is_a_budget_error ... ok\ntest rejected_fragment_admission_does_not_leave_state_or_contributors ... ok\ntest valid_modbus_boundary_quantities_still_pass ... ok\ntest valid_dnp_application_wrap_and_other_address_pair_survive ... ok\ntest valid_modbus_response_matches_but_forged_flags_do_not_authorize_unknown_functions ... ok\ntest udp_dnp3_reaches_engine_and_report_with_original_contributors ... ok\ntest incremental_checksum_matches_independent_oracle_for_every_split ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s\n\n\nrunning 4 tests\ntest tiny_resource_budget_rejects_not_silently_truncates ... ok\ntest deterministic_arbitrary_bytes_exercise_public_read_boundaries ... ok\ntest every_fixture_prefix_is_bounded_and_never_panics ... ok\ntest mutate_every_capture_byte_preserves_safe_termination ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s\n\n\nrunning 19 tests\ntest every_resolution_octet_round_trips_without_high_bit_loss ... ok\ntest exact_timestamp_conserves_signed_offset_and_rejects_loss ... ok\ntest bounded_read_accepts_exact_neighbor_and_rejects_excess ... ok\ntest json_escaping_and_exact_size_limit ... ok\ntest index_lookup_excludes_record_header_bytes ... ok\ntest concurrent_publication_has_exactly_one_winner ... ok\ntest index_time_search_handles_nonmonotonic_and_absent_times ... ok\ntest label_changes_are_semantically_inert_to_packet_stream_reconstruction ... ok\ntest index_wrong_source_and_truncated_sidecar_are_rejected ... ok\ntest labels_reject_duplicate_identity_inverted_time_and_wildcards ... ok\ntest output_publication_never_overwrites_existing_file ... ok\ntest missing_packet_timestamp_is_unknown_not_outside_label_window ... ok\ntest publication_does_not_follow_destination_symlink ... ok\ntest secrets_are_redacted_even_with_include_payload ... ok\ntest sensitive_report_publication_defaults_to_owner_only_permissions ... ok\ntest sidecar_self_hash_cannot_authorize_forged_metadata ... ok\ntest labels_produce_candidate_edges_not_attack_truth ... ok\ntest sha256_incremental_chunking_and_empty_updates_preserve_digest ... ok\ntest sha256_independent_known_answer_vectors ... ok\n\ntest result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s\n\n\nrunning 4 tests\ntest bounded_size_and_encoding_preserve_every_json_variant ... ok\ntest decimal_size_boundaries_are_exact_without_temporary_strings ... ok\ntest line_quota_includes_the_newline_and_exact_utf8_bytes ... ok\ntest rejected_append_leaves_the_existing_destination_unchanged ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest dnp_function_catalog_names_non_secure_and_auth_boundaries ... ok\ntest dnp_crc_matches_external_check_vector ... ok\ntest dnp_link_control_exposes_primary_and_secondary_semantics ... ok\ntest bad_link_between_application_fragments_cannot_bridge_to_success ... ok\ntest dnp_application_sequence_15_to_0_keeps_fragment_boundaries ... ok\ntest modbus_coalesced_pdus_and_function_shapes ... ok\ntest modbus_inconsistent_mbap_stops_not_speculatively_resynchronizes ... ok\ntest end_to_end_dnp_reorders_tcp_deduplicates_and_separates_unsolicited ... ok\ntest end_to_end_fragmentation_keeps_all_packet_dispositions_terminal ... ok\ntest crc_failure_report_does_not_reject_unrelated_valid_unsolicited_message ... ok\ntest independent_tcp_conflict_fixture_reaches_real_pipeline ... ok\ntest tcp_gap_never_crosses_a_dnp_transport_assembly ... ok\ntest modbus_midstream_boundary_is_not_claimed_verified ... ok\ntest dnp_transport_sequence_63_to_0_reassembles ... ok\ntest modbus_server_initiated_tcp_does_not_invert_protocol_roles ... ok\ntest unsupported_link_is_retained_as_evidence_not_dropped ... ok\n\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest conflicting_overlap_is_an_explicit_gap_not_fabricated_payload ... ok\ntest closed_generation_does_not_absorb_post_close_non_syn ... ok\ntest conflicting_ipv4_fragments_quarantine_set ... ok\ntest connection_reuse_creates_generation_and_same_syn_is_not_recounted ... ok\ntest data_after_fin_position_cannot_be_called_a_valid_stream ... ok\ntest exact_final_ack_stays_with_two_sided_fin_generation ... ok\ntest explicit_first_last_policies_preserve_conflict_diagnostics ... ok\ntest fragment_expiry_is_explicit_and_uses_capture_progress_not_wall_clock ... ok\ntest identical_ipv4_fragment_duplicate_is_preserved_as_observation ... ok\ntest fragment_out_of_order_assembly_conserves_every_packet_reference ... ok\ntest interface_and_vlan_identity_do_not_merge_flows ... ok\ntest identical_ipv6_overlaps_are_still_rejected ... ok\ntest missing_middle_keeps_two_contiguous_chunks ... ok\ntest nearby_generations_leave_ambiguous_segment_unassigned ... ok\ntest no_payload_with_observed_syn_fin_still_reports_missing_bytes ... ok\ntest out_of_order_and_identical_retransmission_do_not_duplicate_stream ... ok\ntest payload_before_syn_and_excessive_span_rejected ... ok\ntest provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection ... ok\ntest sequence_wrap_and_half_space_ambiguity ... ok\ntest syn_and_fin_expose_missing_edges ... ok\ntest unknown_time_does_not_trigger_idle_expiry_or_time_zero ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest snapshot_padding_bad_response_does_not_pair_as_consistent ... ok\ntest snapshot_modbus_semantic_fields_reach_actual_report ... ok\ntest snapshot_dnp_gap_or_conflict_cannot_create_response_values ... ok\ntest snapshot_dnp_split_reordered_duplicate_retains_semantic_objects ... ok\ntest snapshot_semantic_extension_output_is_deterministic ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s\n\n\nrunning 65 tests\ntest dnp_count_without_index_does_not_invent_one ... ok\ntest dnp_counter_event_variations5_and6_decode_timestamps_with_exact_boundaries ... ok\ntest dnp_duplicate_prefixed_indices_remain_ordered ... ok\ntest dnp_group0_all_attributes_request_is_header_only_evidence ... ok\ntest dnp_fragment_helper_rejects_forged_context ... ok\ntest dnp_four_byte_ranges_preserve_wide_point_indices ... ok\ntest dnp_all_object_response_is_not_inferred ... ok\ntest dnp_flags_retained_and_bit_seven_decoded ... ok\ntest dnp_deadband_unsigned_and_variable_octets_keep_wire_identity ... ok\ntest dnp_group0_decodes_numeric_attribute_types_without_semantic_names ... ok\ntest dnp_group0_boolean_attribute_uses_declared_variation_and_signed_wire_type ... ok\ntest dnp_float_nan_payload_and_negative_zero_are_bits ... ok\ntest dnp_group0_invalid_known_width_is_explicitly_unsupported ... ok\ntest dnp_group0_hashes_visible_string_and_preserves_exact_envelope ... ok\ntest dnp_each_additional_fixed_width_variant_has_a_value_case ... ok\ntest dnp_group0_odd_attribute_list_is_unsupported_without_resynchronizing ... ok\ntest dnp_group0_range_selector_keeps_each_attribute_source_bound ... ok\ntest dnp_absolute_time_preserves_48_bit_quantity ... ok\ntest dnp_group0_truncated_value_stops_without_resynchronizing ... ok\ntest dnp_group0_unknown_data_type_is_hashed_and_flagged_opaque ... ok\ntest dnp_group40_and_41_variation4_decode_float64_and_keep_sibling_alignment ... ok\ntest dnp_group0_attribute_list_preserves_entries_and_exact_spans ... ok\ntest dnp_group70_descriptor_offsets_and_lengths_are_not_guessed ... ok\ntest dnp_group4_event_variations_decode_all_double_bit_states_and_align_sibling ... ok\ntest dnp_group70_transport_and_status_variants_keep_block_and_hash_content ... ok\ntest dnp_group70_file_requests_are_bounded_and_opaque_neighbors_stop ... ok\ntest dnp_group70_variations3_to7_decode_exact_minimum_adjacent_children_with_bounded_spans ... ok\ntest dnp_inverted_range_rejected ... ok\ntest dnp_indexed_reads_and_control_functions_are_explicit ... ok\ntest dnp_packed_range_does_not_emit_padding_points ... ok\ntest dnp_record_limit_is_observable ... ok\ntest dnp_read_classes_have_no_invented_values ... ok\ntest dnp_no_cross_fragment_object_stitching ... ok\ntest dnp_range16_count16_and_output_packed_cases ... ok\ntest dnp_signed_analogs_are_exact ... ok\ntest dnp_sixteen_bit_qualifiers_are_little_endian ... ok\ntest dnp_truncated_object_retains_prior_complete_value ... ok\ntest dnp_unknown_qualifier_does_not_publish_a_header ... ok\ntest dnp_two_and_four_byte_index_prefixes_are_little_endian ... ok\ntest dnp_relative_time_is_not_promoted_to_absolute ... ok\ntest dnp_group70_descriptor_and_specification_variants_are_bounded_and_hash_only ... ok\ntest modbus_all_existing_functions_and_roles_have_decoded_cases ... ok\ntest modbus_address_range_edges_are_checked ... ok\ntest modbus_bit_response_preserves_octets_without_fake_padding_coils ... ok\ntest modbus_fc16_register_values_are_network_order ... ok\ntest dnp_unsigned_integer_object_is_not_treated_as_a_counter ... ok\ntest dnp_packed_nonrange_is_explicitly_unsupported ... ok\ntest invalid_provenance_is_not_laundered ... ok\ntest dnp_unknown_width_stops_without_magic_resync ... ok\ntest modbus_read_response_padding_checked_only_with_request_quantity ... ok\ntest modbus_requires_exact_one_mbap_message ... ok\ntest modbus_response_values_do_not_invent_register_addresses ... ok\ntest dnp_group70_file_command_retains_metadata_and_hashes_sensitive_fields ... ok\ntest modbus_spec_fc15_values_and_zero_based_addresses ... ok\ntest modbus_write_padding_recommendation_is_warning_not_framing_failure ... ok\ntest semantic_source_span_budget_cannot_be_bypassed_with_many_fragments ... ok\ntest dnp_group70_variations3_to7_reject_every_short_declared_child_before_sibling_bytes ... ok\ntest streaming_padding_tokens_match_root_policy ... ok\ntest modbus_exception_is_not_successful_execution ... ok\ntest semantic_input_and_json_limits_fail_explicitly ... ok\ntest semantic_witness_spans_cross_packet_boundary_exactly ... ok\ntest modbus_unknown_role_retains_both_valid_echo_interpretations ... ok\ntest systematic_padding_property_all_quantities ... ok\ntest deterministic_prefix_and_mutation_properties ... ok\ntest modbus_default_budget_covers_maximum_fc15_bit_count ... ok\n\ntest result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s\n\n\nrunning 5 tests\ntest empty_port_list_is_usage_error ... ok\ntest invalid_port_does_not_partially_update ... ok\ntest repeated_and_csv_ports_share_transactional_semantics ... ok\ntest root_engine_recognizes_modbus_without_configured_fixture_port ... ok\ntest timestamp_secondary_index_preserves_file_order_and_unknowns ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 9 tests\ntest invalid_checksum_can_be_observed_without_silent_packet_loss ... ok\ntest ethernet_ipv4_udp_checksum_and_payload ... ok\ntest ipv6_atomic_fragment_not_queued_for_other_fragments ... ok\ntest ipv6_extension_length_is_checked_before_dereference ... ok\ntest ipv6_zero_checksum_is_not_ipv4_optional_checksum_semantics ... ok\ntest sll_sll2_raw_and_loopback_use_their_own_header_sizes ... ok\ntest original_length_never_authorizes_read_beyond_captured_bytes ... ok\ntest vlan_and_double_vlan_shift_offsets_without_changing_payload ... ok\ntest unknown_ether_type_is_typed_not_guessed_as_ip ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
       },
       {
         "command": [
@@ -178,11 +206,11 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.334,
+        "elapsed_seconds": 0.358,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "    Finished `release` profile [optimized] target(s) in 0.01s\n     Running unittests src/lib.rs (.local-build/target/release/deps/pcap_evidence-1ece45b84debc737)\n     Running unittests src/main.rs (.local-build/target/release/deps/pcap_evidence-d0348537e80a01ae)\n     Running tests/capture_contract.rs (.local-build/target/release/deps/capture_contract-c70cac7f868cc4e3)\n     Running tests/cli.rs (.local-build/target/release/deps/cli-f19b8d1a4c4c7496)\n     Running tests/dnp3_confirmations.rs (.local-build/target/release/deps/dnp3_confirmations-1f4fb559cef36aa6)\n     Running tests/dnp3_workflow.rs (.local-build/target/release/deps/dnp3_workflow-0f5d4e1048a6e8cb)\n     Running tests/hardening.rs (.local-build/target/release/deps/hardening-9741d39f7f67fd08)\n     Running tests/hostile_inputs.rs (.local-build/target/release/deps/hostile_inputs-a50395c560577506)\n     Running tests/integrity.rs (.local-build/target/release/deps/integrity-e0e446977dbcac20)\n     Running tests/json_bounded_allocation.rs (.local-build/target/release/deps/json_bounded_allocation-a315b7844fe7e073)\n     Running tests/protocols.rs (.local-build/target/release/deps/protocols-377e97878d87ed6d)\n     Running tests/reconstruction.rs (.local-build/target/release/deps/reconstruction-a07f2285947948f5)\n     Running tests/semantic_pipeline.rs (.local-build/target/release/deps/semantic_pipeline-e85a7d50f14c67c9)\n     Running tests/semantic_subset.rs (.local-build/target/release/deps/semantic_subset-64bf14a73500abb4)\n     Running tests/streaming_handoff.rs (.local-build/target/release/deps/streaming_handoff-ef08c60a07218ca2)\n     Running tests/wire.rs (.local-build/target/release/deps/wire-ab327f7732ae8d6c)\n     Running unittests examples/analyze.rs (.local-build/target/release/examples/analyze-2e10d6506962f894)\n     Running unittests examples/semantic_probe.rs (.local-build/target/release/examples/semantic_probe-6f4665de66a4bd20)\n     Running unittests examples/stream_records.rs (.local-build/target/release/examples/stream_records-c1494de25aa9ddb6)\n",
-        "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest bounded_salvage_identifies_section_but_does_not_invent_packets ... ok\ntest classic_writer_rejects_precision_loss_and_accepts_exact_neighbor ... ok\ntest classic_link_flags_do_not_become_linktype ... ok\ntest binary_timestamp_inexactness_is_explicit ... ok\ntest invalid_microsecond_fraction_is_never_converted_as_nanoseconds ... ok\ntest decoder_need_more_does_not_advance_section_state ... ok\ntest iterator_is_fused_after_failure ... ok\ntest invalid_input_copy_has_no_output_effect ... ok\ntest interface_reference_cannot_escape_section_scope ... ok\ntest malformed_option_length_cannot_consume_following_block ... ok\ntest malformed_trailer_and_truncated_eof_are_distinct ... ok\ntest four_pcap_magic_forms_preserve_units_and_bytes ... ok\ntest new_writers_preserve_exact_time_and_endianness ... ok\ntest oversized_declared_packet_rejected_before_payload_allocation ... ok\ntest partial_write_poisons_writer_and_blocks_unsafe_retry ... ok\ntest section_endianness_interface_reset_and_signed_offset ... ok\ntest streaming_one_byte_and_interrupted_reads_equal_borrowed ... ok\ntest streaming_truncated_tail_terminates_without_refill_loop ... ok\ntest strict_and_evidence_modes_do_not_silently_normalize_lengths ... ok\ntest unknown_blocks_secrets_and_no_copy_custom_are_preserved_archivally ... ok\ntest unlimited_snaplen_simple_packet_has_no_fabricated_time ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest require_clean_returns_diagnostic_status_without_hiding_report ... ok\ntest real_cli_inspects_and_does_not_modify_source ... ok\ntest help_and_invalid_flags_have_distinct_exit_status ... ok\ntest cli_pipeline_labels_and_no_clobber_output ... ok\ntest cli_index_verify_and_packet_lookup ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 38 tests\ntest application_list_order_does_not_change_candidate_selection ... ok\ntest a_transport_complete_target_does_not_require_a_complete_application_message ... ok\ntest all_budget_values_below_the_first_success_are_explicit_limits ... ok\ntest conflicting_con_or_direction_headers_cannot_make_a_unique_target_win ... ok\ntest confirmation_targets_one_application_fragment_not_the_message_first_sequence ... ok\ntest budget_exhaustion_is_typed_and_never_returns_partial_candidates ... ok\ntest duplicate_confirms_remain_ambiguous_even_without_a_target ... ok\ntest duplicate_targets_are_all_retained_without_selecting_one ... ok\ntest all_truncated_link_and_application_prefixes_are_explicit_not_candidates ... ok\ntest equal_not_reversed_addresses_and_other_flows_do_not_match ... ok\ntest engine_limit_error_is_separate_and_survives_json_projection ... ok\ntest fcb_and_fcv_do_not_select_a_partner_or_infer_link_state ... ok\ntest invalid_capture_direction_and_outer_protocol_label_are_explicit ... ok\ntest every_public_fragment_metadata_field_is_rechecked_for_both_participants ... ok\ntest invalid_witness_taints_only_its_flow_without_using_its_forged_key ... ok\ntest forged_public_link_fields_crc_and_source_offsets_are_not_witnesses ... ok\ntest malformed_confirm_controls_broadcast_and_bad_uns_remain_unclassified ... ok\ntest missing_or_conflicting_transport_bytes_never_create_a_target ... ok\ntest observed_opposite_dir_is_used_without_inventing_a_role_mapping ... ok\ntest object_payload_does_not_become_a_decoded_value_through_confirmation_correlation ... ok\ntest public_apdu_role_rewrite_cannot_hide_a_duplicate_confirm_from_verification ... ok\ntest multiple_outstations_remain_separate ... ok\ntest response_only_and_unrelated_read_do_not_create_confirmation_rows ... ok\ntest reused_frame_indices_and_post_fin_duplicates_cannot_be_laundered ... ok\ntest same_capture_direction_or_same_link_dir_is_not_a_candidate ... ok\ntest selected_application_header_source_spans_are_rechecked_not_just_bytes ... ok\ntest sequence_and_uns_namespace_mismatches_remain_unmatched ... ok\ntest sequence_rollover_is_not_an_invented_transaction_epoch ... ok\ntest solicited_candidate_has_exact_fragment_and_crc_checked_header_witnesses ... ok\ntest target_without_con_is_excluded_not_promoted ... ok\ntest the_same_numeric_flow_from_different_captures_cannot_pair ... ok\ntest unmatched_confirm_is_retained_and_legacy_transaction_output_is_unchanged ... ok\ntest transport_wrap_and_reordered_duplicates_preserve_selected_header_and_all_packets ... ok\ntest timestamps_and_capture_order_are_not_confirmation_matching_inputs ... ok\ntest unsolicited_confirm_pairs_only_inside_its_separate_namespace ... ok\ntest unsupported_secure_context_is_not_silently_removed_from_the_identifier_pool ... ok\ntest fixed_capture_reaches_engine_and_deterministic_root_json_with_exact_timestamps ... ok\ntest real_cli_emits_the_additive_section_without_changing_the_capture ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 25 tests\ntest all_broadcast_addresses_are_explicit_and_not_pairable ... ok\ntest all_control_bytes_preserve_raw_primary_secondary_masks ... ok\ntest confirms_and_unsolicited_namespace_are_byte_derived ... ok\ntest class_event_scans_and_index_selectors_reuse_the_root_parser ... ok\ntest class_controls_are_bounded_selectors_not_inferred_configuration ... ok\ntest conflicting_duplicates_and_late_continuations_never_majority_vote ... ok\ntest contradictory_length_and_bad_header_crc_do_not_silently_resynchronize ... ok\ntest cross_application_fragment_object_completion_has_exact_two_packet_spans ... ok\ntest fcb_is_retained_but_not_used_as_endpoint_state_when_fcv_is_zero ... ok\ntest declared_crc_failure_is_not_a_license_to_scan_nested_frames ... ok\ntest file_control_request_reaches_bounded_group70_projection ... ok\ntest fixed_vectors_have_independent_crc_and_exact_frame_extent ... ok\ntest forged_metadata_or_link_direction_cannot_authorize_pairing ... ok\ntest multiple_outstations_do_not_share_sequence_namespaces ... ok\ntest missing_middle_or_first_never_decodes_partial_objects_as_a_complete_message ... ok\ntest link_fields_have_exact_control_and_address_witnesses ... ok\ntest link_subset_reports_reserved_unsupported_and_invalid_combinations ... ok\ntest reordered_transport_duplicates_keep_all_witnesses_but_only_one_byte_value ... ok\ntest non_secure_time_workflows_preserve_raw_time_and_exact_spans ... ok\ntest request_response_pairs_require_addresses_sequence_function_and_directions ... ok\ntest truncation_and_limits_remain_explicit_not_success ... ok\ntest secure_file_authentication_and_unreviewed_families_remain_opaque ... ok\ntest unmatched_no_response_confirm_and_unsolicited_are_not_fabricated_pairs ... ok\ntest sequence_rollover_is_valid_but_reuse_stays_ambiguous ... ok\ntest workflow_json_is_deterministic_and_does_not_infer_time_or_effects ... ok\n\ntest result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 38 tests\ntest checksum_odd_byte_survives_snapshot_and_empty_updates ... ok\ntest decoder_rejects_overflowing_public_offsets_without_panicking ... ok\ntest dnp_probe_checks_all_crcs_and_does_not_require_a_standard_port ... ok\ntest crc_failure_in_udp_is_a_diagnostic_not_a_clean_application ... ok\ntest dnp_reserved_and_unknown_link_controls_remain_explicit_diagnostics ... ok\ntest dnp_public_stream_offset_overflow_is_typed_not_a_panic ... ok\ntest earlier_payload_after_fin_observation_is_still_reconstructible ... ok\ntest dnp_transport_gap_cannot_bridge_application_fragments ... ok\ntest expired_identical_syn_creates_new_generation_but_live_retransmission_does_not ... ok\ntest engine_does_not_silently_choose_between_conflicting_protocol_endpoints ... ok\ntest failed_evidence_append_preserves_bytes_and_spans ... ok\ntest fin_seen_before_payload_cannot_be_forgotten ... ok\ntest evidence_slices_and_appends_preserve_every_source_offset ... ok\ntest finite_section_length_alignment_is_owned_by_shb_decoder ... ok\ntest first_dnp_transport_segment_obeys_application_limit ... ok\ntest fragment_budget_failure_does_not_change_existing_terminal_length ... ok\ntest fragment_deadline_keeps_original_strict_boundary ... ok\ntest independent_dnp_builder_matches_published_crc_check_value ... ok\ntest independent_udp_datagrams_never_supply_a_reliable_byte_stream ... ok\ntest invalid_modbus_request_does_not_become_a_response_reference ... ok\ntest invalid_source_offset_cannot_be_laundered_by_empty_slice ... ok\ntest ipv6_empty_no_next_header_with_link_padding_is_not_jumbo ... ok\ntest ipv6_next_header_variation_cannot_hide_an_overlap ... ok\ntest ipv6_nonzero_next_header_does_not_split_reassembly_identity ... ok\ntest malformed_modbus_quantities_counts_and_values_are_not_validated ... ok\ntest modbus_adu_respects_application_byte_limit ... ok\ntest modbus_budget_includes_issues_and_messages_before_emitting ... ok\ntest modbus_pairing_checks_response_size_not_just_transaction_id ... ok\ntest modbus_probe_is_explicitly_weak_and_tcp_only ... ok\ntest payload_budget_error_does_not_leave_a_phantom_tcp_generation ... ok\ntest probe_registry_bounds_and_duplicate_names_are_explicit ... ok\ntest probe_request_for_unreachable_prefix_is_a_budget_error ... ok\ntest rejected_fragment_admission_does_not_leave_state_or_contributors ... ok\ntest valid_dnp_application_wrap_and_other_address_pair_survive ... ok\ntest valid_modbus_boundary_quantities_still_pass ... ok\ntest valid_modbus_response_matches_but_forged_flags_do_not_authorize_unknown_functions ... ok\ntest udp_dnp3_reaches_engine_and_report_with_original_contributors ... ok\ntest incremental_checksum_matches_independent_oracle_for_every_split ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 4 tests\ntest tiny_resource_budget_rejects_not_silently_truncates ... ok\ntest deterministic_arbitrary_bytes_exercise_public_read_boundaries ... ok\ntest every_fixture_prefix_is_bounded_and_never_panics ... ok\ntest mutate_every_capture_byte_preserves_safe_termination ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 19 tests\ntest every_resolution_octet_round_trips_without_high_bit_loss ... ok\ntest exact_timestamp_conserves_signed_offset_and_rejects_loss ... ok\ntest index_time_search_handles_nonmonotonic_and_absent_times ... ok\ntest index_lookup_excludes_record_header_bytes ... ok\ntest bounded_read_accepts_exact_neighbor_and_rejects_excess ... ok\ntest json_escaping_and_exact_size_limit ... ok\ntest label_changes_are_semantically_inert_to_packet_stream_reconstruction ... ok\ntest labels_produce_candidate_edges_not_attack_truth ... ok\ntest publication_does_not_follow_destination_symlink ... ok\ntest labels_reject_duplicate_identity_inverted_time_and_wildcards ... ok\ntest secrets_are_redacted_even_with_include_payload ... ok\ntest output_publication_never_overwrites_existing_file ... ok\ntest concurrent_publication_has_exactly_one_winner ... ok\ntest sidecar_self_hash_cannot_authorize_forged_metadata ... ok\ntest sensitive_report_publication_defaults_to_owner_only_permissions ... ok\ntest missing_packet_timestamp_is_unknown_not_outside_label_window ... ok\ntest index_wrong_source_and_truncated_sidecar_are_rejected ... ok\ntest sha256_incremental_chunking_and_empty_updates_preserve_digest ... ok\ntest sha256_independent_known_answer_vectors ... ok\n\ntest result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 4 tests\ntest bounded_size_and_encoding_preserve_every_json_variant ... ok\ntest decimal_size_boundaries_are_exact_without_temporary_strings ... ok\ntest line_quota_includes_the_newline_and_exact_utf8_bytes ... ok\ntest rejected_append_leaves_the_existing_destination_unchanged ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest bad_link_between_application_fragments_cannot_bridge_to_success ... ok\ntest dnp_function_catalog_names_non_secure_and_auth_boundaries ... ok\ntest dnp_crc_matches_external_check_vector ... ok\ntest dnp_link_control_exposes_primary_and_secondary_semantics ... ok\ntest crc_failure_report_does_not_reject_unrelated_valid_unsolicited_message ... ok\ntest dnp_application_sequence_15_to_0_keeps_fragment_boundaries ... ok\ntest end_to_end_fragmentation_keeps_all_packet_dispositions_terminal ... ok\ntest dnp_transport_sequence_63_to_0_reassembles ... ok\ntest independent_tcp_conflict_fixture_reaches_real_pipeline ... ok\ntest end_to_end_dnp_reorders_tcp_deduplicates_and_separates_unsolicited ... ok\ntest modbus_inconsistent_mbap_stops_not_speculatively_resynchronizes ... ok\ntest modbus_midstream_boundary_is_not_claimed_verified ... ok\ntest modbus_coalesced_pdus_and_function_shapes ... ok\ntest tcp_gap_never_crosses_a_dnp_transport_assembly ... ok\ntest modbus_server_initiated_tcp_does_not_invert_protocol_roles ... ok\ntest unsupported_link_is_retained_as_evidence_not_dropped ... ok\n\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest conflicting_overlap_is_an_explicit_gap_not_fabricated_payload ... ok\ntest closed_generation_does_not_absorb_post_close_non_syn ... ok\ntest conflicting_ipv4_fragments_quarantine_set ... ok\ntest connection_reuse_creates_generation_and_same_syn_is_not_recounted ... ok\ntest exact_final_ack_stays_with_two_sided_fin_generation ... ok\ntest data_after_fin_position_cannot_be_called_a_valid_stream ... ok\ntest fragment_out_of_order_assembly_conserves_every_packet_reference ... ok\ntest explicit_first_last_policies_preserve_conflict_diagnostics ... ok\ntest fragment_expiry_is_explicit_and_uses_capture_progress_not_wall_clock ... ok\ntest identical_ipv6_overlaps_are_still_rejected ... ok\ntest identical_ipv4_fragment_duplicate_is_preserved_as_observation ... ok\ntest missing_middle_keeps_two_contiguous_chunks ... ok\ntest no_payload_with_observed_syn_fin_still_reports_missing_bytes ... ok\ntest interface_and_vlan_identity_do_not_merge_flows ... ok\ntest out_of_order_and_identical_retransmission_do_not_duplicate_stream ... ok\ntest nearby_generations_leave_ambiguous_segment_unassigned ... ok\ntest provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection ... ok\ntest unknown_time_does_not_trigger_idle_expiry_or_time_zero ... ok\ntest sequence_wrap_and_half_space_ambiguity ... ok\ntest syn_and_fin_expose_missing_edges ... ok\ntest payload_before_syn_and_excessive_span_rejected ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest snapshot_padding_bad_response_does_not_pair_as_consistent ... ok\ntest snapshot_modbus_semantic_fields_reach_actual_report ... ok\ntest snapshot_dnp_gap_or_conflict_cannot_create_response_values ... ok\ntest snapshot_dnp_split_reordered_duplicate_retains_semantic_objects ... ok\ntest snapshot_semantic_extension_output_is_deterministic ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 65 tests\ntest dnp_absolute_time_preserves_48_bit_quantity ... ok\ntest dnp_count_without_index_does_not_invent_one ... ok\ntest dnp_all_object_response_is_not_inferred ... ok\ntest dnp_duplicate_prefixed_indices_remain_ordered ... ok\ntest dnp_flags_retained_and_bit_seven_decoded ... ok\ntest dnp_counter_event_variations5_and6_decode_timestamps_with_exact_boundaries ... ok\ntest dnp_each_additional_fixed_width_variant_has_a_value_case ... ok\ntest dnp_deadband_unsigned_and_variable_octets_keep_wire_identity ... ok\ntest dnp_four_byte_ranges_preserve_wide_point_indices ... ok\ntest dnp_fragment_helper_rejects_forged_context ... ok\ntest dnp_float_nan_payload_and_negative_zero_are_bits ... ok\ntest dnp_group0_all_attributes_request_is_header_only_evidence ... ok\ntest dnp_group0_attribute_list_preserves_entries_and_exact_spans ... ok\ntest dnp_group0_boolean_attribute_uses_declared_variation_and_signed_wire_type ... ok\ntest dnp_group0_decodes_numeric_attribute_types_without_semantic_names ... ok\ntest dnp_group0_invalid_known_width_is_explicitly_unsupported ... ok\ntest dnp_group0_hashes_visible_string_and_preserves_exact_envelope ... ok\ntest dnp_group0_range_selector_keeps_each_attribute_source_bound ... ok\ntest dnp_group0_odd_attribute_list_is_unsupported_without_resynchronizing ... ok\ntest dnp_group70_descriptor_offsets_and_lengths_are_not_guessed ... ok\ntest dnp_group40_and_41_variation4_decode_float64_and_keep_sibling_alignment ... ok\ntest dnp_group0_truncated_value_stops_without_resynchronizing ... ok\ntest dnp_group4_event_variations_decode_all_double_bit_states_and_align_sibling ... ok\ntest dnp_group70_file_requests_are_bounded_and_opaque_neighbors_stop ... ok\ntest dnp_group0_unknown_data_type_is_hashed_and_flagged_opaque ... ok\ntest dnp_indexed_reads_and_control_functions_are_explicit ... ok\ntest dnp_no_cross_fragment_object_stitching ... ok\ntest dnp_group70_variations3_to7_reject_every_short_declared_child_before_sibling_bytes ... ok\ntest dnp_packed_nonrange_is_explicitly_unsupported ... ok\ntest dnp_range16_count16_and_output_packed_cases ... ok\ntest dnp_read_classes_have_no_invented_values ... ok\ntest dnp_record_limit_is_observable ... ok\ntest dnp_packed_range_does_not_emit_padding_points ... ok\ntest dnp_group70_file_command_retains_metadata_and_hashes_sensitive_fields ... ok\ntest dnp_group70_descriptor_and_specification_variants_are_bounded_and_hash_only ... ok\ntest dnp_truncated_object_retains_prior_complete_value ... ok\ntest dnp_inverted_range_rejected ... ok\ntest dnp_two_and_four_byte_index_prefixes_are_little_endian ... ok\ntest dnp_unknown_qualifier_does_not_publish_a_header ... ok\ntest invalid_provenance_is_not_laundered ... ok\ntest modbus_all_existing_functions_and_roles_have_decoded_cases ... ok\ntest modbus_address_range_edges_are_checked ... ok\ntest dnp_signed_analogs_are_exact ... ok\ntest modbus_fc16_register_values_are_network_order ... ok\ntest dnp_relative_time_is_not_promoted_to_absolute ... ok\ntest modbus_exception_is_not_successful_execution ... ok\ntest dnp_group70_transport_and_status_variants_keep_block_and_hash_content ... ok\ntest dnp_group70_variations3_to7_decode_exact_minimum_adjacent_children_with_bounded_spans ... ok\ntest dnp_unsigned_integer_object_is_not_treated_as_a_counter ... ok\ntest dnp_unknown_width_stops_without_magic_resync ... ok\ntest modbus_bit_response_preserves_octets_without_fake_padding_coils ... ok\ntest modbus_read_response_padding_checked_only_with_request_quantity ... ok\ntest modbus_requires_exact_one_mbap_message ... ok\ntest dnp_sixteen_bit_qualifiers_are_little_endian ... ok\ntest modbus_response_values_do_not_invent_register_addresses ... ok\ntest modbus_spec_fc15_values_and_zero_based_addresses ... ok\ntest modbus_write_padding_recommendation_is_warning_not_framing_failure ... ok\ntest modbus_unknown_role_retains_both_valid_echo_interpretations ... ok\ntest semantic_input_and_json_limits_fail_explicitly ... ok\ntest streaming_padding_tokens_match_root_policy ... ok\ntest semantic_source_span_budget_cannot_be_bypassed_with_many_fragments ... ok\ntest systematic_padding_property_all_quantities ... ok\ntest semantic_witness_spans_cross_packet_boundary_exactly ... ok\ntest deterministic_prefix_and_mutation_properties ... ok\ntest modbus_default_budget_covers_maximum_fc15_bit_count ... ok\n\ntest result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n\n\nrunning 5 tests\ntest empty_port_list_is_usage_error ... ok\ntest invalid_port_does_not_partially_update ... ok\ntest repeated_and_csv_ports_share_transactional_semantics ... ok\ntest timestamp_secondary_index_preserves_file_order_and_unknowns ... ok\ntest root_engine_recognizes_modbus_without_configured_fixture_port ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 9 tests\ntest invalid_checksum_can_be_observed_without_silent_packet_loss ... ok\ntest ethernet_ipv4_udp_checksum_and_payload ... ok\ntest ipv6_atomic_fragment_not_queued_for_other_fragments ... ok\ntest ipv6_extension_length_is_checked_before_dereference ... ok\ntest ipv6_zero_checksum_is_not_ipv4_optional_checksum_semantics ... ok\ntest sll_sll2_raw_and_loopback_use_their_own_header_sizes ... ok\ntest original_length_never_authorizes_read_beyond_captured_bytes ... ok\ntest unknown_ether_type_is_typed_not_guessed_as_ip ... ok\ntest vlan_and_double_vlan_shift_offsets_without_changing_payload ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
+        "stdout": "\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest bounded_salvage_identifies_section_but_does_not_invent_packets ... ok\ntest binary_timestamp_inexactness_is_explicit ... ok\ntest classic_link_flags_do_not_become_linktype ... ok\ntest decoder_need_more_does_not_advance_section_state ... ok\ntest four_pcap_magic_forms_preserve_units_and_bytes ... ok\ntest invalid_microsecond_fraction_is_never_converted_as_nanoseconds ... ok\ntest malformed_trailer_and_truncated_eof_are_distinct ... ok\ntest malformed_option_length_cannot_consume_following_block ... ok\ntest invalid_input_copy_has_no_output_effect ... ok\ntest classic_writer_rejects_precision_loss_and_accepts_exact_neighbor ... ok\ntest iterator_is_fused_after_failure ... ok\ntest interface_reference_cannot_escape_section_scope ... ok\ntest new_writers_preserve_exact_time_and_endianness ... ok\ntest partial_write_poisons_writer_and_blocks_unsafe_retry ... ok\ntest oversized_declared_packet_rejected_before_payload_allocation ... ok\ntest streaming_one_byte_and_interrupted_reads_equal_borrowed ... ok\ntest section_endianness_interface_reset_and_signed_offset ... ok\ntest strict_and_evidence_modes_do_not_silently_normalize_lengths ... ok\ntest streaming_truncated_tail_terminates_without_refill_loop ... ok\ntest unknown_blocks_secrets_and_no_copy_custom_are_preserved_archivally ... ok\ntest unlimited_snaplen_simple_packet_has_no_fabricated_time ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest real_cli_inspects_and_does_not_modify_source ... ok\ntest require_clean_returns_diagnostic_status_without_hiding_report ... ok\ntest help_and_invalid_flags_have_distinct_exit_status ... ok\ntest cli_index_verify_and_packet_lookup ... ok\ntest cli_pipeline_labels_and_no_clobber_output ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 38 tests\ntest all_budget_values_below_the_first_success_are_explicit_limits ... ok\ntest a_transport_complete_target_does_not_require_a_complete_application_message ... ok\ntest application_list_order_does_not_change_candidate_selection ... ok\ntest all_truncated_link_and_application_prefixes_are_explicit_not_candidates ... ok\ntest budget_exhaustion_is_typed_and_never_returns_partial_candidates ... ok\ntest duplicate_confirms_remain_ambiguous_even_without_a_target ... ok\ntest duplicate_targets_are_all_retained_without_selecting_one ... ok\ntest conflicting_con_or_direction_headers_cannot_make_a_unique_target_win ... ok\ntest confirmation_targets_one_application_fragment_not_the_message_first_sequence ... ok\ntest equal_not_reversed_addresses_and_other_flows_do_not_match ... ok\ntest fcb_and_fcv_do_not_select_a_partner_or_infer_link_state ... ok\ntest every_public_fragment_metadata_field_is_rechecked_for_both_participants ... ok\ntest invalid_witness_taints_only_its_flow_without_using_its_forged_key ... ok\ntest invalid_capture_direction_and_outer_protocol_label_are_explicit ... ok\ntest forged_public_link_fields_crc_and_source_offsets_are_not_witnesses ... ok\ntest multiple_outstations_remain_separate ... ok\ntest malformed_confirm_controls_broadcast_and_bad_uns_remain_unclassified ... ok\ntest object_payload_does_not_become_a_decoded_value_through_confirmation_correlation ... ok\ntest response_only_and_unrelated_read_do_not_create_confirmation_rows ... ok\ntest observed_opposite_dir_is_used_without_inventing_a_role_mapping ... ok\ntest missing_or_conflicting_transport_bytes_never_create_a_target ... ok\ntest public_apdu_role_rewrite_cannot_hide_a_duplicate_confirm_from_verification ... ok\ntest sequence_and_uns_namespace_mismatches_remain_unmatched ... ok\ntest engine_limit_error_is_separate_and_survives_json_projection ... ok\ntest same_capture_direction_or_same_link_dir_is_not_a_candidate ... ok\ntest target_without_con_is_excluded_not_promoted ... ok\ntest selected_application_header_source_spans_are_rechecked_not_just_bytes ... ok\ntest solicited_candidate_has_exact_fragment_and_crc_checked_header_witnesses ... ok\ntest reused_frame_indices_and_post_fin_duplicates_cannot_be_laundered ... ok\ntest the_same_numeric_flow_from_different_captures_cannot_pair ... ok\ntest timestamps_and_capture_order_are_not_confirmation_matching_inputs ... ok\ntest transport_wrap_and_reordered_duplicates_preserve_selected_header_and_all_packets ... ok\ntest sequence_rollover_is_not_an_invented_transaction_epoch ... ok\ntest unsolicited_confirm_pairs_only_inside_its_separate_namespace ... ok\ntest unsupported_secure_context_is_not_silently_removed_from_the_identifier_pool ... ok\ntest unmatched_confirm_is_retained_and_legacy_transaction_output_is_unchanged ... ok\ntest fixed_capture_reaches_engine_and_deterministic_root_json_with_exact_timestamps ... ok\ntest real_cli_emits_the_additive_section_without_changing_the_capture ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 25 tests\ntest all_control_bytes_preserve_raw_primary_secondary_masks ... ok\ntest all_broadcast_addresses_are_explicit_and_not_pairable ... ok\ntest conflicting_duplicates_and_late_continuations_never_majority_vote ... ok\ntest class_controls_are_bounded_selectors_not_inferred_configuration ... ok\ntest confirms_and_unsolicited_namespace_are_byte_derived ... ok\ntest class_event_scans_and_index_selectors_reuse_the_root_parser ... ok\ntest contradictory_length_and_bad_header_crc_do_not_silently_resynchronize ... ok\ntest cross_application_fragment_object_completion_has_exact_two_packet_spans ... ok\ntest fcb_is_retained_but_not_used_as_endpoint_state_when_fcv_is_zero ... ok\ntest declared_crc_failure_is_not_a_license_to_scan_nested_frames ... ok\ntest file_control_request_reaches_bounded_group70_projection ... ok\ntest fixed_vectors_have_independent_crc_and_exact_frame_extent ... ok\ntest forged_metadata_or_link_direction_cannot_authorize_pairing ... ok\ntest link_fields_have_exact_control_and_address_witnesses ... ok\ntest multiple_outstations_do_not_share_sequence_namespaces ... ok\ntest link_subset_reports_reserved_unsupported_and_invalid_combinations ... ok\ntest missing_middle_or_first_never_decodes_partial_objects_as_a_complete_message ... ok\ntest reordered_transport_duplicates_keep_all_witnesses_but_only_one_byte_value ... ok\ntest non_secure_time_workflows_preserve_raw_time_and_exact_spans ... ok\ntest request_response_pairs_require_addresses_sequence_function_and_directions ... ok\ntest secure_file_authentication_and_unreviewed_families_remain_opaque ... ok\ntest unmatched_no_response_confirm_and_unsolicited_are_not_fabricated_pairs ... ok\ntest sequence_rollover_is_valid_but_reuse_stays_ambiguous ... ok\ntest truncation_and_limits_remain_explicit_not_success ... ok\ntest workflow_json_is_deterministic_and_does_not_infer_time_or_effects ... ok\n\ntest result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 38 tests\ntest dnp_public_stream_offset_overflow_is_typed_not_a_panic ... ok\ntest crc_failure_in_udp_is_a_diagnostic_not_a_clean_application ... ok\ntest earlier_payload_after_fin_observation_is_still_reconstructible ... ok\ntest checksum_odd_byte_survives_snapshot_and_empty_updates ... ok\ntest engine_does_not_silently_choose_between_conflicting_protocol_endpoints ... ok\ntest failed_evidence_append_preserves_bytes_and_spans ... ok\ntest evidence_slices_and_appends_preserve_every_source_offset ... ok\ntest dnp_transport_gap_cannot_bridge_application_fragments ... ok\ntest decoder_rejects_overflowing_public_offsets_without_panicking ... ok\ntest finite_section_length_alignment_is_owned_by_shb_decoder ... ok\ntest fin_seen_before_payload_cannot_be_forgotten ... ok\ntest dnp_reserved_and_unknown_link_controls_remain_explicit_diagnostics ... ok\ntest first_dnp_transport_segment_obeys_application_limit ... ok\ntest expired_identical_syn_creates_new_generation_but_live_retransmission_does_not ... ok\ntest dnp_probe_checks_all_crcs_and_does_not_require_a_standard_port ... ok\ntest fragment_budget_failure_does_not_change_existing_terminal_length ... ok\ntest fragment_deadline_keeps_original_strict_boundary ... ok\ntest independent_udp_datagrams_never_supply_a_reliable_byte_stream ... ok\ntest independent_dnp_builder_matches_published_crc_check_value ... ok\ntest invalid_modbus_request_does_not_become_a_response_reference ... ok\ntest ipv6_empty_no_next_header_with_link_padding_is_not_jumbo ... ok\ntest ipv6_next_header_variation_cannot_hide_an_overlap ... ok\ntest malformed_modbus_quantities_counts_and_values_are_not_validated ... ok\ntest invalid_source_offset_cannot_be_laundered_by_empty_slice ... ok\ntest modbus_adu_respects_application_byte_limit ... ok\ntest modbus_budget_includes_issues_and_messages_before_emitting ... ok\ntest modbus_pairing_checks_response_size_not_just_transaction_id ... ok\ntest ipv6_nonzero_next_header_does_not_split_reassembly_identity ... ok\ntest payload_budget_error_does_not_leave_a_phantom_tcp_generation ... ok\ntest modbus_probe_is_explicitly_weak_and_tcp_only ... ok\ntest probe_registry_bounds_and_duplicate_names_are_explicit ... ok\ntest rejected_fragment_admission_does_not_leave_state_or_contributors ... ok\ntest valid_modbus_response_matches_but_forged_flags_do_not_authorize_unknown_functions ... ok\ntest probe_request_for_unreachable_prefix_is_a_budget_error ... ok\ntest valid_dnp_application_wrap_and_other_address_pair_survive ... ok\ntest valid_modbus_boundary_quantities_still_pass ... ok\ntest udp_dnp3_reaches_engine_and_report_with_original_contributors ... ok\ntest incremental_checksum_matches_independent_oracle_for_every_split ... ok\n\ntest result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 4 tests\ntest tiny_resource_budget_rejects_not_silently_truncates ... ok\ntest deterministic_arbitrary_bytes_exercise_public_read_boundaries ... ok\ntest every_fixture_prefix_is_bounded_and_never_panics ... ok\ntest mutate_every_capture_byte_preserves_safe_termination ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 19 tests\ntest every_resolution_octet_round_trips_without_high_bit_loss ... ok\ntest bounded_read_accepts_exact_neighbor_and_rejects_excess ... ok\ntest index_lookup_excludes_record_header_bytes ... ok\ntest json_escaping_and_exact_size_limit ... ok\ntest index_wrong_source_and_truncated_sidecar_are_rejected ... ok\ntest exact_timestamp_conserves_signed_offset_and_rejects_loss ... ok\ntest index_time_search_handles_nonmonotonic_and_absent_times ... ok\ntest labels_reject_duplicate_identity_inverted_time_and_wildcards ... ok\ntest concurrent_publication_has_exactly_one_winner ... ok\ntest missing_packet_timestamp_is_unknown_not_outside_label_window ... ok\ntest publication_does_not_follow_destination_symlink ... ok\ntest label_changes_are_semantically_inert_to_packet_stream_reconstruction ... ok\ntest secrets_are_redacted_even_with_include_payload ... ok\ntest labels_produce_candidate_edges_not_attack_truth ... ok\ntest output_publication_never_overwrites_existing_file ... ok\ntest sha256_incremental_chunking_and_empty_updates_preserve_digest ... ok\ntest sidecar_self_hash_cannot_authorize_forged_metadata ... ok\ntest sensitive_report_publication_defaults_to_owner_only_permissions ... ok\ntest sha256_independent_known_answer_vectors ... ok\n\ntest result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s\n\n\nrunning 4 tests\ntest decimal_size_boundaries_are_exact_without_temporary_strings ... ok\ntest bounded_size_and_encoding_preserve_every_json_variant ... ok\ntest rejected_append_leaves_the_existing_destination_unchanged ... ok\ntest line_quota_includes_the_newline_and_exact_utf8_bytes ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 16 tests\ntest crc_failure_report_does_not_reject_unrelated_valid_unsolicited_message ... ok\ntest bad_link_between_application_fragments_cannot_bridge_to_success ... ok\ntest dnp_crc_matches_external_check_vector ... ok\ntest dnp_application_sequence_15_to_0_keeps_fragment_boundaries ... ok\ntest dnp_function_catalog_names_non_secure_and_auth_boundaries ... ok\ntest dnp_link_control_exposes_primary_and_secondary_semantics ... ok\ntest dnp_transport_sequence_63_to_0_reassembles ... ok\ntest independent_tcp_conflict_fixture_reaches_real_pipeline ... ok\ntest end_to_end_fragmentation_keeps_all_packet_dispositions_terminal ... ok\ntest end_to_end_dnp_reorders_tcp_deduplicates_and_separates_unsolicited ... ok\ntest modbus_coalesced_pdus_and_function_shapes ... ok\ntest modbus_inconsistent_mbap_stops_not_speculatively_resynchronizes ... ok\ntest modbus_midstream_boundary_is_not_claimed_verified ... ok\ntest modbus_server_initiated_tcp_does_not_invert_protocol_roles ... ok\ntest tcp_gap_never_crosses_a_dnp_transport_assembly ... ok\ntest unsupported_link_is_retained_as_evidence_not_dropped ... ok\n\ntest result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 21 tests\ntest conflicting_ipv4_fragments_quarantine_set ... ok\ntest closed_generation_does_not_absorb_post_close_non_syn ... ok\ntest explicit_first_last_policies_preserve_conflict_diagnostics ... ok\ntest conflicting_overlap_is_an_explicit_gap_not_fabricated_payload ... ok\ntest connection_reuse_creates_generation_and_same_syn_is_not_recounted ... ok\ntest fragment_expiry_is_explicit_and_uses_capture_progress_not_wall_clock ... ok\ntest identical_ipv4_fragment_duplicate_is_preserved_as_observation ... ok\ntest exact_final_ack_stays_with_two_sided_fin_generation ... ok\ntest fragment_out_of_order_assembly_conserves_every_packet_reference ... ok\ntest identical_ipv6_overlaps_are_still_rejected ... ok\ntest data_after_fin_position_cannot_be_called_a_valid_stream ... ok\ntest interface_and_vlan_identity_do_not_merge_flows ... ok\ntest missing_middle_keeps_two_contiguous_chunks ... ok\ntest no_payload_with_observed_syn_fin_still_reports_missing_bytes ... ok\ntest nearby_generations_leave_ambiguous_segment_unassigned ... ok\ntest payload_before_syn_and_excessive_span_rejected ... ok\ntest provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection ... ok\ntest sequence_wrap_and_half_space_ambiguity ... ok\ntest syn_and_fin_expose_missing_edges ... ok\ntest out_of_order_and_identical_retransmission_do_not_duplicate_stream ... ok\ntest unknown_time_does_not_trigger_idle_expiry_or_time_zero ... ok\n\ntest result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 5 tests\ntest snapshot_padding_bad_response_does_not_pair_as_consistent ... ok\ntest snapshot_modbus_semantic_fields_reach_actual_report ... ok\ntest snapshot_dnp_gap_or_conflict_cannot_create_response_values ... ok\ntest snapshot_semantic_extension_output_is_deterministic ... ok\ntest snapshot_dnp_split_reordered_duplicate_retains_semantic_objects ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n\nrunning 65 tests\ntest dnp_absolute_time_preserves_48_bit_quantity ... ok\ntest dnp_all_object_response_is_not_inferred ... ok\ntest dnp_count_without_index_does_not_invent_one ... ok\ntest dnp_duplicate_prefixed_indices_remain_ordered ... ok\ntest dnp_deadband_unsigned_and_variable_octets_keep_wire_identity ... ok\ntest dnp_counter_event_variations5_and6_decode_timestamps_with_exact_boundaries ... ok\ntest dnp_each_additional_fixed_width_variant_has_a_value_case ... ok\ntest dnp_flags_retained_and_bit_seven_decoded ... ok\ntest dnp_four_byte_ranges_preserve_wide_point_indices ... ok\ntest dnp_fragment_helper_rejects_forged_context ... ok\ntest dnp_float_nan_payload_and_negative_zero_are_bits ... ok\ntest dnp_group0_all_attributes_request_is_header_only_evidence ... ok\ntest dnp_group0_boolean_attribute_uses_declared_variation_and_signed_wire_type ... ok\ntest dnp_group0_attribute_list_preserves_entries_and_exact_spans ... ok\ntest dnp_group0_decodes_numeric_attribute_types_without_semantic_names ... ok\ntest dnp_group0_hashes_visible_string_and_preserves_exact_envelope ... ok\ntest dnp_group0_invalid_known_width_is_explicitly_unsupported ... ok\ntest dnp_group0_odd_attribute_list_is_unsupported_without_resynchronizing ... ok\ntest dnp_group0_range_selector_keeps_each_attribute_source_bound ... ok\ntest dnp_group0_truncated_value_stops_without_resynchronizing ... ok\ntest dnp_group0_unknown_data_type_is_hashed_and_flagged_opaque ... ok\ntest dnp_group40_and_41_variation4_decode_float64_and_keep_sibling_alignment ... ok\ntest dnp_group4_event_variations_decode_all_double_bit_states_and_align_sibling ... ok\ntest dnp_group70_descriptor_offsets_and_lengths_are_not_guessed ... ok\ntest dnp_group70_file_requests_are_bounded_and_opaque_neighbors_stop ... ok\ntest dnp_group70_descriptor_and_specification_variants_are_bounded_and_hash_only ... ok\ntest dnp_group70_transport_and_status_variants_keep_block_and_hash_content ... ok\ntest dnp_group70_file_command_retains_metadata_and_hashes_sensitive_fields ... ok\ntest dnp_group70_variations3_to7_decode_exact_minimum_adjacent_children_with_bounded_spans ... ok\ntest dnp_indexed_reads_and_control_functions_are_explicit ... ok\ntest dnp_inverted_range_rejected ... ok\ntest dnp_group70_variations3_to7_reject_every_short_declared_child_before_sibling_bytes ... ok\ntest dnp_packed_nonrange_is_explicitly_unsupported ... ok\ntest dnp_no_cross_fragment_object_stitching ... ok\ntest dnp_packed_range_does_not_emit_padding_points ... ok\ntest dnp_range16_count16_and_output_packed_cases ... ok\ntest dnp_read_classes_have_no_invented_values ... ok\ntest dnp_record_limit_is_observable ... ok\ntest dnp_signed_analogs_are_exact ... ok\ntest dnp_sixteen_bit_qualifiers_are_little_endian ... ok\ntest dnp_relative_time_is_not_promoted_to_absolute ... ok\ntest dnp_truncated_object_retains_prior_complete_value ... ok\ntest dnp_two_and_four_byte_index_prefixes_are_little_endian ... ok\ntest dnp_unknown_qualifier_does_not_publish_a_header ... ok\ntest dnp_unknown_width_stops_without_magic_resync ... ok\ntest dnp_unsigned_integer_object_is_not_treated_as_a_counter ... ok\ntest invalid_provenance_is_not_laundered ... ok\ntest modbus_address_range_edges_are_checked ... ok\ntest modbus_bit_response_preserves_octets_without_fake_padding_coils ... ok\ntest modbus_all_existing_functions_and_roles_have_decoded_cases ... ok\ntest modbus_fc16_register_values_are_network_order ... ok\ntest modbus_requires_exact_one_mbap_message ... ok\ntest modbus_read_response_padding_checked_only_with_request_quantity ... ok\ntest modbus_exception_is_not_successful_execution ... ok\ntest modbus_response_values_do_not_invent_register_addresses ... ok\ntest modbus_spec_fc15_values_and_zero_based_addresses ... ok\ntest semantic_witness_spans_cross_packet_boundary_exactly ... ok\ntest streaming_padding_tokens_match_root_policy ... ok\ntest semantic_source_span_budget_cannot_be_bypassed_with_many_fragments ... ok\ntest modbus_write_padding_recommendation_is_warning_not_framing_failure ... ok\ntest modbus_unknown_role_retains_both_valid_echo_interpretations ... ok\ntest semantic_input_and_json_limits_fail_explicitly ... ok\ntest systematic_padding_property_all_quantities ... ok\ntest deterministic_prefix_and_mutation_properties ... ok\ntest modbus_default_budget_covers_maximum_fc15_bit_count ... ok\n\ntest result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s\n\n\nrunning 5 tests\ntest empty_port_list_is_usage_error ... ok\ntest repeated_and_csv_ports_share_transactional_semantics ... ok\ntest invalid_port_does_not_partially_update ... ok\ntest timestamp_secondary_index_preserves_file_order_and_unknowns ... ok\ntest root_engine_recognizes_modbus_without_configured_fixture_port ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 9 tests\ntest ethernet_ipv4_udp_checksum_and_payload ... ok\ntest ipv6_atomic_fragment_not_queued_for_other_fragments ... ok\ntest invalid_checksum_can_be_observed_without_silent_packet_loss ... ok\ntest ipv6_extension_length_is_checked_before_dereference ... ok\ntest ipv6_zero_checksum_is_not_ipv4_optional_checksum_semantics ... ok\ntest original_length_never_authorizes_read_beyond_captured_bytes ... ok\ntest sll_sll2_raw_and_loopback_use_their_own_header_sizes ... ok\ntest unknown_ether_type_is_typed_not_guessed_as_ip ... ok\ntest vlan_and_double_vlan_shift_offsets_without_changing_payload ... ok\n\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n"
       },
       {
         "command": [
@@ -195,10 +223,10 @@
           "-D",
           "warnings"
         ],
-        "elapsed_seconds": 0.217,
+        "elapsed_seconds": 0.196,
         "exit_code": 0,
         "status": "PASS",
-        "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s\n",
+        "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s\n",
         "stdout": ""
       },
       {
@@ -209,10 +237,10 @@
           "--offline",
           "--bins"
         ],
-        "elapsed_seconds": 0.157,
+        "elapsed_seconds": 0.163,
         "exit_code": 0,
         "status": "PASS",
-        "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s\n",
+        "stderr": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s\n",
         "stdout": ""
       },
       {
@@ -222,7 +250,7 @@
           "--binary",
           "<repo>/.local-build/target/debug/pcap-evidence"
         ],
-        "elapsed_seconds": 0.299,
+        "elapsed_seconds": 0.293,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -235,7 +263,7 @@
           "--binary",
           "<repo>/.local-build/target/debug/pcap-evidence"
         ],
-        "elapsed_seconds": 0.661,
+        "elapsed_seconds": 0.727,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -246,7 +274,7 @@
           "python",
           "scripts/mutation_check.py"
         ],
-        "elapsed_seconds": 25.299,
+        "elapsed_seconds": 24.681,
         "exit_code": 0,
         "status": "PASS",
         "stderr": "",
@@ -293,10 +321,10 @@
           "tools/tests",
           "-v"
         ],
-        "elapsed_seconds": 11.482,
+        "elapsed_seconds": 11.519,
         "expected_returncode": 0,
         "log": "python-tests.log",
-        "log_sha256": "46e02d0cf7daedd3fce6168a8e4dffad2ec3c34c21a05dd7e3e97db1afa5a0c0",
+        "log_sha256": "469acec2f6cbd223f6e0d6e48cfe935e3915bfa31d5db4e43b1fc6944fdb7b3c",
         "name": "python-tests",
         "returncode": 0,
         "status": "PASS"
@@ -314,10 +342,10 @@
           "*vectors.py",
           "-v"
         ],
-        "elapsed_seconds": 0.721,
+        "elapsed_seconds": 0.67,
         "expected_returncode": 0,
         "log": "bgp-vectors.log",
-        "log_sha256": "464fafef8673df6758ba77531817c0a0a840ef68b41b1bfe11dc64900ba03123",
+        "log_sha256": "1a5f2da8f60846fb88fa1f4724cdfe74ad351d18e5876391a261b00f6f865bdf",
         "name": "bgp-vectors",
         "returncode": 0,
         "status": "PASS"
@@ -329,10 +357,10 @@
           "scripts/test_semantic_tools.py",
           "-v"
         ],
-        "elapsed_seconds": 0.319,
+        "elapsed_seconds": 0.317,
         "expected_returncode": 0,
         "log": "semantic-tools.log",
-        "log_sha256": "b0d6eb3ff3eef97ae809e54b85b5790ffed8d3a0084a26a72f51482ad045b6c8",
+        "log_sha256": "7bc0addc9c25b8c1dfe11ff36450c2e2bafeed271359ee84d46151978ae0e5f3",
         "name": "semantic-tools",
         "returncode": 0,
         "status": "PASS"
@@ -346,7 +374,7 @@
           "tools.depth.test_opcua_crypto",
           "-v"
         ],
-        "elapsed_seconds": 0.117,
+        "elapsed_seconds": 0.116,
         "expected_returncode": 0,
         "log": "opcua-transforms.log",
         "log_sha256": "bc3fe649b2c09b340f6b37d6f18257171dcc09d34cce393dcd38eaec6e50e314",
@@ -361,10 +389,10 @@
           "scripts/test_validation_frontier.py",
           "-v"
         ],
-        "elapsed_seconds": 0.522,
+        "elapsed_seconds": 0.569,
         "expected_returncode": 0,
         "log": "validation-frontier.log",
-        "log_sha256": "7b0105fba2f8e308a68d2f2e0c325b51c7f419ee848d93f14ac0aeaa9ce5f786",
+        "log_sha256": "ee2c5889eddd9f13ad691259367d8b40d3cd873f1bce7a09c9e5cf89d66f5d8f",
         "name": "validation-frontier",
         "returncode": 0,
         "status": "PASS"
@@ -376,10 +404,10 @@
           "scripts/test_package_contract.py",
           "-v"
         ],
-        "elapsed_seconds": 38.081,
+        "elapsed_seconds": 37.548,
         "expected_returncode": 0,
         "log": "package-contract.log",
-        "log_sha256": "e28f0ff6258f8d2ee35114085cbd01b8736d821ffc7d03a676b0dcd326d70bbf",
+        "log_sha256": "357d3863ffc32306f06558c349b3fd75731948f41a071247070b43368e5944cc",
         "name": "package-contract",
         "returncode": 0,
         "status": "PASS"
@@ -409,10 +437,10 @@
           "--test",
           "desktop/web/model.test.mjs"
         ],
-        "elapsed_seconds": 0.267,
+        "elapsed_seconds": 0.268,
         "expected_returncode": 0,
         "log": "gui-model-tests.log",
-        "log_sha256": "3c69b6ba399653cbe9ef015e32b233326eadfe56dde3f1fb038630c928efe362",
+        "log_sha256": "672e86ae7bcf7348cef8a723d9c49f78997dd5b6781f2f7f4c3ee71780cfc091",
         "name": "gui-model-tests",
         "returncode": 0,
         "status": "PASS"
@@ -428,7 +456,7 @@
           "--",
           "--check"
         ],
-        "elapsed_seconds": 0.519,
+        "elapsed_seconds": 0.518,
         "expected_returncode": 0,
         "log": "root-format.log",
         "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -450,7 +478,7 @@
         "elapsed_seconds": 0.97,
         "expected_returncode": 0,
         "log": "root-tests.log",
-        "log_sha256": "c19c4b8e11b6b5895d71c5676a4164d7dc443447b008dc19a843c381f7982681",
+        "log_sha256": "4bd9a862230bd959fdeb71b442cf3e01f946ec36d5d87b9f946d63986244bc6d",
         "name": "root-tests",
         "native_test_targets": 19,
         "native_tests_passed": 275,
@@ -469,10 +497,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.417,
+        "elapsed_seconds": 0.367,
         "expected_returncode": 0,
         "log": "root-release-tests.log",
-        "log_sha256": "b8351d427cc91787fd6cd3300e29ede4b27710e948c420eb8d4962c4291a675c",
+        "log_sha256": "1bc1f2a53867e0656e43b4c643ab63bbd39108d9b0dfcee41008b37dcfe2f084",
         "name": "root-release-tests",
         "native_test_targets": 19,
         "native_tests_passed": 275,
@@ -496,7 +524,7 @@
         "elapsed_seconds": 0.267,
         "expected_returncode": 0,
         "log": "root-clippy.log",
-        "log_sha256": "a5f4c585ee974ca44916ac30a98bbc189e067a7e0a6bc6d2e8d6bc525be724af",
+        "log_sha256": "c92508a29848820f033cd2ea015c85dde0953c88b07cc967ce34b7c08f610549",
         "name": "root-clippy",
         "returncode": 0,
         "status": "PASS"
@@ -516,7 +544,7 @@
         "elapsed_seconds": 0.166,
         "expected_returncode": 0,
         "log": "root-build.log",
-        "log_sha256": "3997fc6790b8063b86c119e91f87ac7395ac6cf26135da637dcb229006bc32dc",
+        "log_sha256": "765f1396d07f30f3a451cd3f9d9cad4e83c92c8e0aecf955ffc09061a6cf1e02",
         "name": "root-build",
         "returncode": 0,
         "status": "PASS"
@@ -532,7 +560,7 @@
           "--",
           "--check"
         ],
-        "elapsed_seconds": 0.568,
+        "elapsed_seconds": 0.668,
         "expected_returncode": 0,
         "log": "streaming-format.log",
         "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -551,10 +579,10 @@
           "--offline",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.166,
+        "elapsed_seconds": 0.217,
         "expected_returncode": 0,
         "log": "streaming-tests.log",
-        "log_sha256": "2dc3321b8dfd6c0d01e866f6f4a62b67c952da344801e49aa8213b268b8e6037",
+        "log_sha256": "711495c69c399f0c18559490ed290d75b6aec9655b07471c520e45e91c409567",
         "name": "streaming-tests",
         "native_test_targets": 5,
         "native_tests_passed": 55,
@@ -573,10 +601,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.167,
+        "elapsed_seconds": 0.166,
         "expected_returncode": 0,
         "log": "streaming-release-tests.log",
-        "log_sha256": "aeb70197d7f1ec1185d6aa9571d1c9bb8944ed78d5c458c12251fd79f91309c1",
+        "log_sha256": "c1a7ff76379525367fa46804f50cd3940c19931b05275b3d662ed94cfc7afb12",
         "name": "streaming-release-tests",
         "native_test_targets": 5,
         "native_tests_passed": 55,
@@ -636,7 +664,7 @@
           "--",
           "--check"
         ],
-        "elapsed_seconds": 1.674,
+        "elapsed_seconds": 1.724,
         "expected_returncode": 0,
         "log": "product-format.log",
         "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -655,10 +683,10 @@
           "--offline",
           "--all-targets"
         ],
-        "elapsed_seconds": 12.826,
+        "elapsed_seconds": 12.484,
         "expected_returncode": 0,
         "log": "product-tests.log",
-        "log_sha256": "5b0bc476a086385ebd7d2cf37868f8effa3375bf7b72e9334f0410a9cbe4563e",
+        "log_sha256": "275c07af52ea4901030e249e3d685ed298636a23f9c5a571212111396e8c203c",
         "name": "product-tests",
         "native_test_targets": 29,
         "native_tests_passed": 504,
@@ -677,10 +705,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 2.528,
+        "elapsed_seconds": 2.626,
         "expected_returncode": 0,
         "log": "product-release-tests.log",
-        "log_sha256": "38cbcaa39c88a0f3fc0e8b6a7dea96ffe2e561ab434a6c178f3f48f74055a93b",
+        "log_sha256": "5537bf85330614cf37687e249b461d370f90d59f9df943c6de577475a0748b78",
         "name": "product-release-tests",
         "native_test_targets": 29,
         "native_tests_passed": 504,
@@ -701,10 +729,10 @@
           "-D",
           "warnings"
         ],
-        "elapsed_seconds": 0.267,
+        "elapsed_seconds": 0.268,
         "expected_returncode": 0,
         "log": "product-clippy.log",
-        "log_sha256": "4cf86278c1e6d659943a46a3d7e3da429ac15be90f0f17742e24ef85228e7d3e",
+        "log_sha256": "c92508a29848820f033cd2ea015c85dde0953c88b07cc967ce34b7c08f610549",
         "name": "product-clippy",
         "returncode": 0,
         "status": "PASS"
@@ -724,7 +752,7 @@
         "elapsed_seconds": 0.217,
         "expected_returncode": 0,
         "log": "product-build.log",
-        "log_sha256": "3997fc6790b8063b86c119e91f87ac7395ac6cf26135da637dcb229006bc32dc",
+        "log_sha256": "765f1396d07f30f3a451cd3f9d9cad4e83c92c8e0aecf955ffc09061a6cf1e02",
         "name": "product-build",
         "returncode": 0,
         "status": "PASS"
@@ -762,7 +790,7 @@
         "elapsed_seconds": 0.116,
         "expected_returncode": 0,
         "log": "ffi-tests.log",
-        "log_sha256": "afc4fa7552f554981e06273ee4918774d06d9650c38939db2629ccbbe1695305",
+        "log_sha256": "fa468feb357ac7a8da43b35a16a67fa8b8a9a5b0d76de0c645f70f6690088f62",
         "name": "ffi-tests",
         "native_test_targets": 1,
         "native_tests_passed": 2,
@@ -784,7 +812,7 @@
         "elapsed_seconds": 0.116,
         "expected_returncode": 0,
         "log": "ffi-release-tests.log",
-        "log_sha256": "19749941333a993b479038baa112fe9a3ffef2f08a6fe3ebe256ae6d3025f4f2",
+        "log_sha256": "aa56e9b18cd54ea5ee43f2c8b09ff9109d93398d27ef351f1748573ed360175e",
         "name": "ffi-release-tests",
         "native_test_targets": 1,
         "native_tests_passed": 2,
@@ -825,10 +853,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.216,
+        "elapsed_seconds": 0.166,
         "expected_returncode": 0,
         "log": "ffi-build.log",
-        "log_sha256": "765f1396d07f30f3a451cd3f9d9cad4e83c92c8e0aecf955ffc09061a6cf1e02",
+        "log_sha256": "3997fc6790b8063b86c119e91f87ac7395ac6cf26135da637dcb229006bc32dc",
         "name": "ffi-build",
         "returncode": 0,
         "status": "PASS"
@@ -844,7 +872,7 @@
           "--",
           "--check"
         ],
-        "elapsed_seconds": 0.82,
+        "elapsed_seconds": 0.718,
         "expected_returncode": 0,
         "log": "history-format.log",
         "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -863,10 +891,10 @@
           "--offline",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.719,
+        "elapsed_seconds": 0.216,
         "expected_returncode": 0,
         "log": "history-tests.log",
-        "log_sha256": "9ab0548e3037a5657f134ef542c4c705767405442d04e912cbffe4a9eaeb3d17",
+        "log_sha256": "836b17b39ff85cdb7b47513c852d5fc4feaa83b3e1d4b2fe5a662b2babc0408c",
         "name": "history-tests",
         "native_test_targets": 5,
         "native_tests_passed": 30,
@@ -885,10 +913,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 7.249,
+        "elapsed_seconds": 0.167,
         "expected_returncode": 0,
         "log": "history-release-tests.log",
-        "log_sha256": "69090ce467414eb9759a99e90c132ca79e77a0e82c3f7c42fca44c2a855fda7d",
+        "log_sha256": "37a4c6caab4218f19e6255392d20352ba91b76b21de0c62888d095d0544e2bd3",
         "name": "history-release-tests",
         "native_test_targets": 5,
         "native_tests_passed": 30,
@@ -909,10 +937,10 @@
           "-D",
           "warnings"
         ],
-        "elapsed_seconds": 0.317,
+        "elapsed_seconds": 0.217,
         "expected_returncode": 0,
         "log": "history-clippy.log",
-        "log_sha256": "4899f526713ae455f8afd72290bb583af5d7be6c972771fe5b2c1a9a97dbf5d4",
+        "log_sha256": "a5f4c585ee974ca44916ac30a98bbc189e067a7e0a6bc6d2e8d6bc525be724af",
         "name": "history-clippy",
         "returncode": 0,
         "status": "PASS"
@@ -929,10 +957,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.167,
+        "elapsed_seconds": 0.168,
         "expected_returncode": 0,
         "log": "history-build.log",
-        "log_sha256": "765f1396d07f30f3a451cd3f9d9cad4e83c92c8e0aecf955ffc09061a6cf1e02",
+        "log_sha256": "3997fc6790b8063b86c119e91f87ac7395ac6cf26135da637dcb229006bc32dc",
         "name": "history-build",
         "returncode": 0,
         "status": "PASS"
@@ -948,7 +976,7 @@
           "--",
           "--check"
         ],
-        "elapsed_seconds": 1.774,
+        "elapsed_seconds": 1.826,
         "expected_returncode": 0,
         "log": "history-app-format.log",
         "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -967,10 +995,10 @@
           "--offline",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.618,
+        "elapsed_seconds": 0.117,
         "expected_returncode": 0,
         "log": "history-app-tests.log",
-        "log_sha256": "6031b905a7a4043c4da5e6376a4f4af5673a6435689bced0852530b669fc4b6c",
+        "log_sha256": "d5d49e1fa9f4c4475e718d26fe0a14606a85fc001614ddbbd9a7760a88d44dfd",
         "name": "history-app-tests",
         "native_test_targets": 3,
         "native_tests_passed": 6,
@@ -989,10 +1017,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 7.349,
+        "elapsed_seconds": 0.116,
         "expected_returncode": 0,
         "log": "history-app-release-tests.log",
-        "log_sha256": "36d6c5ee95e90de25be0f16d324ce1e8e77bc1c1e572c585495409540d45ca32",
+        "log_sha256": "e70fb097cfbc5d4a95f5c92c340f31e9a6f1659e78915de72247d44c9a02160c",
         "name": "history-app-release-tests",
         "native_test_targets": 3,
         "native_tests_passed": 6,
@@ -1013,10 +1041,10 @@
           "-D",
           "warnings"
         ],
-        "elapsed_seconds": 0.419,
+        "elapsed_seconds": 0.267,
         "expected_returncode": 0,
         "log": "history-app-clippy.log",
-        "log_sha256": "a5837bd1cda0b36370e006351d8402765dcdcccdf4c3f763af929761b5b70c45",
+        "log_sha256": "c92508a29848820f033cd2ea015c85dde0953c88b07cc967ce34b7c08f610549",
         "name": "history-app-clippy",
         "returncode": 0,
         "status": "PASS"
@@ -1033,10 +1061,10 @@
           "--release",
           "--all-targets"
         ],
-        "elapsed_seconds": 0.217,
+        "elapsed_seconds": 0.218,
         "expected_returncode": 0,
         "log": "history-app-build.log",
-        "log_sha256": "85c8dbac64ed6a362d668bf3988686e26e947620bb15cfdbe2e999a0ff8261b2",
+        "log_sha256": "0b5fe2277fd2b29cc111b76604c482f8ec516047dbc0954657203c5614f4e4db",
         "name": "history-app-build",
         "returncode": 0,
         "status": "PASS"
@@ -1053,10 +1081,10 @@
           "--all-targets",
           "--no-default-features"
         ],
-        "elapsed_seconds": 12.93,
+        "elapsed_seconds": 12.73,
         "expected_returncode": 0,
         "log": "features-none.log",
-        "log_sha256": "179790735375fa524bedf97c36ac2657c44616fcd6f18f06b3010846d2f0c671",
+        "log_sha256": "1ef5d8cc1a5bacdf0101dc9c205ab59c6a789e1c82753c01f139d0c83fbcf815",
         "name": "features-none",
         "native_test_targets": 29,
         "native_tests_passed": 465,
@@ -1077,10 +1105,10 @@
           "--features",
           "standard"
         ],
-        "elapsed_seconds": 12.987,
+        "elapsed_seconds": 12.933,
         "expected_returncode": 0,
         "log": "features-standard.log",
-        "log_sha256": "f8d962b3bb0726b0658f13de2d6ae5bbc4c30728adcf50ce9cb3482ccae1b3aa",
+        "log_sha256": "0704fb078563c406eb92df86852870eecd71159148efded6b9831abe8693b2e6",
         "name": "features-standard",
         "native_test_targets": 29,
         "native_tests_passed": 466,
@@ -1101,10 +1129,10 @@
           "--features",
           "extensions"
         ],
-        "elapsed_seconds": 12.83,
+        "elapsed_seconds": 12.979,
         "expected_returncode": 0,
         "log": "features-extensions.log",
-        "log_sha256": "9c3996f36150791da40a3c4450143595ea39eed9c64ad0aaa53371e358816702",
+        "log_sha256": "0818e573c302397b96e8a3401bf9479cd5c61d72810ef857364cc688d02c3007",
         "name": "features-extensions",
         "native_test_targets": 29,
         "native_tests_passed": 476,
@@ -1125,10 +1153,10 @@
           "--features",
           "industrial"
         ],
-        "elapsed_seconds": 12.283,
+        "elapsed_seconds": 12.632,
         "expected_returncode": 0,
         "log": "features-industrial.log",
-        "log_sha256": "25440cd66f44f9c7469550cbeaea3f6591e0c1d663e1f82224e8230fa33721ec",
+        "log_sha256": "280813e0c0319abb71172fb2c73ed052a0bb1c78c4da5db2100aba51d7d6fcbc",
         "name": "features-industrial",
         "native_test_targets": 29,
         "native_tests_passed": 479,
@@ -1149,10 +1177,10 @@
           "--features",
           "industrial-full"
         ],
-        "elapsed_seconds": 12.787,
+        "elapsed_seconds": 12.282,
         "expected_returncode": 0,
         "log": "features-industrial-full.log",
-        "log_sha256": "0531104696f56c409d05b240a13a79674dd7d5c9764f286f455d4038a1ebab38",
+        "log_sha256": "0ccdb6419ce3365a9920fd3bf96f24a331e7b57fc3fe929813529688d10765b1",
         "name": "features-industrial-full",
         "native_test_targets": 29,
         "native_tests_passed": 488,
@@ -1173,10 +1201,10 @@
           "--features",
           "binary"
         ],
-        "elapsed_seconds": 12.533,
+        "elapsed_seconds": 12.676,
         "expected_returncode": 0,
         "log": "features-binary.log",
-        "log_sha256": "2b9b39094777d295b0aa946f9fb3db32ac9e8f6b6c10f13883309e9f092d63b7",
+        "log_sha256": "d062d82ab008c74b2eed8999def8888c797663481f91e97078731a2a95329eca",
         "name": "features-binary",
         "native_test_targets": 29,
         "native_tests_passed": 466,
@@ -1191,9 +1219,9 @@
           "--binary",
           "<repo>/.local-build/target/release/pcap-product",
           "--output-dir",
-          "<repo>/.local-build/final-repaired-product/semantic-parity"
+          "<repo>/.local-build/final-delivery-product/semantic-parity"
         ],
-        "elapsed_seconds": 0.468,
+        "elapsed_seconds": 0.469,
         "expected_returncode": 0,
         "log": "semantic-projection-parity.log",
         "log_sha256": "dc58e1a8d6e50f3ae6ac73a1337fc49030bb48a843fb8ebb582507ae981bbd23",
@@ -1207,7 +1235,7 @@
           "/usr/bin/python3",
           "scripts/check_linked_abi.py",
           "--output",
-          "<repo>/.local-build/final-repaired-product/linked-abi",
+          "<repo>/.local-build/final-delivery-product/linked-abi",
           "--library",
           "<repo>/.local-build/target/release/libpcap_evidence_ffi.so"
         ],
@@ -1230,7 +1258,7 @@
           "-DPCAP_TEST_DENY_SOCKET",
           "product/live/capture_linux.c",
           "-o",
-          "/tmp/pcap-c-denial-7vuarr0h/capture-denied"
+          "/tmp/pcap-c-denial-i_y6s5ts/capture-denied"
         ],
         "elapsed_seconds": 0.167,
         "expected_returncode": 0,
@@ -1243,12 +1271,12 @@
       {
         "category": "injected_live_failure",
         "command": [
-          "/tmp/pcap-c-denial-7vuarr0h/capture-denied",
+          "/tmp/pcap-c-denial-i_y6s5ts/capture-denied",
           "--allow-live-capture",
           "--interface",
           "test0",
           "--output",
-          "/tmp/pcap-c-denial-7vuarr0h/must-not-exist.pcap"
+          "/tmp/pcap-c-denial-i_y6s5ts/must-not-exist.pcap"
         ],
         "elapsed_seconds": 0.005,
         "expected_returncode": 3,
@@ -1268,7 +1296,7 @@
       ".github/pull_request_template.md": "816c7bd3a9d98d9228fa73e204ec19869a90438b4240096d5b24d6884c10f516",
       ".github/workflows/ci.yml": "bce00cb3e69d78f335ac646bb53d96ac413ad7b04ebd2e77e0536e6a0e014770",
       ".github/workflows/hardening.yml": "867a1ca0375156b4923339134ed1bc3d6a44fd39531029679011da7bbc053704",
-      ".github/workflows/product-qualification.yml": "d03f360f3f770a6c291cb99a825c7f0324d1e5898d60957228144d612e562a24",
+      ".github/workflows/product-qualification.yml": "7bf52d6849c8ed4337d4f960b5ae43873efc0c087cd3e56736f50d2ad52a16af",
       ".github/workflows/streaming-evidence.yml": "0a2b9e838260ceb2e80c86e2dbc61c3a91aed2fcaa44a0675959f1b065f45695",
       ".gitignore": "1e15e82f54721e1b4c4ad5be9c86d4669883425749e7e6bb0335b8cc4cf5c1fb",
       "AGENTS.md": "fab42ee644bc7acf810cf51805761a252db28ae84441ba33eba5984111ae20fa",
@@ -1811,7 +1839,7 @@
       "scripts/test_oracle.py": "c56844217739a5c34ec466d28eaa96163beacce78655dd7e7429411a1f84d41f",
       "scripts/test_package_contract.py": "0b69ed2a3755b1c2a0b1b7cec637f764bf1262f14a5af82aa9bf7efa970168e0",
       "scripts/test_semantic_tools.py": "1101a45352051c4dff98dd487c6f5d9b20c257badd8cacbec2b91049c38992e0",
-      "scripts/test_validation_frontier.py": "d59546b1be1eb6395221f23d1195e152d5989f80e94b87c11c16cbce761fe8b8",
+      "scripts/test_validation_frontier.py": "ab298f8a08e486d09210105e33e55e660ebf3c2ba98bb1819cdb4d67172608a9",
       "scripts/update_test_manifest.py": "a999d857f961f2b13f744c8b6868accb6c0a474e423e10e055434028bf450701",
       "scripts/validate.py": "c72306e976d463904858b450bfe24df5b0221f49337694323804b9776d8e78f6",
       "scripts/validate_followup.py": "94228d6adb6b5aa46e7dce39b53a89ac179b8476c27d4585305f4e83149ac0d6",
@@ -1956,7 +1984,7 @@
     "source_unchanged": true,
     "status": "PASS",
     "sustained_fuzz_campaign": "NOT_RUN",
-    "utc": "2026-10-03T15:14:38.520817+00:00"
+    "utc": "2026-10-03T15:27:59.156170+00:00"
   },
   "pull_request": "https://github.com/btothefifth/rust-pcap-analyzer/pull/1",
   "qualification_limits": {
@@ -1973,7 +2001,7 @@
   "scope": "LOCAL_OFFLINE_EXECUTED_FRONTIER_AND_INDEPENDENT_SOURCE_REVIEW",
   "source_manifest": {
     "files": {
-      ".github/workflows/product-qualification.yml": "d03f360f3f770a6c291cb99a825c7f0324d1e5898d60957228144d612e562a24",
+      ".github/workflows/product-qualification.yml": "7bf52d6849c8ed4337d4f960b5ae43873efc0c087cd3e56736f50d2ad52a16af",
       ".gitignore": "1e15e82f54721e1b4c4ad5be9c86d4669883425749e7e6bb0335b8cc4cf5c1fb",
       "README.md": "9f7e903300ccd561899cde72e559fb7795b67f69388cdf1d1aef288f5bd1d212",
       "docs/implementation/CURRENT.md": "f5ce8854b24d835d8f55f8995a859d5d27fc565ee4c80cda57d83218365f8e68",
@@ -2037,7 +2065,7 @@
       "scripts/package.py": "68d1b11fcc0921d9b46a2e43a482d9fa8287d207147f5cd34d34889bfe0f9107",
       "scripts/requirements-qualification.txt": "7d22bb00deea3cc340ac5609c2097d7b570d0b36b3f3769b01f54644c557cd80",
       "scripts/test_package_contract.py": "0b69ed2a3755b1c2a0b1b7cec637f764bf1262f14a5af82aa9bf7efa970168e0",
-      "scripts/test_validation_frontier.py": "d59546b1be1eb6395221f23d1195e152d5989f80e94b87c11c16cbce761fe8b8",
+      "scripts/test_validation_frontier.py": "ab298f8a08e486d09210105e33e55e660ebf3c2ba98bb1819cdb4d67172608a9",
       "scripts/validate.py": "c72306e976d463904858b450bfe24df5b0221f49337694323804b9776d8e78f6",
       "scripts/validate_followup.py": "94228d6adb6b5aa46e7dce39b53a89ac179b8476c27d4585305f4e83149ac0d6",
       "scripts/validate_product.py": "f828b3aa4e31afdf6b2ec0de38ab2982dd90f733326eb54ce083adbcf7ed3e2d",
@@ -2050,7 +2078,7 @@
       "tools/tests/test_workspace_budget.py": "c6d8cbe18be6259aa90ec868c9ef2a8aa749e7e43e8621fd8ad78f0d0a99b68c"
     },
     "schema": "pcap-evidence.integration-candidate.v1",
-    "source_manifest_sha256": "f2f482757002e96ea07b30ca97c8db769bcdbc515f356c94172377d8e1575809"
+    "source_manifest_sha256": "04eb6fac183feac74b2a79f2848333aa3dd367beaa19dd7b52ad4d1d19c7ad6f"
   },
   "status": "PASS",
   "superseded_execution": {
@@ -2066,7 +2094,22 @@
       "ordered_root": "13 checks PASS; aggregate FAIL because source changed during narrow repairs",
       "product_frontier": "46 PASS, 2 FAIL (test-only Clippy lints)",
       "replacement_authority": "final frozen-source receipts above and current PR head GitHub Actions"
+    },
+    "qualification_repair_checkpoint": {
+      "commit": "7c53e45789fcc7c79c296cf79777060c4b289386",
+      "hosted_product_result": "FAIL_BEFORE_JOBS",
+      "hosted_product_run": 37132964599,
+      "local_receipt_sha256": "dbe295697368e03f21bfc2576713680450dc45264d7547c4b52a02a5691a7f93",
+      "native_and_streaming_results": "PASS",
+      "native_and_streaming_runs": [
+        37132967013,
+        37132966991,
+        37132965198,
+        37132965232
+      ],
+      "reason": "YAML plain command carrier contained colon followed by space",
+      "replacement_authority": "new same-generation local receipts and current PR head hosted results"
     }
   },
-  "utc": "2026-10-03T15:16:55.634789+00:00"
+  "utc": "2026-10-03T15:29:39.539909+00:00"
 }

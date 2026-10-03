@@ -57,7 +57,14 @@ class ValidationFrontier(unittest.TestCase):
         self.assertIn('ubuntu-22.04', text)
         self.assertIn('python scripts/validate_product.py', text)
         self.assertIn('CARGO_TARGET_DIR:', text)
-        self.assertIn('python -m pip install --only-binary=:all: -r scripts/requirements-qualification.txt',text)
+        # The colon+space in --only-binary=:all: cannot be a plain YAML scalar.
+        # Keep this exact shell command in a block scalar without adding a YAML
+        # dependency to the portable test runtime. Parse the whole workflow with
+        # the integration environment's YAML parser whenever this carrier changes.
+        command = 'python -m pip install --only-binary=:all: -r scripts/requirements-qualification.txt'
+        self.assertIn('        run: |\n          '+command+'\n',text)
+        self.assertEqual(__import__('shlex').split(command),['python','-m','pip','install',
+                         '--only-binary=:all:','-r','scripts/requirements-qualification.txt'])
 
     def test_source_identity_preserves_untracked_sources_and_prunes_tooling(self):
         import tempfile

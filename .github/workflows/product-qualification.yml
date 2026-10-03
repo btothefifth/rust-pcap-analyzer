@@ -56,7 +56,8 @@ jobs:
         with:
           node-version: '22'
       - name: Explicit test-only schema oracle provisioning (before offline gates)
-        run: python -m pip install --only-binary=:all: -r scripts/requirements-qualification.txt
+        run: |
+          python -m pip install --only-binary=:all: -r scripts/requirements-qualification.txt
       - name: Explicit toolchain provisioning (not part of runtime build)
         run: rustup toolchain install 1.85.1 --profile minimal --component clippy --component rustfmt
       - name: Initialize the Windows C toolchain for linked ABI execution
