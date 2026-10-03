@@ -1,5 +1,13 @@
 # Current implementation pointer
 
+## Repository review
+
+The [2026-10-02 repository review](REPOSITORY_REVIEW_2026-10-02.md) inventories
+the published baseline, records independently checked findings and validation
+limits, and orders the next work. It also records the local project storage
+ceiling of 50 GB. This review adds no parser implementation or qualification
+claim; the controlling BGP contract and the priorities below remain in force.
+
 ## Objective and authority
 
 Continue the declared offline BGP evidence profile in
