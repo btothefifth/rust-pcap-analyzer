@@ -149,8 +149,22 @@ that all BGP sessions reset. Each valid later Peer Up can restore its own
 reported decoder context; the earlier source coverage uncertainty remains in
 the evidence history. Unknown records, opaque stats/mirroring, unsupported
 outbound streams, and unsupported Local-RIB peers do not mutate base contexts.
-The known Termination type is the narrow exception: an unsupported reason still
-prevents its old monitoring context from proving subsequent route continuity.
+Unsupported Peer Down and Termination reasons retain their opaque bytes but
+invalidate the affected monitoring continuity. A safely identified Peer Down
+gaps that peer's previously used policy streams and blocks its old OPEN context
+until a valid Peer Up. This uncertainty does not advance the generation or
+invent a valid endpoint reset or wire withdrawal.
+
+Invalidating events include a bounded `detail.affected_scopes` inventory of the
+actual session labels and generations affected at that record. Safely identified
+opaque events also retain their base session and generation. Session queries
+use the inventory when present, including an empty inventory, so the original
+record index, range and reason remain visible to affected streams without
+attaching an earlier cut to unrelated peers or policy streams first used later.
+Valid Peer Up retains its context-establishing visibility for later streams.
+Inventory element, work, retained-byte and output bounds are checked before
+allocation; aggregate event accounting and exact query output preflight still
+apply.
 
 The source-neutral imported route carrier uses `message_type = 0`; the original
 embedded UPDATE remains wire type 2 in its bound source bytes. Shared MRT/BMP

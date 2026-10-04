@@ -143,26 +143,43 @@ impl BmpReplayArchive {
         ]))
     }
 }
-fn event_matches(event: &Json, session: &str) -> bool {
-    match event {
-        Json::Object(fields) => {
-            fields
-                .iter()
-                .find(|(k, _)| *k == "session")
-                .is_some_and(|(_, v)| {
-                    if let Json::String(s) = v {
-                        s == session
-                            || session
-                                .strip_prefix(s)
-                                .is_some_and(|suffix| matches!(suffix, ":pre" | ":post"))
-                    } else {
-                        false
-                    }
-                })
-        }
-        _ => false,
+fn event_value<'a>(event: &'a Json, key: &str) -> Option<&'a Json> {
+    if let Json::Object(fields) = event {
+        fields
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value)
+    } else {
+        None
     }
 }
+fn event_matches(event: &Json, session: &str) -> bool {
+    if let Some(Json::Array(scopes)) =
+        event_value(event, "detail").and_then(|detail| event_value(detail, "affected_scopes"))
+    {
+        // An explicit inventory owns membership, including an empty inventory.
+        // A base label must not admit a policy stream first seen after this cut.
+        return scopes.iter().any(|scope| {
+            if let Some(Json::String(label)) = event_value(scope, "session") {
+                label == session
+                    || label
+                        .strip_prefix(session)
+                        .is_some_and(|suffix| matches!(suffix, ":pre" | ":post"))
+            } else {
+                false
+            }
+        });
+    }
+    if let Some(Json::String(label)) = event_value(event, "session") {
+        label == session
+            || session
+                .strip_prefix(label.as_str())
+                .is_some_and(|suffix| matches!(suffix, ":pre" | ":post"))
+    } else {
+        false
+    }
+}
+
 pub fn create(
     path: &Path,
     input: &[u8],

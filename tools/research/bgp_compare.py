@@ -352,8 +352,17 @@ def _native_observation(row):
     accepted = {"decoded_open", "decoded_update_candidate", "decoded_notification_reset",
                 "decoded_keepalive", "decoded_route_refresh"}
     disposition = "accepted" if type(status) is str and status in accepted else "rejected" if status == "rejected" else "unknown"
-    # RIB entries have normalized route evidence but no session-event status.
-    if status is None and type(observation) is dict and observation.get("message_type") == 2:
+    # The MRT stream emits RIB announcements as imported carrier type 0, with
+    # event.kind and no session parse status. Require its actual normalized
+    # route evidence; neither arbitrary imports nor wire UPDATEs imply RIB
+    # decoding. Semantic completeness remains a separate projection below.
+    routes = observation.get("routes") if type(observation) is dict else None
+    if (status is None and event.get("kind") == "rib_entry"
+            and type(observation) is dict and type(observation.get("message_type")) is int
+            and observation["message_type"] == 0 and type(routes) is list and routes
+            and all(type(route) is dict and route.get("action") == "announce"
+                    and type(route.get("prefix")) is dict and type(route.get("attributes")) is dict
+                    for route in routes)):
         disposition = "accepted"
     coverage = {group: "not_collected" for group in GROUPS}
     coverage["disposition"] = "complete" if disposition in {"accepted", "rejected"} else "partial"

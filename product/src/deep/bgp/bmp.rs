@@ -47,6 +47,7 @@ pub(crate) fn replay_record(
     let mut observations = Vec::new();
     let mut gaps = Vec::new();
     let mut details = Json::Null;
+    let mut affected = None;
     let status;
     let mut issues = Vec::new();
     let mut session_label = None;
@@ -57,6 +58,7 @@ pub(crate) fn replay_record(
             status = "reported_initiation";
         }
         BmpBody::Termination { .. } => {
+            affected = Some(affected_scopes(state.sessions.values(), limits)?);
             for (identity, session) in &mut state.sessions {
                 let peer = BmpPeer {
                     identity: identity.clone(),
@@ -81,25 +83,18 @@ pub(crate) fn replay_record(
             issues.push(*reason);
             if (*reason == "malformed_known_record" && matches!(record.message_type, 0 | 2 | 3 | 5))
                 || (record.message_type == 5 && *reason == "unsupported_termination_reason")
+                || (record.message_type == 2 && *reason == "unsupported_peer_down_reason")
             {
                 if let Some(peer) = &record.peer {
                     if let Some(session) = state.sessions.get_mut(&peer.identity) {
+                        session_label = Some(format!("bmp:{}", session.index));
+                        generation = session.decoder.generation();
+                        affected = Some(affected_scopes(std::iter::once(&*session), limits)?);
                         session.context_unresolved = true;
-                        for stream in 0..2 {
-                            if session.used_streams[stream] {
-                                gaps.push(context(
-                                    batch,
-                                    record,
-                                    peer,
-                                    session,
-                                    (stream, None),
-                                    batch.record_range(record),
-                                    limits,
-                                )?);
-                            }
-                        }
+                        gaps.extend(gap_contexts(batch, record, peer, session, limits)?);
                     }
                 } else {
+                    affected = Some(affected_scopes(state.sessions.values(), limits)?);
                     state.monitor_coverage_uncertain = true;
                     for (identity, session) in &mut state.sessions {
                         session.context_unresolved = true;
@@ -109,19 +104,7 @@ pub(crate) fn replay_record(
                             seconds: 0,
                             microseconds: 0,
                         };
-                        for stream in 0..2 {
-                            if session.used_streams[stream] {
-                                gaps.push(context(
-                                    batch,
-                                    record,
-                                    &peer,
-                                    session,
-                                    (stream, None),
-                                    batch.record_range(record),
-                                    limits,
-                                )?);
-                            }
-                        }
+                        gaps.extend(gap_contexts(batch, record, &peer, session, limits)?);
                     }
                 }
             }
@@ -242,6 +225,7 @@ pub(crate) fn replay_record(
                     }
                 }
                 BmpBody::PeerDown { reason, .. } => {
+                    affected = Some(affected_scopes(std::iter::once(&*session), limits)?);
                     observations.extend(reset(
                         batch,
                         record,
@@ -325,6 +309,10 @@ pub(crate) fn replay_record(
                                     }
                                     details = update_details(&parsed, peer, basis, message);
                                     if parsed.known_disposition == "session_reset" {
+                                        affected = Some(affected_scopes(
+                                            std::iter::once(&*session),
+                                            limits,
+                                        )?);
                                         observations.extend(reset(
                                             batch,
                                             record,
@@ -410,6 +398,39 @@ pub(crate) fn replay_record(
             }
         }
     }
+    // Gap contexts are the actual native-reducer scopes. Keep their inventory
+    // even when the typed record already carries a presentation session label.
+    if affected.is_none()
+        && (!gaps.is_empty()
+            || matches!(
+                status,
+                "quarantined_peer_up"
+                    | "quarantined_malformed_update"
+                    | "quarantined_peer_relationship"
+            ))
+    {
+        affected = Some(scope_inventory(
+            gaps.iter(),
+            |context| context.session.len(),
+            |context| {
+                Json::object([
+                    ("session", context.session.clone().into()),
+                    ("generation", context.generation.into()),
+                ])
+            },
+            limits,
+        )?);
+    }
+    if let Some(scopes) = affected {
+        if let Json::Object(fields) = &mut details {
+            fields
+                .try_reserve(1)
+                .map_err(|_| Error::limit("bmp_affected_scopes"))?;
+            fields.push(("affected_scopes", scopes));
+        } else {
+            details = Json::object([("affected_scopes", scopes)]);
+        }
+    }
     let event = Json::object([
         ("schema", "pcap-evidence.bgp.bmp-event.v1".into()),
         ("source_id", batch.source.source_id.clone().into()),
@@ -441,6 +462,62 @@ pub(crate) fn replay_record(
         observations,
         gaps,
     })
+}
+// Preflight the complete inventory before allocating it. Its serialized bytes
+// are also charged with the containing event by the store's retained/work gates.
+fn scope_inventory<T>(
+    scopes: impl Iterator<Item = T> + Clone,
+    label_length: impl Fn(&T) -> usize,
+    project: impl Fn(T) -> Json,
+    limits: &Limits,
+) -> Result<Json> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for scope in scopes.clone() {
+        count = count
+            .checked_add(1)
+            .filter(|n| *n <= limits.elements)
+            .ok_or_else(|| Error::limit("bmp_affected_scopes"))?;
+        bytes = label_length(&scope)
+            .checked_mul(6)
+            .and_then(|escaped| bytes.checked_add(escaped))
+            .and_then(|n| n.checked_add(128))
+            .filter(|n| {
+                *n <= limits.retained_bytes && *n <= limits.output_bytes && *n <= limits.work
+            })
+            .ok_or_else(|| Error::limit("bmp_affected_scopes"))?;
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| Error::limit("bmp_affected_scopes"))?;
+    values.extend(scopes.map(project));
+    Ok(Json::Array(values))
+}
+fn affected_scopes<'a>(
+    sessions: impl Iterator<Item = &'a PeerState> + Clone,
+    limits: &Limits,
+) -> Result<Json> {
+    let scopes = sessions.flat_map(|session| {
+        (0..2)
+            .filter(move |stream| session.used_streams[*stream])
+            .map(move |stream| (session, stream))
+    });
+    scope_inventory(
+        scopes,
+        |(session, stream)| {
+            // "bmp:" + decimal index + ":pre"/":post", without allocation.
+            5 + session.index.checked_ilog10().unwrap_or(0) as usize
+                + if *stream == 0 { 4 } else { 5 }
+        },
+        |(session, stream)| {
+            Json::object([
+                ("session", stream_id(session, stream).into()),
+                ("generation", session.decoder.generation().into()),
+            ])
+        },
+        limits,
+    )
 }
 fn stream_id(session: &PeerState, stream: usize) -> String {
     format!(
@@ -610,4 +687,116 @@ fn update_details(parsed: &ParsedUpdate, peer: &BmpPeer, basis: &str, range: &So
         ),
         ("message_range", bgp_bmp::range_json(range)),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bgp_bmp::{BmpLimits, BmpSource};
+
+    #[test]
+    fn replay_scope_inventory_preflights_exact_and_one_below_limits() {
+        fn frame(kind: u8, body: &[u8]) -> Vec<u8> {
+            let mut bytes = vec![3];
+            bytes.extend_from_slice(&((body.len() + 6) as u32).to_be_bytes());
+            bytes.push(kind);
+            bytes.extend_from_slice(body);
+            bytes
+        }
+        fn open(asn: u16, id: u8) -> Vec<u8> {
+            let mut bytes = vec![255; 16];
+            bytes.extend_from_slice(&[0, 29, 1, 4]);
+            bytes.extend_from_slice(&asn.to_be_bytes());
+            bytes.extend_from_slice(&[0, 90, 10, 0, 0, id, 0]);
+            bytes
+        }
+        fn peer(id: u8, flags: u8) -> Vec<u8> {
+            let mut bytes = vec![0, flags];
+            bytes.extend_from_slice(&[0; 20]);
+            bytes.extend_from_slice(&[192, 0, 2, id]);
+            bytes.extend_from_slice(&65001u32.to_be_bytes());
+            bytes.extend_from_slice(&[10, 0, 0, id]);
+            bytes.extend_from_slice(&[0; 8]);
+            assert_eq!(bytes.len(), 42);
+            bytes
+        }
+        let mut bytes = Vec::new();
+        for id in 1..=16 {
+            let mut body = peer(id, 0);
+            body.extend_from_slice(&[0; 12]);
+            body.extend_from_slice(&[192, 0, 2, 254, 0, 179, 0, 179]);
+            body.extend_from_slice(&open(65000, 254));
+            body.extend_from_slice(&open(65001, id));
+            bytes.extend_from_slice(&frame(3, &body));
+            for flags in [0, 0x40] {
+                let mut body = peer(id, flags);
+                body.extend_from_slice(&[255; 16]);
+                body.extend_from_slice(&[0, 23, 2, 0, 0, 0, 0]);
+                bytes.extend_from_slice(&frame(0, &body));
+            }
+        }
+        // Complete common framing, no trustworthy per-peer identity.
+        bytes.extend_from_slice(&frame(3, &[0; 4]));
+        let batch = BmpBatch::parse(
+            &bytes,
+            BmpSource {
+                source_id: "a".into(),
+                checkpoint_id: "b".into(),
+            },
+            &BmpLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(batch.records.len(), 49);
+        assert!(bytes.len() < 8192);
+        // Independent decimal-label census: ten one-digit indices contribute
+        // 370 bytes each, six two-digit indices contribute 382, at six bytes
+        // per escaped label byte plus 128 fixed bytes per stream scope.
+        let inventory_bytes = 5992;
+        for dimension in ["elements", "work", "retained", "output"] {
+            for exact in [true, false] {
+                let mut state = ReplayState::new(None);
+                for index in 0..48 {
+                    replay_record(&batch, index, &Limits::default(), 16, &mut state).unwrap();
+                }
+                assert_eq!(state.sessions.len(), 16);
+                assert!(state
+                    .sessions
+                    .values()
+                    .all(|session| session.used_streams == [true, true]));
+                let mut limits = Limits::default();
+                let cap = if dimension == "elements" {
+                    32
+                } else {
+                    inventory_bytes
+                };
+                let cap = if exact { cap } else { cap - 1 };
+                match dimension {
+                    "elements" => limits.elements = cap,
+                    "work" => limits.work = cap,
+                    "retained" => limits.retained_bytes = cap,
+                    "output" => limits.output_bytes = cap,
+                    _ => unreachable!(),
+                }
+                let result = replay_record(&batch, 48, &limits, 16, &mut state);
+                if exact {
+                    let record = result.unwrap();
+                    assert_eq!(record.gaps.len(), 32);
+                    assert!(state.monitor_coverage_uncertain);
+                    assert!(state
+                        .sessions
+                        .values()
+                        .all(|session| session.context_unresolved));
+                } else {
+                    let error = result.err().unwrap();
+                    assert_eq!(error.code, ErrorCode::LimitExceeded);
+                    assert_eq!(error.field, "bmp_affected_scopes");
+                    assert!(!state.monitor_coverage_uncertain);
+                    assert!(state.sessions.values().all(|session| session.reported_up
+                        && !session.context_unresolved
+                        && session.decoder.generation() == 0
+                        && session.used_streams == [true, true]));
+                }
+            }
+        }
+    }
 }

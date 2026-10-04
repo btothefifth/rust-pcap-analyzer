@@ -767,7 +767,6 @@ fn unsupported_extensions_do_not_enter_candidate_state() {
         loc,
         unknownpeer,
         message(6, &[1]),
-        down(1, 6),
         message(252, &[7]),
         rm(1, 0, 1, true),
     ]);
@@ -1544,4 +1543,433 @@ fn final_combined_retention_exact_floor_and_one_below_are_atomic() {
     )
     .is_err());
     assert!(!work_below.exists());
+}
+
+#[test]
+fn unknown_peer_down_gaps_matching_streams_until_fresh_peer_up() {
+    for continuation in [vec![], rm(1, 0, 8, false), rm(1, 0x40, 8, true)] {
+        let unknown = down(1, 255);
+        assert_eq!(unknown.len(), 49);
+        let bytes = append(&[
+            up(1),
+            up(2),
+            rm(1, 0, 10, true),
+            rm(1, 0x40, 10, true),
+            rm(2, 0, 10, true),
+            unknown.clone(),
+            continuation,
+        ]);
+        let (scratch, archive) = store(&bytes);
+        assert!(matches!(
+            archive.batch().records[5].body,
+            BmpBody::Opaque {
+                reason: "unsupported_peer_down_reason",
+                ..
+            }
+        ));
+        assert_eq!(
+            archive
+                .batch()
+                .range_bytes(&archive.batch().record_range(&archive.batch().records[5]))
+                .unwrap(),
+            unknown
+        );
+        assert_eq!(archive.state.observations().len(), 3);
+        for entry in archive.bmp_rib.entries().values() {
+            assert_eq!(
+                entry.status,
+                if entry.key.scope.session.starts_with("bmp:0:") {
+                    RouteStatus::Unresolved
+                } else {
+                    RouteStatus::Active
+                }
+            );
+        }
+        assert_eq!(archive.bmp_rib.gaps().len(), 2);
+        assert!(archive.bmp_rib.events().iter().all(|event| !matches!(
+            event.kind,
+            pcap_evidence_product::deep::bgp_rib::RibEventKind::Reset { .. }
+        )));
+        assert_fresh_bmp_replay(&scratch, &archive);
+        let verified = VerifiedStore::load(
+            &scratch.file("bgp.bmp"),
+            1_000_000,
+            MrtLimits::default(),
+            Limits::default(),
+            MrtReplayOptions::default(),
+        )
+        .unwrap();
+        for (session, active) in [("bmp:0:pre", 0), ("bmp:0:post", 0), ("bmp:1:pre", 1)] {
+            let result = verified
+                .query(
+                    &Query {
+                        session: Some(session.into()),
+                        status: Some("active".into()),
+                        ..Query::default()
+                    },
+                    &Limits::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                result.matches("\"native_current\":true").count(),
+                active,
+                "{result}"
+            );
+        }
+        let recovered = append(&[bytes, up(1), rm(1, 0, 7, true), rm(1, 0x40, 7, true)]);
+        let (scratch, archive) = store(&recovered);
+        assert_eq!(
+            archive
+                .bmp_rib
+                .entries()
+                .values()
+                .filter(|entry| entry.status == RouteStatus::Active)
+                .count(),
+            3
+        );
+        assert!(archive
+            .bmp_rib
+            .entries()
+            .values()
+            .filter(|entry| entry.status == RouteStatus::Active
+                && entry.key.scope.session.starts_with("bmp:0:"))
+            .all(|entry| entry.key.scope.generation == 1));
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+}
+
+fn assert_session_retains_bmp_event(
+    archive: &bgp_bmp_store::BmpReplayArchive,
+    session: &str,
+    index: usize,
+    expected: bool,
+) {
+    let query = archive.session_query_json(session).unwrap();
+    let Json::Array(events) = field(&query, "bmp_events") else {
+        panic!("events array")
+    };
+    assert_eq!(
+        events
+            .iter()
+            .any(|event| event == &archive.bmp_events[index]),
+        expected,
+        "{session}: {}",
+        query.encode()
+    );
+    let text = query.encode();
+    assert_eq!(
+        archive
+            .encode_session_query_bounded(session, text.len())
+            .unwrap(),
+        text
+    );
+    assert!(archive
+        .encode_session_query_bounded(session, text.len() - 1)
+        .is_err());
+    let mut output = Vec::new();
+    archive
+        .write_session_query_bounded_line(session, &mut output, text.len() + 1)
+        .unwrap();
+    assert_eq!(output, format!("{text}\n").as_bytes());
+    output.clear();
+    assert!(archive
+        .write_session_query_bounded_line(session, &mut output, text.len())
+        .is_err());
+    assert!(output.is_empty());
+}
+
+#[test]
+fn malformed_peer_and_monitor_events_retain_actual_affected_session_queries() {
+    let mut malformed_up = up(1);
+    malformed_up[68] = 0;
+    let malformed_rm = message(0, &peer(1, 0, 10));
+    for malformed in [
+        malformed_up,
+        malformed_rm,
+        message(5, &[]),
+        message(3, &[0; 4]),
+        message(5, &[0, 1, 0, 2, 0, 5]),
+    ] {
+        let sourcewide = malformed[5] == 5 || malformed.len() < 48;
+        let bytes = append(&[
+            up(1),
+            up(2),
+            up(3),
+            rm(1, 0, 10, true),
+            rm(1, 0x40, 10, true),
+            rm(2, 0, 10, true),
+            malformed.clone(),
+        ]);
+        let (scratch, archive) = store(&bytes);
+        let event = &archive.bmp_events[6];
+        assert_eq!(field(event, "record_index"), &Json::Number(6));
+        let range = archive.batch().record_range(&archive.batch().records[6]);
+        assert_eq!(
+            field(event, "record_range"),
+            &Json::object([
+                ("start", range.start.into()),
+                ("end", range.end.into()),
+                ("sha256", range.sha256.unwrap().into()),
+            ])
+        );
+        assert_eq!(
+            field(event, "issues"),
+            &Json::array([if malformed[5] == 5 && malformed.len() > 6 {
+                "unsupported_termination_reason".into()
+            } else {
+                "malformed_known_record".into()
+            }])
+        );
+        for (session, expected) in [
+            ("bmp:0:pre", true),
+            ("bmp:0:post", true),
+            ("bmp:1:pre", sourcewide),
+            ("bmp:1:post", false),
+            ("bmp:2:pre", false),
+            ("bmp:99:pre", false),
+        ] {
+            assert_session_retains_bmp_event(&archive, session, 6, expected);
+        }
+        if sourcewide {
+            assert_eq!(field(event, "session"), &Json::Null);
+            assert_eq!(
+                field(field(event, "detail"), "affected_scopes"),
+                &Json::array([
+                    Json::object([("session", "bmp:0:pre".into()), ("generation", 0u64.into())]),
+                    Json::object([
+                        ("session", "bmp:0:post".into()),
+                        ("generation", 0u64.into())
+                    ]),
+                    Json::object([("session", "bmp:1:pre".into()), ("generation", 0u64.into())]),
+                ])
+            );
+        } else {
+            assert_eq!(field(event, "session"), &Json::String("bmp:0".into()));
+            assert_eq!(field(event, "generation"), &Json::Number(0));
+        }
+        assert_fresh_bmp_replay(&scratch, &archive);
+        let output = scratch.file("session-query.json");
+        let result = Command::new(env!("CARGO_BIN_EXE_pcap-depth"))
+            .args(["bgp", "query"])
+            .arg(scratch.file("bgp.bmp"))
+            .args(["--session", "bmp:0:pre", "--output"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            format!(
+                "{}\n",
+                archive.session_query_json("bmp:0:pre").unwrap().encode()
+            )
+        );
+    }
+}
+
+#[test]
+fn lifecycle_event_scope_inventory_excludes_untouched_and_future_policy_streams() {
+    for boundary in [
+        down(1, 255),
+        message(0, &peer(1, 0, 10)),
+        message(5, &[]),
+        message(5, &[0, 1, 0, 2, 0, 1]),
+    ] {
+        let bytes = append(&[
+            up(1),
+            up(2),
+            rm(1, 0, 10, true),
+            boundary,
+            up(1),
+            rm(1, 0x40, 9, true),
+            up(2),
+            rm(2, 0, 9, true),
+        ]);
+        let (scratch, archive) = store(&bytes);
+        assert_session_retains_bmp_event(&archive, "bmp:0:pre", 3, true);
+        assert_session_retains_bmp_event(&archive, "bmp:0:post", 3, false);
+        assert_session_retains_bmp_event(&archive, "bmp:1:pre", 3, false);
+        assert_eq!(
+            field(field(&archive.bmp_events[3], "detail"), "affected_scopes"),
+            &Json::array([Json::object([
+                ("session", "bmp:0:pre".into()),
+                ("generation", 0u64.into())
+            ])])
+        );
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+}
+
+#[test]
+fn harmless_opaque_records_preserve_peer_continuity_and_future_admission() {
+    let mut local_rib = rm(1, 0, 9, false);
+    local_rib[6] = 3;
+    for opaque in [
+        message(1, &peer(1, 0, 9)),
+        message(6, &peer(1, 0, 9)),
+        local_rib,
+        rm(1, 0x10, 9, false),
+        message(251, &[8, 9]),
+    ] {
+        let (scratch, archive) = store(&append(&[
+            up(1),
+            rm(1, 0, 10, true),
+            opaque,
+            rm(1, 0x40, 8, true),
+        ]));
+        assert!(matches!(
+            archive.batch().records[2].body,
+            BmpBody::Opaque { .. }
+        ));
+        assert!(archive.bmp_rib.gaps().is_empty());
+        assert_eq!(archive.state.observations().len(), 2);
+        assert_eq!(archive.bmp_rib.entries().len(), 2);
+        assert!(archive
+            .bmp_rib
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Active && entry.key.scope.generation == 0));
+        for session in ["bmp:0:pre", "bmp:0:post"] {
+            assert_session_retains_bmp_event(&archive, session, 2, false);
+        }
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+}
+
+#[test]
+fn scoped_opaque_event_retains_nonzero_generation_and_unmatched_peer_isolation() {
+    let (scratch, archive) = store(&append(&[
+        up(1),
+        rm(1, 0, 10, true),
+        up(1),
+        rm(1, 0, 9, true),
+        down(2, 255),
+        down(1, 255),
+        rm(1, 0, 8, false),
+    ]));
+    assert_eq!(
+        field(&archive.bmp_events[5], "session"),
+        &Json::String("bmp:0".into())
+    );
+    assert_eq!(
+        field(&archive.bmp_events[5], "generation"),
+        &Json::Number(1)
+    );
+    assert_eq!(
+        field(field(&archive.bmp_events[5], "detail"), "affected_scopes"),
+        &Json::array([Json::object([
+            ("session", "bmp:0:pre".into()),
+            ("generation", 1u64.into())
+        ])])
+    );
+    assert_eq!(archive.bmp_rib.gaps().len(), 1);
+    assert_session_retains_bmp_event(&archive, "bmp:0:pre", 4, false);
+    assert_session_retains_bmp_event(&archive, "bmp:0:pre", 5, true);
+    assert_session_retains_bmp_event(&archive, "bmp:0:post", 5, false);
+    assert_eq!(
+        field(archive.bmp_events.last().unwrap(), "status"),
+        &Json::String("quarantined_route_monitoring".into())
+    );
+    assert_fresh_bmp_replay(&scratch, &archive);
+}
+
+#[test]
+fn fresh_peer_up_open_context_remains_visible_in_later_policy_stream() {
+    let (scratch, archive) = store(&append(&[
+        up(1),
+        rm(1, 0, 10, true),
+        up(1),
+        rm(1, 0x40, 9, true),
+    ]));
+    assert_session_retains_bmp_event(&archive, "bmp:0:pre", 2, true);
+    assert_session_retains_bmp_event(&archive, "bmp:0:post", 2, true);
+    assert_eq!(
+        field(field(&archive.bmp_events[2], "detail"), "context_basis"),
+        &Json::String("bmp_reported_peer_up_opens".into())
+    );
+    assert_fresh_bmp_replay(&scratch, &archive);
+}
+
+#[test]
+fn empty_context_gap_inventory_does_not_claim_future_streams() {
+    let mut typed_malformed_up = up(1);
+    // Framing is complete, but the OPEN version is invalid. This reaches the
+    // typed PeerUp replay parser rather than outer structural quarantine.
+    typed_malformed_up[87] = 3;
+    for malformed in [typed_malformed_up, message(0, &peer(1, 0, 10))] {
+        let typed_peer_up = malformed[5] == 3;
+        let (scratch, archive) = store(&append(&[
+            up(1),
+            malformed,
+            up(1),
+            rm(1, 0, 9, true),
+            rm(1, 0x40, 9, true),
+        ]));
+        if typed_peer_up {
+            assert!(matches!(
+                archive.batch().records[1].body,
+                BmpBody::PeerUp { .. }
+            ));
+            assert_eq!(
+                field(&archive.bmp_events[1], "status"),
+                &Json::String("quarantined_peer_up".into())
+            );
+        }
+        assert!(archive.bmp_rib.gaps().is_empty());
+        assert_eq!(
+            field(field(&archive.bmp_events[1], "detail"), "affected_scopes"),
+            &Json::array([])
+        );
+        assert_session_retains_bmp_event(&archive, "bmp:0:pre", 1, false);
+        assert_session_retains_bmp_event(&archive, "bmp:0:post", 1, false);
+        assert_eq!(
+            archive
+                .bmp_rib
+                .entries()
+                .values()
+                .filter(|entry| entry.status == RouteStatus::Active)
+                .count(),
+            2
+        );
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+}
+
+#[test]
+fn unknown_peer_down_reason_six_blocks_first_update_until_fresh_peer_up() {
+    // An unsupported lifecycle reason cuts the old OPEN context even when no
+    // native stream was previously observed; it remains opaque raw evidence.
+    let bytes = append(&[up(1), down(1, 6), rm(1, 0, 9, true)]);
+    let (scratch, archive) = store(&bytes);
+    assert!(matches!(
+        archive.batch().records[1].body,
+        BmpBody::Opaque {
+            reason: "unsupported_peer_down_reason",
+            ..
+        }
+    ));
+    assert!(archive.state.observations().is_empty());
+    assert!(archive.bmp_rib.entries().is_empty());
+    assert!(archive.bmp_rib.gaps().is_empty());
+    assert_eq!(
+        field(field(&archive.bmp_events[1], "detail"), "affected_scopes"),
+        &Json::array([])
+    );
+    assert_eq!(
+        field(&archive.bmp_events[2], "status"),
+        &Json::String("quarantined_route_monitoring".into())
+    );
+    assert_fresh_bmp_replay(&scratch, &archive);
+    let (scratch, recovered) = store(&append(&[bytes, up(1), rm(1, 0, 8, true)]));
+    assert_eq!(recovered.bmp_rib.entries().len(), 1);
+    assert!(recovered
+        .bmp_rib
+        .entries()
+        .values()
+        .all(|entry| entry.status == RouteStatus::Active && entry.key.scope.generation == 1));
+    assert_fresh_bmp_replay(&scratch, &recovered);
 }

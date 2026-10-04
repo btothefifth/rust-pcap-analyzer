@@ -96,6 +96,15 @@ Normalized route attributes and semantic identities remain incomplete when the
 native identity is missing, unresolved or incomplete. Separately observed raw
 attribute evidence can still be compared without making those semantics complete.
 
+The native converter recognizes an otherwise status-free RIB candidate only
+when the chronology event has `kind: "rib_entry"`, the normalized observation
+uses the exact integer imported carrier `message_type: 0`, and it contains
+normalized announcement, prefix and attribute evidence. An unsupported or
+opaque record, unrelated carrier-zero observation or wire-type-2 fixture cannot
+establish this disposition. Here `accepted` means decoded candidate evidence;
+incomplete semantic identity remains incomplete and comparison cannot admit
+the route into state.
+
 `pcap-evidence.bgp.differential.v1` compares only matching source identities and
 normalization profiles. Missing coverage is `not_comparable`; rejected versus
 accepted evidence is a disagreement. Supported matching fields are agreement

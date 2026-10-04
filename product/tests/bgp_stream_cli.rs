@@ -184,11 +184,15 @@ fn attributes(asn: u32, set: bool) -> Vec<u8> {
 
 fn rib(seconds: u32, originated: u32, sequence: u32, asn: u32, set: bool) -> Vec<u8> {
     let attrs = attributes(asn, set);
+    rib_with_attributes(seconds, originated, sequence, &attrs)
+}
+
+fn rib_with_attributes(seconds: u32, originated: u32, sequence: u32, attrs: &[u8]) -> Vec<u8> {
     let mut body = sequence.to_be_bytes().to_vec();
     body.extend_from_slice(&[24, 198, 51, 100, 0, 1, 0, 0]);
     body.extend_from_slice(&originated.to_be_bytes());
     body.extend_from_slice(&u16::try_from(attrs.len()).unwrap().to_be_bytes());
-    body.extend(attrs);
+    body.extend_from_slice(attrs);
     record(seconds, 13, 2, &body)
 }
 
@@ -311,6 +315,87 @@ def validate_source(rows,input_name,source_id,checkpoint):
         assert int(row['mrt_record_time']['time_ns'])==seconds*1000000000, row
     assert [int(row['record_ordinal']) for row in rows]==sorted(int(row['record_ordinal']) for row in rows), rows
 "#;
+
+#[test]
+fn ordinary_rib_chronology_joins_native_comparison_without_admitting_incomplete_identity() {
+    let root = Scratch::new();
+    let mut partial = attributes(65551, false);
+    // A supported partial COMMUNITY is decoded but cannot establish identity.
+    partial.extend_from_slice(&[0xe0, 8, 4, 0, 0, 0, 1]);
+    let mut unsupported = attributes(65551, false);
+    unsupported.extend_from_slice(&[0xc0, 99, 1, 0x42]);
+    let bytes = [
+        peer_table(10, 9, 65551),
+        rib(20, 19, 1, 65551, false),
+        rib_with_attributes(21, 19, 2, &partial),
+        rib_with_attributes(22, 19, 3, &unsupported),
+        record(23, 64512, 99, &[0x42, 0x43]),
+    ]
+    .concat();
+    let store = import_source(&root, "source", &bytes, "collector-a");
+    success(cli(export_args(
+        "chronology",
+        &[&store],
+        &root.path("chronology"),
+    )));
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let interpreted = Command::new(&python)
+        .current_dir(repository)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .args(["-m", "tools.research.bgp_compare", "native"])
+        .arg(root.path("chronology/evidence.ndjson"))
+        .output()
+        .unwrap();
+    fs::write(root.path("interpretation.json"), &interpreted.stdout).unwrap();
+    success(interpreted);
+    let compared = Command::new(&python)
+        .current_dir(repository)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .args(["-m", "tools.research.bgp_compare", "compare"])
+        .arg(root.path("interpretation.json"))
+        .arg(root.path("interpretation.json"))
+        .output()
+        .unwrap();
+    fs::write(root.path("comparison.json"), &compared.stdout).unwrap();
+    success(compared);
+    check_json(
+        &root,
+        r#"
+rows,manifest,_=validate_export(pathlib.Path('chronology'))
+validate_source(rows,'source.mrt','collector-a','source')
+document=load('interpretation.json'); comparison=load('comparison.json')
+assert document['source']['sha256']==hashlib.sha256((root/'source.mrt').read_bytes()).hexdigest(), document
+assert len(rows)==len(document['observations'])==5, document
+for ordinal, expected_kind, expected_disposition in [(0,'peer_index','unknown'),(1,'rib_entry','accepted'),(2,'rib_entry','accepted'),(3,'unsupported_rib_entry','unknown'),(4,'opaque_record','unknown')]:
+    row=next(row for row in rows if int(row['record_ordinal'])==ordinal)
+    observation=next(item for item in document['observations'] if item['record_offset']==row['record_offset'])
+    assert row['event']['kind']==expected_kind, row
+    assert observation['disposition']==expected_disposition, observation
+    if ordinal in (1,2):
+        assert row['event'].get('parse_status') is None and row['observation']['message_type']==0, row
+        assert observation['coverage']['disposition']=='complete', observation
+        completeness='complete' if ordinal==1 else 'incomplete'
+        assert row['observation']['routes'][0]['semantic_identity']['completeness']==completeness, row
+        for group in ('nlri','attributes'):
+            expected_status='observed' if ordinal==1 else 'incomplete'
+            assert all(field['status']==expected_status for field in observation['fields'][group].values()), observation
+            votes=[item for item in comparison['rows'] if item['record_offset']==row['record_offset'] and item['group']==group]
+            assert votes and all(item['result']==('agreement' if ordinal==1 else 'not_comparable') for item in votes), votes
+    else:
+        assert row['observation'] is None, row
+        assert observation['coverage']['disposition']=='partial', observation
+assert comparison['state_admission'] is False and comparison['semantic_correctness_proven'] is False, comparison
+assert int(manifest['coverage']['observations'])==2, manifest
+"#,
+    );
+}
 
 #[test]
 fn ordinary_stream_import_and_fresh_chronology_preserve_reverse_clock_source_order() {

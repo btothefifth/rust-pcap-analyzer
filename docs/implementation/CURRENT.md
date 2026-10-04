@@ -63,16 +63,19 @@ streaming contracts, product qualification and manual hardening retain their
 Linux checks; Windows and macOS jobs are retired. Historical platform receipts
 remain tied to their recorded revisions and do not imply continuing non-Linux CI.
 
-The latest stream/evidence comparison feedback repairs are recorded in the
-[round-three feedback receipt](../../evidence/pr-feedback-round3-validation.json).
-It binds typed exact/all-source clock selection, preservation of incomplete
-semantic identities, exact byte-extent comparison prerequisites, and bounded
-source-local conversion after complete native-export verification. A pending
+The latest BMP continuity/query and native RIB-disposition feedback repairs
+are recorded in the
+[round-four feedback receipt](../../evidence/pr-feedback-round4-validation.json).
+It binds unsupported Peer Down uncertainty, actual affected-session event
+attribution, imported RIB candidate disposition and Linux-only qualification
+wording. The [round-three receipt](../../evidence/pr-feedback-round3-validation.json)
+retains its named source generation for typed clock selection, incomplete
+semantic identities, exact byte extents and verified source-local conversion. A pending
 or absent receipt establishes no pass. The preceding
 [stream receipt](../../evidence/bgp-stream-validation.json) remains bound to its
 original generation; its hosted results do not qualify later changes.
 
-PR review repairs are governed by the
+Earlier PR review repairs are recorded in the
 [O14-F2 feedback receipt](../../evidence/pr-feedback-round2-validation.json) and the
 repair contracts in the [objective ledger](OBJECTIVES_1_4.md). The
 [O14-F1 receipt](../../evidence/pr-feedback-validation.json) describes the preceding
@@ -131,7 +134,7 @@ is not a production-readiness claim.
 ## Remaining work and priority
 
 1. Close the assembled-source PR feedback test and integration gates with the exact
-   source inventory and outcomes in the [round-two feedback receipt](../../evidence/pr-feedback-round2-validation.json).
+   source inventory and outcomes in the [round-four feedback receipt](../../evidence/pr-feedback-round4-validation.json).
    A pending or partial receipt does not establish a final validation pass.
 2. Complete independent RFC/IANA review and broader executable coverage for
    every declared BGP profile row. Registration and typed parsing do not by
@@ -139,8 +142,10 @@ is not a production-readiness claim.
 3. Retain sustained stateful fuzzing and lawful capture/collector disagreement
    evidence, adjudicated from original bytes and primary specifications.
 4. Measure representative scale, memory, and throughput; obtain fresh exact-head
-   Windows/Linux CI (and macOS where claimed), plus security review, before
-   raising the corresponding qualification claims.
+   Linux repository CI and security review before raising the corresponding
+   qualification claims. Any Windows or macOS claim requires separately retained
+   manual or external platform qualification; those platforms are retired from
+   repository CI.
 5. Continue the separate DNP3 non-secure profile toward its documented
    completion criteria; secure authentication, device truth, and unsupported
    vendor semantics remain outside current proof.

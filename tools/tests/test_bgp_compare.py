@@ -48,8 +48,8 @@ def native_export():
            "record_ordinal": "0", "record_offset": "0", "record_bytes": "16", "record_type": 13, "subtype": 2, "record_sha256": source_hash,
            "entry_index": "0", "mrt_record_time": {"seconds": "1", "microseconds": None, "validity": "seconds", "precision": "seconds", "time_ns": "1000000000"},
            "rib_originated_time_ns": None, "observation_time_ns": None,
-           "event": {"event_kind": "rib_entry", "parse_status": None, "issues": []},
-           "observation": {"message_type": 2, "message_detail": None, "issues": [], "routes": [
+           "event": {"kind": "rib_entry", "issues": []},
+           "observation": {"message_type": 0, "message_detail": None, "issues": [], "routes": [
                {"action": "announce", "prefix": {"afi": 1, "safi": 1, "length": 24, "bytes": "c00002"},
                 "attributes": {"origin": 0}, "imported_attribute_occurrences": [
                     {"type": 8, "value_hex": "00000001", "discarded": False},
@@ -353,6 +353,65 @@ class BgpComparisonTests(unittest.TestCase):
 
 
 class NativeConversionTests(unittest.TestCase):
+    def test_actual_imported_rib_disposition_is_decoded_candidate_only(self):
+        row, raw, manifest = native_export()
+        document = bgp.from_native(raw, manifest)
+        converted = document["observations"][0]
+        self.assertEqual(converted["disposition"], "accepted")
+        self.assertEqual(converted["coverage"]["disposition"], "complete")
+        self.assertEqual(converted["evidence"]["event"]["kind"], "rib_entry")
+        self.assertEqual(converted["fields"]["message"]["message_type"]["value"], 0)
+        comparison = bgp.compare(document, document)
+        self.assertFalse(comparison["state_admission"])
+        for group in ("nlri", "attributes"):
+            self.assertEqual(converted["coverage"][group], "partial")
+            self.assertTrue(all(field["status"] == "incomplete" for field in converted["fields"][group].values()))
+            self.assertTrue(all(item["result"] == "not_comparable" for item in comparison["rows"] if item["group"] == group))
+
+    def test_imported_zero_requires_actual_rib_event_and_route_evidence(self):
+        for kind, message_type, routes in (
+                ("imported_route", 0, "present"), ("unsupported_rib_entry", 0, "present"),
+                ("opaque_record", 0, "present"), ("rib_entry", 2, "present"),
+                ("rib_entry", False, "present"), ("rib_entry", "0", "present"),
+                ("rib_entry", 0, "empty"), ("rib_entry", 0, "null"),
+                ("rib_entry", 0, "missing"), ("rib_entry", 0, "non_dict"),
+                ("rib_entry", 0, "missing_prefix"), ("rib_entry", 0, "null_prefix"),
+                ("rib_entry", 0, "missing_attributes"), ("rib_entry", 0, "null_attributes"),
+                ("rib_entry", 0, "withdraw"),
+                ("rib_entry", 0, "absent_observation"), (None, 0, "present")):
+            row, _, manifest = native_export()
+            row["event"]["kind"] = kind
+            row["observation"]["message_type"] = message_type
+            if routes in ("empty", "null"):
+                row["observation"]["routes"] = [] if routes == "empty" else None
+            elif routes == "missing":
+                del row["observation"]["routes"]
+            elif routes == "non_dict":
+                row["observation"]["routes"] = [None]
+            elif routes in ("missing_prefix", "missing_attributes"):
+                del row["observation"]["routes"][0][routes.removeprefix("missing_")]
+            elif routes in ("null_prefix", "null_attributes"):
+                row["observation"]["routes"][0][routes.removeprefix("null_")] = None
+            elif routes == "withdraw":
+                row["observation"]["routes"][0]["action"] = "withdraw"
+            elif routes == "absent_observation":
+                row["observation"] = None
+                manifest["coverage"].update(observations="0", route_free="1")
+            raw = rebind_rows(row, manifest)
+            with self.subTest(kind=kind, message_type=message_type, routes=routes):
+                converted = bgp.from_native(raw, manifest)["observations"][0]
+                self.assertEqual(converted["disposition"], "unknown")
+                self.assertEqual(converted["coverage"]["disposition"], "partial")
+
+    def test_rib_evidence_cannot_override_explicit_rejection_or_quarantine(self):
+        for status, expected in (("rejected", "rejected"), ("quarantined", "unknown")):
+            row, _, manifest = native_export()
+            row["event"]["parse_status"] = status
+            raw = rebind_rows(row, manifest)
+            with self.subTest(status=status):
+                converted = bgp.from_native(raw, manifest)["observations"][0]
+                self.assertEqual(converted["disposition"], expected)
+
     def test_typed_clock_scope_and_legacy_manifests_join_converter(self):
         for kind in (None, "source", "all_source_clocks", "unrecognized"):
             _, raw, manifest = native_export()
