@@ -548,10 +548,17 @@ impl<'a> DeepSink<'a> {
                 )?;
             }
         }
-        if matches!(e.kind, EventKind::StreamGap | EventKind::StreamConflict) {
+        // A scoped BGP framing issue means the stream decoder omitted source
+        // bytes. It carries the same continuity consequence as a transport
+        // gap, without manufacturing a withdrawal or successor generation.
+        let bgp_issue = e.kind == EventKind::ProtocolIssue && e.protocol.as_deref() == Some("bgp");
+        let transport_boundary = matches!(e.kind, EventKind::StreamGap | EventKind::StreamConflict);
+        if transport_boundary || bgp_issue {
             if let Some(id) = e.session {
-                if let Some(s) = self.iec.get_mut(&id) {
-                    s.gap();
+                if transport_boundary {
+                    if let Some(s) = self.iec.get_mut(&id) {
+                        s.gap();
+                    }
                 }
                 let record_id = event_record_id(e, self.inner.run_id(), &self.limits)?;
                 let reason = event_boundary_reason(e);
@@ -562,13 +569,16 @@ impl<'a> DeepSink<'a> {
                 }
                 let result = self.retain_or_apply_bgp_boundary(id, record_id.clone(), reason);
                 if let Some(result) = result {
+                    let receipt = result?;
                     set(
                         &mut own.data,
                         "depth_bgp_boundary",
-                        bgp_boundary_json(&record_id, result),
+                        bgp_boundary_json(&record_id, Ok(receipt)),
                     )?;
                 }
-                self.dnp_file.reset_session(id);
+                if transport_boundary {
+                    self.dnp_file.reset_session(id);
+                }
             }
         }
         if e.kind == EventKind::FlowEnd {
@@ -694,12 +704,12 @@ impl<'a> DeepSink<'a> {
                     if let Some(journal) = self.bgp_journal.as_mut() {
                         journal.message(id, &raw, &metadata)?;
                     }
-                    let result = (if first_bgp_message {
-                        self.prepare_bgp_session(id, &record_id)
-                    } else {
-                        Ok(())
-                    })
-                    .and_then(|()| self.bgp.apply_message(id, &raw, metadata));
+                    // Preparation is boundary admission, not malformed wire
+                    // evidence. Any failure must stop publication.
+                    if first_bgp_message {
+                        self.prepare_bgp_session(id, &record_id)?;
+                    }
+                    let result = self.bgp.apply_message(id, &raw, metadata);
                     match result {
                         Ok(receipt) => {
                             let summary = self
@@ -713,7 +723,22 @@ impl<'a> DeepSink<'a> {
                                 bgp_apply_json(&record_id, &receipt, &summary),
                             )?;
                         }
+                        Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
                         Err(error) => {
+                            // The raw MESSAGE is already the journal carrier.
+                            // Replay derives one gap from its rejection; adding
+                            // a GAP record here would count the omission twice.
+                            let boundary_id = format!("{record_id}:rejected-message");
+                            let receipt = self.bgp.observe_gap(
+                                id,
+                                boundary_id.clone(),
+                                "sealed_source_message_rejected".into(),
+                            )?;
+                            set(
+                                &mut own.data,
+                                "depth_bgp_boundary",
+                                bgp_boundary_json(&boundary_id, Ok(receipt)),
+                            )?;
                             set(&mut own.data, "depth_bgp", outcome_json(Err(error.clone())))?;
                             set(
                                 &mut own.data,
@@ -843,13 +868,17 @@ mod tests {
     use pcap_evidence_stream::{events::Evidence, EvidenceStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct NullSink;
+    #[derive(Default)]
+    struct NullSink {
+        emitted: u64,
+    }
     impl EventSink for NullSink {
         fn run_id(&self) -> &str {
             "sink-test"
         }
         fn emit(&mut self, _event: &Event) -> Result<u64> {
-            Ok(1)
+            self.emitted += 1;
+            Ok(self.emitted)
         }
     }
 
@@ -873,6 +902,248 @@ mod tests {
         event.protocol = Some("bgp".into());
         event.evidence = Evidence::bytes(&raw);
         event
+    }
+
+    fn with_test_sink(limits: Limits, bytes: &[u8], test: impl FnOnce(&mut DeepSink<'_>, &Path)) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pcap-depth-sink-omission-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        std::fs::write(&source, bytes).unwrap();
+        let mut inner = NullSink::default();
+        let mut sink = DeepSink::new(
+            &mut inner,
+            File::open(source).unwrap(),
+            &root.join("packet.map"),
+            4096,
+            limits,
+            Context::default(),
+        )
+        .unwrap();
+        test(&mut sink, &root);
+        drop(sink);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn protocol_issue(session: Option<u64>, protocol: &str) -> Event {
+        let mut event = Event::new(
+            EventKind::ProtocolIssue,
+            EvidenceStatus::Incomplete,
+            Json::object([("reason", "synthetic_omission".into())]),
+        );
+        event.session = session;
+        event.protocol = Some(protocol.into());
+        event
+    }
+
+    fn map_message(sink: &mut DeepSink<'_>, bytes: &[u8]) -> Event {
+        let packet = Event::new(
+            EventKind::Packet,
+            EvidenceStatus::Observed,
+            Json::object([
+                ("frame", "1".into()),
+                ("record_offset", "0".into()),
+                ("data_offset", "0".into()),
+                ("captured_length", bytes.len().to_string().into()),
+                ("packet_sha256", sha256::hex(&sha256::digest(bytes)).into()),
+                ("link_type", 228usize.into()),
+            ]),
+        );
+        sink.augment(&packet).unwrap();
+        let mut event = message(1);
+        event.evidence = Evidence::bytes(&EvidenceBytes::from_packet(
+            bytes,
+            PacketId {
+                capture: sink.map.namespace(),
+                frame: 1,
+                record_offset: 0,
+            },
+            0,
+        ));
+        event
+    }
+
+    #[test]
+    fn bgp_protocol_issue_scope_pending_and_identical_replay() {
+        with_test_sink(Limits::default(), &[], |sink, _| {
+            let mut iec = super::super::iec104::Session::default();
+            iec.active = Some(true);
+            sink.iec.insert(9, iec);
+            let iec_before = sink.iec[&9].json();
+            // Non-BGP and sessionless issues cannot supply managed BGP scope.
+            sink.augment(&protocol_issue(Some(9), "dnp3")).unwrap();
+            sink.augment(&protocol_issue(None, "bgp")).unwrap();
+            assert_eq!(sink.bgp_pending_count, 0);
+            assert_eq!(sink.bgp.active_sessions(), 0);
+
+            // A known session needs no invented direction. Before its first
+            // BGP message, keep the exact boundary without allocating state.
+            let issue = protocol_issue(Some(9), "bgp");
+            let record_id = event_record_id(&issue, sink.inner.run_id(), &sink.limits).unwrap();
+            sink.augment(&issue).unwrap();
+            assert_eq!(sink.iec[&9].json(), iec_before);
+            assert_eq!(sink.bgp_pending_count, 1);
+            assert_eq!(sink.bgp_pending_boundaries[&9][0].0, record_id);
+            assert_eq!(sink.bgp.active_sessions(), 0);
+            sink.prepare_bgp_session(9, "first-message").unwrap();
+            sink.bgp_seen.insert(9);
+            let replay = sink.augment(&issue).unwrap();
+            assert_eq!(sink.bgp.summary(9).unwrap().gaps, 1);
+            assert_eq!(sink.bgp.summary(9).unwrap().generation, 0);
+            assert_eq!(
+                get(get(&replay.data, "depth_bgp_boundary").unwrap(), "replayed"),
+                Some(&Json::Bool(true))
+            );
+            assert_eq!(sink.iec[&9].json(), iec_before);
+            let mut transport_gap = issue;
+            transport_gap.kind = EventKind::StreamGap;
+            sink.augment(&transport_gap).unwrap();
+            assert!(sink.iec[&9].tainted);
+            assert_eq!(sink.iec[&9].active, None);
+        });
+    }
+
+    #[test]
+    fn bgp_boundary_admission_failure_is_fatal_and_atomic() {
+        for kind in [
+            EventKind::ProtocolIssue,
+            EventKind::StreamGap,
+            EventKind::StreamConflict,
+        ] {
+            let limits = Limits {
+                elements: 1,
+                ..Limits::default()
+            };
+            with_test_sink(limits, &[], |sink, root| {
+                sink.enable_bgp_journal(&root.join("bgp.journal.partial"), 4096)
+                    .unwrap();
+                sink.bgp
+                    .observe_gap(9, "first-gap".into(), "observed_gap".into())
+                    .unwrap();
+                sink.bgp_seen.insert(9);
+                let mut event = protocol_issue(Some(9), "bgp");
+                event.kind = kind;
+                let error = sink.augment(&event).unwrap_err();
+                assert_eq!(error.code, ErrorCode::LimitExceeded);
+                assert_eq!(sink.bgp.summary(9).unwrap().gaps, 1);
+                assert_eq!(sink.bgp.summary(9).unwrap().generation, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn bgp_preparation_failure_is_fatal_before_message_rejection() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        let limits = Limits {
+            elements: 1,
+            ..Limits::default()
+        };
+        with_test_sink(limits, &keepalive, |sink, root| {
+            sink.enable_bgp_journal(&root.join("bgp.journal.partial"), 4096)
+                .unwrap();
+            assert!(sink
+                .retain_or_apply_bgp_boundary(9, "retained-gap".into(), "observed_gap".into())
+                .is_none());
+            assert!(sink
+                .retain_or_apply_bgp_boundary(9, "overflow-gap".into(), "observed_gap".into())
+                .is_none());
+            assert!(sink.bgp_pending_overflow);
+            let event = map_message(sink, &keepalive);
+            let error = sink.augment(&event).unwrap_err();
+            assert_eq!(error.code, ErrorCode::LimitExceeded);
+            // Admission may retain the first gap, but cannot publish a rejected
+            // source message or allow the owning analyze caller to seal.
+            let summary = sink.bgp.summary(9).unwrap();
+            assert_eq!(summary.gaps, 1);
+            assert_eq!(summary.session_events, 1);
+            assert_eq!(summary.generation, 0);
+        });
+    }
+
+    #[test]
+    fn bgp_message_capacity_failure_propagates_through_event_sink() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        for active in [1, 2] {
+            let limits = Limits {
+                active,
+                ..Limits::default()
+            };
+            with_test_sink(limits, &keepalive, |sink, root| {
+                let partial = root.join("bgp.journal.partial");
+                sink.enable_bgp_journal(&partial, 4096).unwrap();
+                let first = map_message(sink, &keepalive);
+                // Packet mapping uses augment directly. This public emit must
+                // be the first event actually forwarded to the inner sink.
+                assert_eq!(EventSink::emit(sink, &first).unwrap(), 1);
+                let before = sink.bgp.snapshot(9).unwrap();
+                assert_eq!(before.summary.session_events, 1);
+                assert_eq!(before.summary.gaps, 0);
+                let mut second = first.clone();
+                second.session = Some(10);
+                if active == 1 {
+                    let error = EventSink::emit(sink, &second).unwrap_err();
+                    assert_eq!(error.code, ErrorCode::LimitExceeded);
+                    assert_eq!(error.field, "bgp_manager_active_sessions");
+                    assert_eq!(sink.bgp.snapshot(9).unwrap(), before);
+                    assert!(!sink.bgp.contains(10));
+                    assert_eq!(sink.bgp.active_sessions(), 1);
+                    // The attempted source MESSAGE precedes manager admission
+                    // in the journal. It remains unsealed recovery evidence;
+                    // no caller here requests finish after the producer error.
+                    assert!(partial.is_file());
+                    assert!(!root.join("bgp.journal").exists());
+                    let raw = std::fs::read(&partial).unwrap();
+                    assert!(raw.len() < 4096);
+                    assert_eq!(&raw[..8], b"PCBGP001");
+                    // v1: fixed header, length-prefixed source label, then
+                    // 73-byte record envelopes. The body starts with session.
+                    let source_len = u32::from_le_bytes(raw[42..46].try_into().unwrap());
+                    let mut offset = 46 + source_len as usize;
+                    let mut scopes = Vec::new();
+                    while offset < raw.len() {
+                        assert_eq!(raw[offset], 1, "only raw MESSAGE carriers are retained");
+                        let size =
+                            u64::from_le_bytes(raw[offset + 1..offset + 9].try_into().unwrap());
+                        scopes.push(u64::from_le_bytes(
+                            raw[offset + 73..offset + 81].try_into().unwrap(),
+                        ));
+                        offset += 73 + size as usize;
+                    }
+                    assert_eq!(offset, raw.len());
+                    assert_eq!(scopes, [9, 10]);
+                    let error = super::super::bgp_store::replay(&partial, 4096, Limits::default())
+                        .unwrap_err();
+                    assert_eq!(error.code, ErrorCode::Truncated);
+                    assert_eq!(error.field, "bgp_journal_record");
+                    // Identical replay is still accepted. The returned inner
+                    // count proves the failed second event was not forwarded.
+                    assert_eq!(EventSink::emit(sink, &first).unwrap(), 2);
+                    assert_eq!(sink.bgp.snapshot(9).unwrap(), before);
+                } else {
+                    assert_eq!(EventSink::emit(sink, &second).unwrap(), 2);
+                    assert_eq!(sink.bgp.active_sessions(), 2);
+                    assert_eq!(sink.bgp.snapshot(9).unwrap(), before);
+                    assert_eq!(sink.bgp.summary(10).unwrap().session_events, 1);
+                    assert_eq!(sink.bgp.summary(10).unwrap().gaps, 0);
+                    sink.map.verify_source().unwrap();
+                    sink.bgp_journal.take().unwrap().seal().unwrap();
+                    let archive =
+                        super::super::bgp_store::replay(&partial, 4096, Limits::default()).unwrap();
+                    assert_eq!(archive.sessions.len(), 2);
+                    assert_eq!(archive.messages, 2);
+                    assert_eq!(archive.boundaries, 0);
+                    assert_eq!(archive.rejected_records, 0);
+                }
+            });
+        }
     }
 
     #[test]
@@ -904,7 +1175,7 @@ mod tests {
         let map_path = root.join("packet.map");
         std::fs::write(&source_path, []).unwrap();
         let source = File::open(&source_path).unwrap();
-        let mut inner = NullSink;
+        let mut inner = NullSink::default();
         let mut sink = DeepSink::new(
             &mut inner,
             source,

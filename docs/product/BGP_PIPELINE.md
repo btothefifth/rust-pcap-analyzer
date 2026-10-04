@@ -38,6 +38,13 @@ observation.
 - A transport gap is recorded separately with `observe_gap`; it makes existing
   and later same-generation candidates unresolved, even when it precedes the
   first route, but does not invent a successor generation.
+- A source-bound BGP framing issue in a known captured session also records
+  loss of interpretation. Its gap remains scoped to that BGP session; other
+  protocol observers change only at their own or a transport boundary. Original
+  framing evidence remains in the capture event, and its immutable event ID
+  links the journal's gap to that evidence. Before the first managed BGP MESSAGE,
+  the gap remains pending until that MESSAGE admits the scope; an issue-only
+  lifecycle that ends first retains capture evidence without a BGP journal scope.
 - `reset_generation` requires a distinct caller-observed transport boundary and
   advances all state with the exact predecessor. Exact gap/reset replay is
   inert; a reused boundary identity with changed meaning is quarantined without
@@ -78,6 +85,18 @@ event gains `depth_bgp_pipeline`, and flow-end events gain
 `depth_bgp_session_summary`. An unscoped message remains wire evidence but does
 not enter managed session state.
 
+A complete message rejected for a non-budget error by the deep decoder retains its original MESSAGE
+record and rejection details. The sink applies one continuity gap immediately;
+fresh replay derives one gap from the same rejected MESSAGE. No additional
+journal GAP is written for this case. Immediate and fresh replay agree about
+session summaries and route currency, while their gap witness IDs may reflect
+the event and sealed-record carriers respectively. Later evidence in the same
+generation cannot restore resolved continuity. No withdrawal or successor
+generation is inferred. Preparation, gap-admission and resource-limit failures
+propagate to the caller. The ordinary `pcap-depth analyze` path stops on the
+error before finishing and publishing the source journal; callers must respect
+the EventSink contract that an error stops the producer.
+
 Successful `pcap-depth` runs now also publish a sealed, hash-chained BGP source
 journal. It retains exact reconstructed message bytes and all source spans plus
 gap, reset, flow-end, and capture-boundary records. Fresh-process replay rejects
@@ -85,6 +104,9 @@ unsealed, truncated, trailing, reordered, or changed records and rebuilds the
 wire/session/RIB projections rather than trusting a serialized state snapshot.
 State, reused-session history query, and NDJSON export are available through the
 CLI described in [BGP_STORE.md](BGP_STORE.md).
+Flow-end history retains its last observed statuses and witnesses, with
+`native_current=false` in persisted rich route rows. An Active historical
+status after END does not make that row eligible for current policy selection.
 
 Imported MRT records now have a sealed exact-source store and share the
 replay/state/query/export command surface plus normalized observation admission.

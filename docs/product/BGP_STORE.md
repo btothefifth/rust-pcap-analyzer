@@ -32,6 +32,27 @@ Rejected message/boundary records remain counted; successful and ended session
 snapshots retain routes, versions, witnesses, status, gaps, resets, bilateral
 capability context, and source partitions.
 
+A known-session BGP framing failure records a source-bound continuity gap because
+the framer did not admit a MESSAGE for those bytes. An admitted BGP scope journals
+and applies the gap immediately. Before the first managed BGP MESSAGE, the gap
+remains pending until that MESSAGE admits the scope. An issue-only lifecycle
+that ends without an admitted MESSAGE retains capture evidence without creating
+a BGP journal scope. The original issue's bytes
+and packet spans remain available in the capture event, linked by its immutable
+event ID and the journal's complete-capture namespace. A deep non-budget
+rejection instead retains its exact MESSAGE record; replay derives its scoped
+gap from that record. The capture sink applies the same continuity consequence
+immediately without writing a duplicate GAP. Gaps preserve route history and
+make existing and later same-generation candidates unresolved; they do not
+invent withdrawals or resets. The ordinary analyze path stops on budget or
+boundary-admission errors before sealing and publishing its journal. Replay
+also stops on resource-limit errors. A caller must stop after an EventSink
+error rather than ignore it and request publication.
+
+Flow-end snapshots retain terminal history. Persisted rich route rows from an
+ended lifecycle expose `native_current=false`, even when their last observed
+route status is Active, and remain excluded from current policy selection.
+
 The no-overwrite commands are:
 
     pcap-depth bgp replay RUN/bgp.journal --output replay.json
