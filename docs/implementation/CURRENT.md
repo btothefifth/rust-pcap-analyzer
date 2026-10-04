@@ -58,6 +58,11 @@ outcome are separate; use the receipt below for the exact assembled generation.
 
 ## Current validation status
 
+GitHub Actions runs Linux-only by repository-owner direction. Native validation,
+streaming contracts, product qualification and manual hardening retain their
+Linux checks; Windows and macOS jobs are retired. Historical platform receipts
+remain tied to their recorded revisions and do not imply continuing non-Linux CI.
+
 The latest stream/evidence comparison feedback repairs are recorded in the
 [round-three feedback receipt](../../evidence/pr-feedback-round3-validation.json).
 It binds typed exact/all-source clock selection, preservation of incomplete

@@ -44,7 +44,7 @@ class ValidationFrontier(unittest.TestCase):
         for path in ('scripts/test_semantic_tools.py', 'scripts/test_package_contract.py'):
             self.assertTrue((ROOT / path).is_file())
 
-    def test_product_workflow_selects_dependency_frontier_and_three_platforms(self):
+    def test_product_workflow_selects_dependency_frontier_and_linux_ci(self):
         text = (ROOT / '.github/workflows/product-qualification.yml').read_text()
         for event in ('push:', 'pull_request:'):
             block = text.split('  ' + event, 1)[1].split('permissions:', 1)[0]
@@ -52,9 +52,15 @@ class ValidationFrontier(unittest.TestCase):
             for path in ('src/**', 'streaming/**', 'history/**', 'history-app/**',
                          'fixtures/**', 'scripts/**', 'Cargo.toml', 'rust-toolchain.toml'):
                 self.assertIn("'" + path + "'", block)
-        self.assertIn('macos-latest', text)
-        self.assertIn('windows-latest', text)
-        self.assertIn('ubuntu-22.04', text)
+        for workflow, runner in (('ci.yml', 'ubuntu-latest'),
+                                 ('streaming-evidence.yml', 'ubuntu-latest'),
+                                 ('hardening.yml', 'ubuntu-latest'),
+                                 ('product-qualification.yml', 'ubuntu-22.04')):
+            carrier = (ROOT / '.github/workflows' / workflow).read_text()
+            self.assertIn('        os: [' + runner + ']\n', carrier)
+            self.assertIn('    runs-on: ${{ matrix.os }}\n', carrier)
+            self.assertNotIn('windows', carrier.lower())
+            self.assertNotIn('macos', carrier.lower())
         self.assertIn('python scripts/validate_product.py', text)
         self.assertIn('CARGO_TARGET_DIR:', text)
         # The colon+space in --only-binary=:all: cannot be a plain YAML scalar.

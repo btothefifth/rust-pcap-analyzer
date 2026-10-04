@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -28,10 +28,7 @@ jobs:
         run: cargo build --locked --offline
       - name: Independent generated-corpus CLI check
         shell: bash
-        run: |
-          BINARY=target/debug/pcap-evidence
-          if [ "${RUNNER_OS}" = Windows ]; then BINARY="${BINARY}.exe"; fi
-          python scripts/check_hardening_cli.py --binary "$BINARY"
+        run: python scripts/check_hardening_cli.py --binary target/debug/pcap-evidence
       - name: Independent upstream validation
         env:
           PYTHONDONTWRITEBYTECODE: '1'
