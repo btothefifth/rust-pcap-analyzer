@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
 };
 fn usage() -> Error {
-    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N]")
+    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] [--peer-relationship unknown|internal|external] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] [--peer-relationship unknown|internal|external] [--other-peer-relationship unknown|internal|external] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N]")
 }
 
 fn parse_peer_relationship(value: &str) -> Result<deep::bgp::PeerRelationship> {
@@ -591,6 +591,7 @@ fn bgp(v: &[String]) -> Result<()> {
     let mut clock_policy = None;
     let mut clock_basis = None;
     let mut peer_relationship = None;
+    let mut other_peer_relationship = None;
     let mut maximum = 8u64 * 1024 * 1024 * 1024;
     let mut max_output = 8u64 * 1024 * 1024 * 1024;
     let mut seen = std::collections::BTreeSet::new();
@@ -642,6 +643,9 @@ fn bgp(v: &[String]) -> Result<()> {
             "--clock-policy" => clock_policy = Some(value.clone()),
             "--clock-basis" => clock_basis = Some(value.clone()),
             "--peer-relationship" => peer_relationship = Some(parse_peer_relationship(value)?),
+            "--other-peer-relationship" => {
+                other_peer_relationship = Some(parse_peer_relationship(value)?)
+            }
             "--max-journal-bytes" => maximum = value.parse().map_err(|_| usage())?,
             "--max-output-bytes" => max_output = value.parse().map_err(|_| usage())?,
             _ => return Err(usage()),
@@ -660,7 +664,8 @@ fn bgp(v: &[String]) -> Result<()> {
                 && (other_store.is_some()
                     || namespace.is_some()
                     || clock_policy.is_some()
-                    || clock_basis.is_some())
+                    || clock_basis.is_some()
+                    || other_peer_relationship.is_some())
             || command == "associate" && (rich_query || session.is_some())
         {
             return Err(usage());
@@ -704,7 +709,9 @@ fn bgp(v: &[String]) -> Result<()> {
                 maximum,
                 mrt_limits,
                 load_limits,
-                options,
+                deep::bgp_mrt_store::MrtReplayOptions {
+                    peer_relationship: other_peer_relationship,
+                },
             )?;
             let namespace = namespace.ok_or_else(usage)?;
             let policy = Policy {
@@ -739,6 +746,7 @@ fn bgp(v: &[String]) -> Result<()> {
         || namespace.is_some()
         || clock_policy.is_some()
         || clock_basis.is_some()
+        || other_peer_relationship.is_some()
         || (command == "query") != session.is_some()
     {
         return Err(usage());

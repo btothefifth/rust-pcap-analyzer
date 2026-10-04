@@ -100,7 +100,23 @@ failures are tested for session and RIB operations. `evaluate` bounds candidate
 count, pair work, and complete trace size. These are conservative logical Rust
 structure/debug-representation budgets, not a canonical persisted encoding,
 measured CPU, allocator usage, or RSS. Canonical persistence and independent
-resource qualification remain Phase 5/6 obligations. The direct hand-built tests are
+resource qualification remain Phase 5/6 obligations. In particular, each
+non-identical event clones the full reducer, and `accounted_size` allocates
+debug strings over retained state; `accounted_work` invokes that scan again.
+MRT and BMP replay can apply this path once per record. Growing retained
+history can therefore cause quadratic total traversal/allocation work and
+transient memory beyond the retained-state proxy. Finite admission limits do
+not establish production-scale throughput or peak RSS.
+
+Before production-scale corpora, replace full-state cloning/debug-string
+accounting with incremental or transactional accounting. Acceptance must
+preserve atomic publication, exact-limit rejection, identical-replay behavior,
+source/session/generation isolation, and byte-identical supported projections;
+measure traversal/allocation cost and peak RSS on the same bounded inputs and
+execution surface before and after the change. The PR review's non-blocking
+scale note records this open requirement, not an executed optimization.
+
+The direct hand-built tests are
 `product/tests/bgp_session_rib_policy.rs`; the atomic captured join is covered by
 `product/tests/bgp_pipeline.rs` and [BGP_PIPELINE.md](BGP_PIPELINE.md). They do
 not prove persisted replay, MRT/BMP ingestion, independent router policy

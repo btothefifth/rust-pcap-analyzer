@@ -1,6 +1,6 @@
 # rust-pcap-analyzer
 
-## O14-1 implementation candidate — operator status
+## Objectives 1–4 and PR feedback — operator status
 
 The current worktree candidate extends BGP4MP source-ordered replay through the
 imported Adj-RIB-In reducer, adds the bounded BMP v1 file/store/replay path, and
@@ -17,8 +17,10 @@ listing, validation/package-frontier, generation-CLI, and documentation work.
 See the [objectives 1–4 ledger](docs/implementation/OBJECTIVES_1_4.md),
 [BGP completion contract](docs/product/BGP_COMPLETION.md), and
 [current implementation pointer](docs/implementation/CURRENT.md). The
-authoritative [same-generation validation receipt](evidence/objectives-1-4-validation.json)
-controls which assembled-source checks have passed. Full declared-profile,
+authoritative [PR feedback validation receipt](evidence/pr-feedback-validation.json)
+controls the current repair generation's assembled-source status; a pending
+receipt is not a passed gate. The [O14-1 receipt](evidence/objectives-1-4-validation.json)
+remains historical evidence for its preceding source generation. Full declared-profile,
 normative, sustained-fuzz, lawful real-corpus, scale/RSS, security, and
 exact-head platform qualification remain separate gates.
 

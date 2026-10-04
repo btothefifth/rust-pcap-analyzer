@@ -162,6 +162,63 @@ The decoding boundaries follow [RFC 6396](https://www.rfc-editor.org/rfc/rfc6396
 and [RFC 8050](https://www.rfc-editor.org/rfc/rfc8050); reported state edges are
 checked against the base FSM in [RFC 4271, Section 8](https://www.rfc-editor.org/rfc/rfc4271#section-8).
 
+### Imported ROUTE-REFRESH evidence
+
+A 23-byte type-5 message does not by itself establish a supported refresh.
+Subtype 0 remains `decoded_route_refresh` in a consistent reported Established
+state without requiring Enhanced Route Refresh capability 70. Subtypes 3–255
+remain exact source evidence with `ignored_unknown_route_refresh_subtype` and
+an explicit issue; they create no route observation, reset, EOR, or RIB change.
+This follows the ignore rule in
+[RFC 7313, Section 5](https://www.rfc-editor.org/rfc/rfc7313.html#section-5).
+
+For subtype 1 (BoRR) or 2 (EoRR), the imported decoder additionally requires
+exactly one valid, unambiguous wire OPEN from the opposite direction in the
+current generation, advertising zero-length capability 70. Direction 0 is
+peer-to-local, so its receiver advertisement comes from OPEN direction 1;
+direction 1 uses OPEN direction 0. A receiver-only advertisement suffices for
+this sender-layout condition; a sender-only advertisement does not. The
+condition follows the sender procedure in
+[RFC 7313, Sections 3.1 and 4](https://www.rfc-editor.org/rfc/rfc7313.html#section-3.1).
+The receiver's enhanced error-handling condition in Section 5 is separate and
+is not inferred from that sender-layout evidence.
+
+The event detail carries `receiver_open_direction`,
+`receiver_capability70_advertised`, and `sender_layout_basis`. A qualifying
+advertisement has basis `observed_peer_capability70_for_sender_layout`;
+missing, repeated, invalid, and non-advertising receiver OPENs have explicit
+distinct bases. `negotiation_established` and `endpoint_processing_claimed`
+remain false. Missing capability context yields
+`quarantined_route_refresh_capability_context`; an invalid or missing
+Established FSM yields `quarantined_route_refresh_fsm_state`. Both dispositions
+preserve the source range/digest and mark tracked route continuity uncertain
+through the existing quarantine consumer, without inventing a withdrawal.
+Wrong fixed message length remains rejected. The decoder does not model ORF,
+refresh-driven stale-route cleanup, graceful-restart ordering, or an endpoint's
+decision to accept or ignore a marker.
+
+Idle and a failed OpenSent-to-Active attempt clear OPEN advertisements before
+the next generation can use them. Fresh store replay reparses the sealed
+original stream, so capability evidence is reconstructed from the same
+source-order wire messages each time. BMP Peer Up OPENs are reported grammar
+context with negotiation unestablished. BMP Route Monitoring accepts only
+UPDATE messages; even reported capability 70 cannot qualify an embedded
+type-5 message there. The captured producer separately retains an unknown
+refresh subtype as unknown with an issue, and does not publish an imported
+decoded-refresh disposition.
+
+The finite correction frontier is imported type-5 admission, wire OPEN
+advertisement validation, generation reset, sealed fresh replay, the native RIB
+quarantine consumer, captured unknown-subtype evidence, and BMP's UPDATE-only
+boundary. The regression `bgp_imported_route_refresh` builds its bytes
+independently and checks subtype 0, both markers, subtypes 3/255, both unilateral
+direction inverses, absent/malformed/repeated receiver OPENs, reset, neighboring
+lengths, and reported BMP capability context. Earlier length-only imported
+admission had no subtype or capability predicate, so framing positives could
+not distinguish a false decoded-refresh label. These fixtures establish
+synthetic offline behavior; execution status belongs in the current validation
+receipt, and real-source or endpoint protocol qualification remains open.
+
 The exported `bgp4mp_events` preserve source record index, full-record and
 message ranges, message digest, endpoint labels, timestamp, state/generation,
 parse status, issues, and explicit `source_authenticated: false` and
@@ -219,8 +276,9 @@ callers must re-open/reparse the original sealed source before trusting a
 persisted range. State-change records and opaque/unsupported payloads do not
 produce message ranges. The verified message range is consumed by the
 source-ordered imported-session replay described above; the helper itself
-establishes byte identity and layout, while shared BGP parsing plus bilateral
-OPEN evidence govern semantic use. The supported message subtype map follows
+establishes byte identity and layout, while shared BGP parsing and
+message-specific OPEN evidence govern semantic use. The supported message
+subtype map follows
 [RFC 6396](https://www.rfc-editor.org/rfc/rfc6396.html), with ADD-PATH subtypes
 defined by [RFC 8050](https://www.rfc-editor.org/rfc/rfc8050.html).
 

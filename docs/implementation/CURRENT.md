@@ -50,11 +50,14 @@ outcome are separate; use the receipt below for the exact assembled generation.
 
 ## Current validation status
 
-The authoritative assembled-source selector and resource result is the
-[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json).
-It binds its outcome to the recorded source inventory; component observations
-and finite synthetic evidence are not a substitute for that same-generation
-result. Open normative, real-corpus, sustained-fuzz, scale/RSS, security, and
+PR review repairs are governed by the
+[O14-F1 feedback receipt](../../evidence/pr-feedback-validation.json) and the
+repair contract in the [objective ledger](OBJECTIVES_1_4.md). A pending receipt
+does not establish a passing result. The earlier
+[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json)
+remains bound to its recorded source generation preceding those repairs.
+Component observations and finite synthetic evidence are not a substitute for
+same-generation proof. Open normative, real-corpus, sustained-fuzz, scale/RSS, security, and
 exact-head platform gates remain unqualified unless their own receipts say
 otherwise. The historical results below apply only to their stated revisions.
 
@@ -103,8 +106,8 @@ is not a production-readiness claim.
 
 ## Remaining work and priority
 
-1. Close the assembled-source O14-1 test and integration gates with the exact
-   source inventory and outcomes in the [authoritative receipt](../../evidence/objectives-1-4-validation.json).
+1. Close the assembled-source PR feedback test and integration gates with the exact
+   source inventory and outcomes in the [feedback receipt](../../evidence/pr-feedback-validation.json).
    A pending or partial receipt does not establish a final validation pass.
 2. Complete independent RFC/IANA review and broader executable coverage for
    every declared BGP profile row. Registration and typed parsing do not by

@@ -138,8 +138,563 @@ fn cli(args: &[&str]) -> Output {
         .output()
         .unwrap()
 }
+fn assert_cli_usage(result: &Output) {
+    assert_eq!(result.status.code(), Some(4));
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let checked=Command::new(python).args([
+        "-c", "import json,sys; d=json.loads(sys.argv[1]); assert d['error']=='usage' and d['field']=='arguments',d",
+        std::str::from_utf8(&result.stderr).unwrap(),
+    ]).output().unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
 fn text(path: &Path) -> &str {
     path.to_str().unwrap()
+}
+
+// Independent source bytes: a valid IPv4 UPDATE carries LOCAL_PREF 200.
+// Neither ASN equality nor a producer projection supplies relationship truth.
+fn relationship_source(format: &str) -> Vec<u8> {
+    fn bgp(kind: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![255; 16];
+        v.extend_from_slice(&((19 + body.len()) as u16).to_be_bytes());
+        v.push(kind);
+        v.extend_from_slice(body);
+        v
+    }
+    fn open(asn: u16, id: u8) -> Vec<u8> {
+        let mut v = vec![4];
+        v.extend_from_slice(&asn.to_be_bytes());
+        v.extend_from_slice(&[0, 90, 192, 0, 2, id, 0]);
+        bgp(1, &v)
+    }
+    let width = if format == "mrt" { 2 } else { 4 };
+    let mut attrs = vec![0x40, 1, 1, 0, 0x40, 2, width + 2, 2, 1];
+    if width == 2 {
+        attrs.extend_from_slice(&65001u16.to_be_bytes());
+    } else {
+        attrs.extend_from_slice(&65001u32.to_be_bytes());
+    }
+    attrs.extend_from_slice(&[0x40, 3, 4, 192, 0, 2, 1, 0x40, 5, 4]);
+    attrs.extend_from_slice(&200u32.to_be_bytes());
+    let mut body = vec![0, 0];
+    body.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    body.extend(attrs);
+    body.extend_from_slice(&[24, 198, 51, 100]);
+    let update = bgp(2, &body);
+    if format == "mrt" {
+        let record = |subtype: u16, payload: &[u8]| {
+            let mut body = vec![0xfd, 0xe9, 0xfd, 0xe8, 0, 7, 0, 1];
+            body.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 254]);
+            body.extend_from_slice(payload);
+            let mut v = 100u32.to_be_bytes().to_vec();
+            v.extend_from_slice(&16u16.to_be_bytes());
+            v.extend_from_slice(&subtype.to_be_bytes());
+            v.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            v.extend(body);
+            v
+        };
+        [
+            record(0, &[0, 3, 0, 4]),
+            record(1, &open(65001, 1)),
+            record(6, &open(65000, 254)),
+            record(0, &[0, 4, 0, 5]),
+            record(0, &[0, 5, 0, 6]),
+            record(1, &update),
+        ]
+        .concat()
+    } else {
+        let mut peer = vec![0, 0];
+        peer.extend_from_slice(&[0; 20]);
+        peer.extend_from_slice(&[192, 0, 2, 1]);
+        peer.extend_from_slice(&65001u32.to_be_bytes());
+        peer.extend_from_slice(&[192, 0, 2, 1]);
+        peer.extend_from_slice(&100u32.to_be_bytes());
+        peer.extend_from_slice(&0u32.to_be_bytes());
+        let record = |kind: u8, body: &[u8]| {
+            let mut v = vec![3];
+            v.extend_from_slice(&((6 + body.len()) as u32).to_be_bytes());
+            v.push(kind);
+            v.extend_from_slice(body);
+            v
+        };
+        let mut up = peer.clone();
+        up.extend_from_slice(&[0; 12]);
+        up.extend_from_slice(&[192, 0, 2, 254, 0, 179, 0x9c, 0x40]);
+        up.extend(open(65000, 254));
+        up.extend(open(65001, 1));
+        peer.extend(update);
+        [record(3, &up), record(0, &peer)].concat()
+    }
+}
+
+fn relationship_store(s: &Scratch, format: &str, side: &str) -> PathBuf {
+    let input = s.path(&format!("{side}.{format}"));
+    fs::write(&input, relationship_source(format)).unwrap();
+    let workspace = s.path(&format!("{side}-workspace"));
+    let command = format!("import-{format}");
+    let result = cli(&[
+        "bgp",
+        &command,
+        text(&input),
+        "--workspace",
+        text(&workspace),
+        "--source-id",
+        side,
+        "--checkpoint",
+        side,
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    workspace.join(format!("bgp.{format}"))
+}
+
+fn association_relationship_oracle(
+    path: &Path,
+    left: &str,
+    right: &str,
+    left_format: &str,
+    right_format: &str,
+) {
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let script = r#"
+import hashlib,json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+def walk(v):
+    if isinstance(v,dict):
+        yield v
+        for x in v.values(): yield from walk(x)
+    elif isinstance(v,list):
+        for x in v: yield from walk(x)
+for n,(rel,fmt,key) in enumerate(zip(sys.argv[2:4],sys.argv[4:6],['route_evidence','internal_evidence'])):
+    ref=d['stores'][n]
+    assert ref['peer_relationship']==rel,(n,ref)
+    assert ref['peer_relationship_basis']==('default_unknown' if rel=='unknown' else 'explicit_configuration'),ref
+    side=['left','right'][n]
+    assert ref['sealed_store']['source_id']==side,ref
+    assert ref['sealed_store']['checkpoint_id']==side,ref
+    source=Path(sys.argv[1]).parent/(side+'.'+fmt)
+    assert ref['sealed_store']['source_sha256']==hashlib.sha256(source.read_bytes()).hexdigest(),ref
+    rows=d['association_report'][key]
+    if rel=='unknown':
+        assert rows==[],rows # Unknown LOCAL_PREF quarantines the route action.
+        continue
+    assert len(rows)==1,rows
+    routes=[v for v in walk(rows) if 'attributes' in v and 'attribute_ranges' in v]
+    assert len(routes)==1,routes
+    route=routes[0]
+    assert route['action']=='announce',route
+    assert route['attributes']['local_preference']==(200 if rel=='internal' else None),route
+    assert route['attribute_ranges']==[],route # Imported spans use the source proof carrier.
+    lp=[v for v in route['imported_attribute_occurrences']['occurrences'] if v['type']==5]
+    assert len(lp)==1,lp
+    lp=lp[0]
+    assert lp['decoded']==200 and lp['flags']==64 and lp['value_hex']=='000000c8',lp
+    assert lp['peer_relationship']==rel and lp['peer_relationship_basis']=='explicit_configuration',lp
+    assert lp['peer_relationship_unresolved'] is False,lp
+    assert lp['validation']['flags_valid'] and lp['validation']['length_valid'],lp
+    assert lp['disposition']==('accept_evidence_only' if rel=='internal' else 'attribute_discard'),lp
+"#;
+    let result = Command::new(python)
+        .args([
+            "-c",
+            script,
+            text(path),
+            left,
+            right,
+            left_format,
+            right_format,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+fn relationship_associate(
+    s: &Scratch,
+    left: &Path,
+    right: &Path,
+    name: &str,
+    flags: &[&str],
+) -> PathBuf {
+    let output = s.path(name);
+    let mut args = vec![
+        "bgp",
+        "associate",
+        text(left),
+        "--with-store",
+        text(right),
+        "--comparison-namespace",
+        "explicit-relationship-test",
+        "--clock-policy",
+        "ignore",
+        "--clock-basis",
+        "synthetic-spatial-only",
+        "--output",
+        text(&output),
+    ];
+    args.extend_from_slice(flags);
+    let result = cli(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    output
+}
+
+#[test]
+fn association_left_relationship_does_not_configure_omitted_right() {
+    let s = Scratch::new();
+    let left = relationship_store(&s, "mrt", "left");
+    let right = relationship_store(&s, "mrt", "right");
+    let output = relationship_associate(
+        &s,
+        &left,
+        &right,
+        "left-only.json",
+        &["--peer-relationship", "internal"],
+    );
+    association_relationship_oracle(&output, "internal", "unknown", "mrt", "mrt");
+}
+
+#[test]
+fn association_per_input_relationship_preserves_wire_usability_for_mrt_and_bmp() {
+    for (left_format, right_format) in [
+        ("mrt", "mrt"),
+        ("mrt", "bmp"),
+        ("bmp", "mrt"),
+        ("bmp", "bmp"),
+    ] {
+        let s = Scratch::new();
+        let left = relationship_store(&s, left_format, "left");
+        let right = relationship_store(&s, right_format, "right");
+        for (name, left_rel, right_rel, flags) in [
+            (
+                "internal-external.json",
+                "internal",
+                "external",
+                vec![
+                    "--peer-relationship",
+                    "internal",
+                    "--other-peer-relationship",
+                    "external",
+                ],
+            ),
+            (
+                "external-internal.json",
+                "external",
+                "internal",
+                vec![
+                    "--peer-relationship",
+                    "external",
+                    "--other-peer-relationship",
+                    "internal",
+                ],
+            ),
+            (
+                "right-only.json",
+                "unknown",
+                "internal",
+                vec!["--other-peer-relationship", "internal"],
+            ),
+            ("default.json", "unknown", "unknown", vec![]),
+        ] {
+            let output = relationship_associate(&s, &left, &right, name, &flags);
+            association_relationship_oracle(
+                &output,
+                left_rel,
+                right_rel,
+                left_format,
+                right_format,
+            );
+        }
+    }
+}
+
+#[test]
+fn other_relationship_flag_rejects_wrong_commands_and_malformed_values_without_output() {
+    let s = Scratch::new();
+    let input = relationship_store(&s, "mrt", "left");
+    let config = s.path("policy.txt");
+    fs::write(&config, profile("skip", "skip", false)).unwrap();
+    for (n, command) in ["query", "policy", "replay", "state", "export"]
+        .iter()
+        .enumerate()
+    {
+        let output = s.path(&format!("wrong-{n}.json"));
+        let mut args = vec![
+            "bgp",
+            command,
+            text(&input),
+            "--other-peer-relationship",
+            "internal",
+            "--output",
+            text(&output),
+        ];
+        if *command == "policy" {
+            args.extend(["--policy-profile", text(&config)]);
+        }
+        let result = cli(&args);
+        assert!(!result.status.success());
+        assert_cli_usage(&result);
+        assert!(!output.exists());
+    }
+    for format in ["mrt", "bmp"] {
+        let source = s.path(&format!("wrong-input.{format}"));
+        fs::write(&source, relationship_source(format)).unwrap();
+        let workspace = s.path(&format!("denied-{format}-workspace"));
+        let command = format!("import-{format}");
+        let result = cli(&[
+            "bgp",
+            &command,
+            text(&source),
+            "--workspace",
+            text(&workspace),
+            "--source-id",
+            "valid",
+            "--checkpoint",
+            "valid",
+            "--other-peer-relationship",
+            "internal",
+        ]);
+        assert!(!result.status.success());
+        assert_cli_usage(&result);
+        assert!(!workspace.exists());
+    }
+    let workspace = s.path("denied-workspace");
+    let unit = s.path("valid.bgp");
+    fs::write(&unit, wire(0, 65001)).unwrap();
+    let pcap = s.path("empty.pcap");
+    fs::write(
+        &pcap,
+        [
+            0xd4, 0xc3, 0xb2, 0xa1, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 1, 0, 0,
+            0,
+        ],
+    )
+    .unwrap();
+    for args in [
+        vec![
+            "decode",
+            "bgp",
+            text(&unit),
+            "--other-peer-relationship",
+            "internal",
+        ],
+        vec![
+            "analyze",
+            text(&pcap),
+            "--workspace",
+            text(&workspace),
+            "--other-peer-relationship",
+            "internal",
+        ],
+    ] {
+        let result = cli(&args);
+        assert!(!result.status.success());
+        assert_cli_usage(&result);
+        assert!(!s.path("denied-workspace").exists());
+    }
+    let output = s.path("session-query.json");
+    let session = "mrt-bgp4mp:4:left:4:left:1:9:192.0.2.1:11:192.0.2.254:65001:65000:7:0";
+    let control = s.path("valid-session-query.json");
+    assert!(cli(&[
+        "bgp",
+        "query",
+        text(&input),
+        "--session",
+        session,
+        "--peer-relationship",
+        "internal",
+        "--output",
+        text(&control)
+    ])
+    .status
+    .success());
+    let result = cli(&[
+        "bgp",
+        "query",
+        text(&input),
+        "--session",
+        session,
+        "--other-peer-relationship",
+        "internal",
+        "--output",
+        text(&output),
+    ]);
+    assert!(!result.status.success());
+    assert_cli_usage(&result);
+    assert!(!output.exists());
+    for (n, flags) in [
+        vec!["--other-peer-relationship", "ibgp"],
+        vec![
+            "--other-peer-relationship",
+            "internal",
+            "--other-peer-relationship",
+            "external",
+        ],
+        vec!["--other-peer-relationship"],
+    ]
+    .iter()
+    .enumerate()
+    {
+        let output = s.path(&format!("malformed-{n}.json"));
+        let mut args = vec![
+            "bgp",
+            "associate",
+            text(&input),
+            "--with-store",
+            text(&input),
+            "--comparison-namespace",
+            "test",
+            "--clock-policy",
+            "same-clock",
+            "--output",
+            text(&output),
+        ];
+        args.extend_from_slice(flags);
+        let result = cli(&args);
+        assert!(!result.status.success());
+        assert_cli_usage(&result);
+        assert!(!output.exists());
+    }
+}
+
+#[test]
+fn relationship_scope_single_input_query_policy_and_capture_override_boundaries() {
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let script = r#"
+import json,sys
+from pathlib import Path
+d=json.loads(Path(sys.argv[1]).read_text())
+rel=sys.argv[2]
+assert d['store']['peer_relationship']==rel,d['store']
+assert d['store']['peer_relationship_basis']==('default_unknown' if rel=='unknown' else 'explicit_configuration'),d['store']
+rows=d.get('routes',d.get('alternatives'))
+if rel=='unknown':
+    assert rows==[],rows
+    if 'policy_results' in d: assert d['policy_results']==[],d
+else:
+    assert len(rows)==1 and rows[0]['status']=='active',rows
+    attrs=rows[0]['alternatives'][0]['attributes']
+    assert attrs['local_preference']==(200 if rel=='internal' else None),attrs
+    if 'policy_results' in d:
+        assert len(d['policy_results'])==1,d
+"#;
+    for format in ["mrt", "bmp"] {
+        let s = Scratch::new();
+        let store = relationship_store(&s, format, "left");
+        let config = s.path("profile.txt");
+        fs::write(&config, profile("skip", "skip", false)).unwrap();
+        for command in ["query", "policy"] {
+            for rel in ["internal", "external", "unknown"] {
+                let output = s.path(&format!("{command}-{rel}.json"));
+                let mut args = vec!["bgp", command, text(&store), "--output", text(&output)];
+                if command == "policy" {
+                    args.extend(["--policy-profile", text(&config)]);
+                }
+                if rel != "unknown" {
+                    args.extend(["--peer-relationship", rel]);
+                }
+                let result = cli(&args);
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                let result = Command::new(&python)
+                    .args(["-c", script, text(&output), rel])
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+        }
+        let captured = s.path("captured.journal");
+        capture(&captured, 201, [0, 0], [65001, 65001]);
+        relationship_associate(
+            &s,
+            &store,
+            &captured,
+            "captured-right-default.json",
+            &["--peer-relationship", "internal"],
+        );
+        relationship_associate(
+            &s,
+            &captured,
+            &store,
+            "captured-left-default.json",
+            &["--other-peer-relationship", "internal"],
+        );
+        for (n, left, right, flags) in [
+            (
+                0,
+                &store,
+                &captured,
+                vec!["--other-peer-relationship", "internal"],
+            ),
+            (
+                1,
+                &captured,
+                &store,
+                vec!["--peer-relationship", "internal"],
+            ),
+        ] {
+            let output = s.path(&format!("captured-override-{n}.json"));
+            let mut args = vec![
+                "bgp",
+                "associate",
+                text(left),
+                "--with-store",
+                text(right),
+                "--comparison-namespace",
+                "test",
+                "--clock-policy",
+                "same-clock",
+                "--output",
+                text(&output),
+            ];
+            args.extend(flags);
+            let result = cli(&args);
+            assert!(!result.status.success());
+            assert!(String::from_utf8_lossy(&result.stderr)
+                .contains("capture replay does not accept imported relationship override"));
+            assert!(!output.exists());
+        }
+    }
 }
 #[test]
 fn strict_profile_rejects_unknown_duplicate_missing_malformed_and_limits() {

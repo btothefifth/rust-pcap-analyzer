@@ -98,13 +98,13 @@ semantic support.
 | BGP-C01 | Source/provenance conservation | hard | every interpreted value maps to exact captured/imported bytes and immutable source identity | split one field across packets and rebuild its bytes | producer/import adapters | baseline partial |
 | BGP-C02 | No false negotiation or authority | hard | unilateral, missing, duplicate, or conflicting OPEN evidence never selects negotiated semantics or route truth | one-sided/conflicting capability vectors | session observer | baseline partial |
 | BGP-C03 | Complete declared wire profile | hard | every profile row has valid, boundary, malformed, duplicate, and unsupported-neighbor tests | delete one profile matrix row/test link | wire decoder | open |
-| BGP-C04 | AS4 correctness | hard | NEW/NEW, NEW/OLD, AS_TRANS, AS4_PATH and AS4_AGGREGATOR reconstruction/discard rules match independent vectors | path with longer AS4_PATH than AS_PATH | AS semantic reducer | current candidate implements versioned AS4 reconstruction/discard; the O14-1 receipt reports executed scope, while broader normative coverage remains open |
-| BGP-C05 | Attribute conformance | hard | flags, length, multiplicity, mandatory attributes and treat-as-withdraw/discard/session-reset dispositions are explicit | wrong flags or duplicate mandatory attribute | UPDATE validator | current candidate includes typed occurrences, dispositions, and source-bound semantic checks; the O14-1 receipt reports executed scope, while complete profile coverage remains open |
-| BGP-C06 | Stateful replay fidelity | hard | gaps/conflicts/resets/reordered records never manufacture continuous session or current route state | changed historical record after reset | session/RIB/replay | current candidate includes scoped capture, MRT, and BMP replay/RIB boundaries; the O14-1 receipt reports current execution, while full endpoint-FSM qualification remains open |
-| BGP-C07 | Explainable route policy | hard | every selected/unresolved candidate has deterministic ordered reasons and all alternatives remain available | equal candidates differing at final tie-break | policy engine | current candidate implements bounded persisted policy and ordered traces; the O14-1 receipt reports current execution, while independent full-policy qualification remains open |
-| BGP-C08 | Cross-source normalization without collapse | hard | capture, MRT, BMP and future adapters share route semantics but cannot merge source partitions implicitly | same route bytes from two sources | import/adapters | current candidate implements v2 semantic identity for the supported capture/MRT/BGP4MP/BMP subset and persisted source-scoped joins; the O14-1 receipt reports current execution and full cross-source qualification remains open |
-| BGP-C09 | Bounded atomic publication | hard | every public operation fails without partial state/output under each lower budget | one-below output/work/retained budget | every producer/consumer | current candidate defines bounded and atomic producer/consumer paths; see the O14-1 receipt for the exact executed scope |
-| BGP-C10 | Operational end-to-end path | hard | CLI capture/import -> evidence -> state -> persisted receipt -> replay/query/association succeeds and exposes cuts | force a boundary between UPDATEs | sink/CLI/history | current candidate includes fresh captured/MRT/BMP replay and persisted query, policy, and association commands; see the O14-1 receipt for exact assembled-source coverage |
+| BGP-C04 | AS4 correctness | hard | NEW/NEW, NEW/OLD, AS_TRANS, AS4_PATH and AS4_AGGREGATOR reconstruction/discard rules match independent vectors | path with longer AS4_PATH than AS_PATH | AS semantic reducer | current candidate implements versioned AS4 reconstruction/discard; the current-generation receipt reports executed scope, while broader normative coverage remains open |
+| BGP-C05 | Attribute conformance | hard | flags, length, multiplicity, mandatory attributes and treat-as-withdraw/discard/session-reset dispositions are explicit | wrong flags or duplicate mandatory attribute | UPDATE validator | current candidate includes typed occurrences, dispositions, and source-bound semantic checks; the current-generation receipt reports executed scope, while complete profile coverage remains open |
+| BGP-C06 | Stateful replay fidelity | hard | gaps/conflicts/resets/reordered records never manufacture continuous session or current route state | changed historical record after reset | session/RIB/replay | current candidate includes scoped capture, MRT, and BMP replay/RIB boundaries; the current-generation receipt reports execution, while full endpoint-FSM qualification remains open |
+| BGP-C07 | Explainable route policy | hard | every selected/unresolved candidate has deterministic ordered reasons and all alternatives remain available | equal candidates differing at final tie-break | policy engine | current candidate implements bounded persisted policy and ordered traces; the current-generation receipt reports execution, while independent full-policy qualification remains open |
+| BGP-C08 | Cross-source normalization without collapse | hard | capture, MRT, BMP and future adapters share route semantics but cannot merge source partitions implicitly | same route bytes from two sources | import/adapters | current candidate implements v2 semantic identity for the supported capture/MRT/BGP4MP/BMP subset and persisted source-scoped joins; the current-generation receipt reports execution and full cross-source qualification remains open |
+| BGP-C09 | Bounded atomic publication | hard | every public operation fails without partial state/output under each lower budget | one-below output/work/retained budget | every producer/consumer | current candidate defines bounded and atomic producer/consumer paths; see the current-generation receipt for the exact executed scope |
+| BGP-C10 | Operational end-to-end path | hard | CLI capture/import -> evidence -> state -> persisted receipt -> replay/query/association succeeds and exposes cuts | force a boundary between UPDATEs | sink/CLI/history | current candidate includes fresh captured/MRT/BMP replay and persisted query, policy, and association commands; see the current-generation receipt for exact assembled-source coverage |
 | BGP-C11 | Cross-platform and adversarial qualification | hard for qualified claim | Windows/Linux native matrices, macOS compatibility, sustained fuzz, real corpus and scale receipts retained | Linux runner or fuzz crash | validation/CI | open: exact checkpoint `ed4350e` passed native-validation on Windows/Linux/macOS and streaming CI; sustained fuzz, corpus, and scale remain unqualified |
 | BGP-C12 | Maintainable extension model | optimization | new opaque capability/attribute requires no decoder rewrite; semantic support is registry-driven and isolated | add synthetic unknown code | typed registries | open |
 
@@ -292,7 +292,7 @@ evidence retention.
 
 Exit: BGP-C10 passes the final same-generation fresh-process capture/import,
 replay, query, policy, export, and association workflows in the authoritative
-[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json).
+[PR feedback validation receipt](../../evidence/pr-feedback-validation.json).
 
 ### Phase 6 — qualification and promotion
 
@@ -348,7 +348,7 @@ cannot compensate for a stale fixture rejected by an earlier valid guard.
 | resource amplification | one UPDATE replicates many large attribute trees | preflight aggregate work/retention before cloning/publication | exact-limit and one-below route fanout |
 | formatter/document drift | tests pass while active docs describe repaired defects | current pointer and touched contracts must agree with code | doc consistency check |
 
-## Current implementation candidate — O14-1
+## Current implementation candidate — O14-1 with O14-F1 repairs
 
 The frozen O14-1 candidate extends source-ordered BGP4MP replay through the
 canonical imported Adj-RIB-In reducer. Announcements, replacement, withdrawal,
@@ -374,10 +374,12 @@ are [MRT ingestion](BGP_MRT.md), [MRT storage](BGP_MRT_STORE.md),
 [BMP ingestion](BGP_BMP.md), [persisted consumers](BGP_PERSISTED.md), and
 [semantic identity](BGP_SEMANTIC_IDENTITY.md).
 
-Final source-generation validation is governed by the root-owned
-[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json).
+Current repair-generation validation is governed by the root-owned
+[PR feedback validation receipt](../../evidence/pr-feedback-validation.json).
 Its status and source inventory determine the current candidate's validated
-scope. Full declared-profile conformance, sustained fuzzing, lawful real-corpus
+scope; a pending receipt does not establish a passed gate. The
+[O14-1 receipt](../../evidence/objectives-1-4-validation.json) remains historical
+evidence for its preceding source generation. Full declared-profile conformance, sustained fuzzing, lawful real-corpus
 parity, measured scale/RSS, security review, exact-head platform CI, and source
 authenticity remain separate dimensions; this implementation candidate does
 not close them.

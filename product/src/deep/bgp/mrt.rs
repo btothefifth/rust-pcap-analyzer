@@ -706,24 +706,46 @@ pub(crate) fn replay_message_record(
                 });
             }
             let accepted_state = !session.state_conflict && session.fsm == Some(6);
+            // RFC 7313 section 4 describes the sender's procedure: the
+            // opposite-side receiver advertised support to that sender.
+            // This is observed wire layout evidence, not proof that either
+            // endpoint negotiated or processed the refresh. The separate
+            // receiver error-handling condition in section 5 is not inferred.
+            let (receiver_capability70, refresh_basis) =
+                refresh_sender_layout(&session.decoder, direction);
+            let subtype = bytes[21];
+            let parse_status = if subtype > 2 {
+                issues.push("unknown_route_refresh_subtype_ignored");
+                "ignored_unknown_route_refresh_subtype"
+            } else if !accepted_state {
+                "quarantined_route_refresh_fsm_state"
+            } else if matches!(subtype, 1 | 2) && !receiver_capability70 {
+                issues.push("enhanced_route_refresh_unresolved_context");
+                "quarantined_route_refresh_capability_context"
+            } else {
+                "decoded_route_refresh"
+            };
+            if !accepted_state {
+                issues.push("route_refresh_outside_established");
+            }
             Ok(ReplayRecord {
                 event: event_json(
                     source.event(&key, Some(direction), generation),
                     "message",
-                    if accepted_state {
-                        "decoded_route_refresh"
-                    } else {
-                        "quarantined_route_refresh_fsm_state"
-                    },
-                    if accepted_state {
-                        Vec::new()
-                    } else {
-                        vec!["route_refresh_outside_established"]
-                    },
+                    parse_status,
+                    issues,
                     Some(Json::object([
                         ("afi", be16(bytes, 19)?.into()),
-                        ("subtype", bytes[21].into()),
+                        ("subtype", subtype.into()),
                         ("safi", bytes[22].into()),
+                        ("receiver_open_direction", (1 - direction).into()),
+                        (
+                            "receiver_capability70_advertised",
+                            receiver_capability70.into(),
+                        ),
+                        ("sender_layout_basis", refresh_basis.into()),
+                        ("negotiation_established", false.into()),
+                        ("endpoint_processing_claimed", false.into()),
                     ])),
                     Some(message_range),
                 ),
@@ -742,6 +764,25 @@ pub(crate) fn replay_message_record(
             observation: None,
         }),
     }
+}
+
+/// Qualify only the RFC 7313 sender layout from same-generation wire OPENs.
+/// Session/FSM admission is checked separately; no reported BMP OPEN is used.
+fn refresh_sender_layout(state: &SessionState, direction: u8) -> (bool, &'static str) {
+    let Some(opens) = state.opens.get(&(1 - direction)) else {
+        return (false, "missing_receiver_open");
+    };
+    if opens.len() != 1 {
+        return (false, "ambiguous_receiver_open");
+    }
+    let open = &opens[0];
+    if open.ambiguous || !open.capabilities.valid {
+        return (false, "invalid_receiver_open");
+    }
+    if !open.capabilities.enhanced_refresh {
+        return (false, "receiver_did_not_advertise_capability70");
+    }
+    (true, "observed_peer_capability70_for_sender_layout")
 }
 
 fn resolve_session(

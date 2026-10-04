@@ -23,6 +23,13 @@ The persisted consumer and CLI paths are specified in
 [BGP_PERSISTED.md](BGP_PERSISTED.md). They require verified sealed raw stores,
 explicit caller comparison namespaces and clock policies. They preserve each
 original source partition and report unknown coverage and unauthenticated trust.
+Their CLI replay configuration is also per input: `--peer-relationship` applies
+to the first store, and association-only `--other-peer-relationship` applies to
+the `--with-store` input. An omitted option remains unknown rather than inheriting
+the other input's context. Ordered store references preserve both relationship
+values and their explicit/default basis. These settings control imported MRT/BMP
+attribute usability; they establish neither source authentication nor endpoint
+state. Captured inputs reject either imported replay override on their own side.
 The new v2 surface is implemented and has focused synthetic native evidence only
 when accompanied by the current execution receipt; historical acceptance below
 does not qualify this new schema or imply external-source authenticity.

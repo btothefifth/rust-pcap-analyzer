@@ -99,12 +99,34 @@ input rows and decisions to the verified source-store receipt and terminal
 SHA-256. Neither digest authenticates an external source. Replay relationship
 configuration and its explicit/unknown basis are retained in store references.
 
+For a single imported input, `--peer-relationship unknown|internal|external`
+configures that replay's relationship-dependent attribute interpretation. Omission
+leaves the relationship unknown with `default_unknown` basis; an explicit value,
+including `unknown`, has `explicit_configuration` basis. This caller setting
+does not infer a relationship from ASN equality, peer labels or source identity.
+Captured journals reject this imported replay override.
+
 ## Multi-source association
 
 ```bash
 pcap-depth bgp associate STORE --with-store OTHER_STORE --comparison-namespace explicit-analysis --clock-policy same-clock --output NEW_FILE
 pcap-depth bgp associate STORE --with-store OTHER_STORE --comparison-namespace explicit-analysis --clock-policy ignore --clock-basis explicit-spatial-only --output NEW_FILE
+pcap-depth bgp associate INTERNAL_STORE --with-store EXTERNAL_STORE --peer-relationship internal --other-peer-relationship external --comparison-namespace explicit-analysis --clock-policy same-clock --output NEW_FILE
 ```
+
+Association configures each input independently. `--peer-relationship` applies
+only to the first `STORE`; `--other-peer-relationship` applies only to
+`OTHER_STORE`. Both accept `unknown`, `internal` or `external`. Each omitted
+option remains absent (`default_unknown`); the first input's setting never
+supplies the second input's context. The ordered `stores` references retain each
+setting and basis. Valid LOCAL_PREF evidence remains usable for internal peers,
+is discarded from effective attributes for external peers while its source bytes
+remain available, and leaves route actions quarantined when the relationship is
+unknown. The same scoping applies to MRT and BMP inputs, including mixed pairs.
+An override on either captured input rejects. `--other-peer-relationship` is
+accepted only by `bgp associate`; single-input operations and imports reject it.
+Duplicate options, missing values and unsupported values fail with Usage before
+publishing output.
 
 A comparison namespace is a mandatory caller-established mapping. It does not
 rewrite either store's original namespace or partition. `same-clock` compares

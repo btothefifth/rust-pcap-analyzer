@@ -642,9 +642,10 @@ impl MrtBatch {
             }
             let base = at + 12 + usize::from(microseconds.is_some()) * 4;
             // RFC 6396 binds a peer table only to the immediately following
-            // TABLE_DUMP_V2 RIB series. An unrelated record ends that series;
-            // a later RIB must not silently reuse stale peer identities.
-            if record_type != 13 || !matches!(subtype, 1..=6) {
+            // TABLE_DUMP_V2 RIB series. RFC 8050 adds RIB subtypes 8..=12;
+            // they remain in that series even while their bodies are opaque.
+            // An unrelated record ends the association with prior peers.
+            if record_type != 13 || !matches!(subtype, 1..=6 | 8..=12) {
                 table = None;
             }
             let body = if malformed_et_prefix {

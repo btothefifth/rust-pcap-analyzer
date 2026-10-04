@@ -2,8 +2,9 @@
 
 Owner: `product/src/deep/bgp_mrt.rs`. This is the Phase 4 MRT container
 slice under [BGP_COMPLETION.md](BGP_COMPLETION.md), criterion BGP-C08.
-The primary byte layouts are RFC 6396 sections 2–4 and RFC 8050 for
-ADD-PATH subtype numbers. The adapter takes an already available byte slice.
+The primary byte layouts are [RFC 6396 sections 2–4](https://www.rfc-editor.org/rfc/rfc6396.html)
+and [RFC 8050 sections 4 and 5](https://www.rfc-editor.org/rfc/rfc8050.html)
+for ADD-PATH RIB records. The adapter takes an already available byte slice.
 It downloads nothing and makes no claim that a collector label, digest, or
 successful parse authenticates the source.
 
@@ -21,8 +22,15 @@ successful parse authenticates the source.
   The sequence is scoped by batch, peer-table record identity and the caller's
   checkpoint label. Unknown AFI/SAFI has no assumed NLRI or entry-count
   boundary and remains opaque. The view name must be UTF-8, and the table is
-  scoped only to the immediately following TABLE_DUMP_V2 RIB series; an
-  unrelated record ends the association.
+  scoped only to the immediately following TABLE_DUMP_V2 RIB series. Ordinary
+  RIB subtypes 2–6 and ADD-PATH RIB subtypes 8–12 preserve that association
+  even when their bodies remain opaque. ADD-PATH records do not admit route
+  entries or Path Identifiers into semantic state, but a following supported
+  ordinary RIB still binds to the same exact peer-table record. A new subtype 1
+  table replaces the association and its peer-index bounds. A non-TABLE_DUMP_V2
+  record or any other subtype ends the association; a later supported RIB then
+  requires a new peer table. A malformed supported RIB or peer table fails the
+  whole batch rather than preserving an earlier table as a fallback.
 - BGP4MP and BGP4MP_ET state and message subtypes retain peer/local address
   and ASN, ASN-field width selected by subtype, interface index, locally
   generated and ADD-PATH subtype labels, and either raw state numbers or exact
@@ -68,6 +76,10 @@ boundary in `product/tests/bgp_mrt_vectors.py`; native typed-record,
 conversion, opaque-neighbor, index, ET, and exact/one-below budget tests in
 `product/tests/bgp_mrt.rs`; imported state, malformed-retention, exact output,
 and fresh-process witnesses are in `product/tests/bgp_mrt_bgp4mp_replay.rs`.
+The four `table_dump_v2_` tests independently encode all five ADD-PATH RIB
+subtypes, supported IPv4/IPv6 neighbors, series-ending records, fresh-table
+replacement, and malformed-record atomicity. They verify exact peer-table
+offset/digest/index binding while keeping ADD-PATH bytes opaque.
 Authored selectors are distinct from executed receipts in the current validation
 record. A future Phase 4 exit still requires a real
 capture/MRT semantic equivalence and non-collapse join through the accepted
