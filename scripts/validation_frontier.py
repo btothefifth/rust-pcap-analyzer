@@ -73,10 +73,11 @@ def source_snapshot(root):
     and isolated tooling/build trees are excluded before walking descendants.
     """
     root = Path(root)
-    excluded = {'target', 'evidence', '.git', '__pycache__', '.pytest_cache', '.local-tooling', '.local-build'}
+    excluded = {'target', '.git', '__pycache__', '.pytest_cache', '.local-tooling', '.local-build'}
     names = []
     for directory, subdirs, files in os.walk(root, followlinks=False):
-        subdirs[:] = [name for name in subdirs if name not in excluded]
+        subdirs[:] = [name for name in subdirs if name not in excluded
+                      and not (name == 'evidence' and Path(directory) == root)]
         for name in files:
             path = Path(directory) / name
             relative = path.relative_to(root)

@@ -27,10 +27,11 @@ def receipt_command(command: list[str]) -> list[str]:
 def source_identity() -> str:
     digest = hashlib.sha256()
     files = []
-    excluded = {"target", "evidence", ".git", "__pycache__", ".pytest_cache",
+    excluded = {"target", ".git", "__pycache__", ".pytest_cache",
                 ".local-tooling", ".local-build"}
     for directory, subdirs, names in os.walk(ROOT, followlinks=False):
-        subdirs[:] = [name for name in subdirs if name not in excluded]
+        subdirs[:] = [name for name in subdirs if name not in excluded
+                      and not (name == 'evidence' and Path(directory) == ROOT)]
         files.extend(Path(directory) / name for name in names)
     for file in sorted(files):
         relative = file.relative_to(ROOT)

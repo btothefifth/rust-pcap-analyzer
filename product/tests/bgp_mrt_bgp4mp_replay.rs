@@ -2116,7 +2116,7 @@ fn reset_requires_fresh_open_evidence_and_extended_timestamp_offsets_are_full_wi
         .encode()
         .contains("capability_context_unresolved"));
 
-    for (index, microseconds) in [1_000_000, u32::MAX].into_iter().enumerate() {
+    for (index, microseconds) in [0, 999_999, 1_000_000, u32::MAX].into_iter().enumerate() {
         let bytes = established_flow(4, false, microseconds);
         let extended = import(
             &scratch.file(&format!("extended-{index}.mrt-store")),
@@ -2124,8 +2124,18 @@ fn reset_requires_fresh_open_evidence_and_extended_timestamp_offsets_are_full_wi
             &format!("extended-{index}"),
         );
         let candidate = &extended.bgp4mp_candidates[0];
-        let expected = 30_000_000_000i64 + i64::from(microseconds) * 1_000;
-        assert_eq!(candidate.observed_at_ns, Some(expected));
+        let expected =
+            (microseconds < 1_000_000).then(|| 30_000_000_000i64 + i64::from(microseconds) * 1_000);
+        assert_eq!(candidate.observed_at_ns, expected);
+        assert_eq!(
+            extended
+                .bgp4mp_events
+                .last()
+                .unwrap()
+                .encode()
+                .contains("invalid_mrt_record_timestamp"),
+            expected.is_none(),
+        );
         assert_eq!(
             extended.batch().records[candidate.record_index]
                 .time

@@ -1,0 +1,169 @@
+# Incremental MRT and source-bound evidence contract
+
+Generation G2 begins at `f083765dccd59c7a71d91d3277feed243328ce3f`.
+Implementation and qualification are pending until their owning receipts are
+recorded. This contract extends the offline profile in
+[BGP completion](BGP_COMPLETION.md); it preserves existing MRT, BMP and captured
+store consumers.
+The [owning validation receipt](../../evidence/bgp-stream-validation.json)
+records the tested generation and finite outcomes. Generated root receipts are
+excluded from validation source identity; nested source modules such as
+`tools/evidence` remain included.
+
+## Controlling change contract
+
+CHANGE01 follows one ordinary path: regular MRT input -> bounded canonical
+record decoder -> sealed incremental raw-source store -> verified replay ->
+ordered checkpoint evidence -> manifest/window export -> attributed external
+comparison. Every consequential consumer must retain original source identity,
+offsets, dispositions and uncertainty.
+
+Required outcomes are incremental admission beyond the whole-batch 64 MiB
+ceiling, explicit source-order chronology across independent checkpoints,
+stable evidence manifests with explicit ASN/time selectors, and a bounded
+external normalized BGP differential interface. Existing whole-batch limits
+and readers remain valid. New input capacity does not remove state-retention
+limits or establish measured RSS or throughput.
+
+Forbidden outcomes include resetting decoder context at processing boundaries,
+inventing peer-index bytes, changing source/checkpoint identity per buffer,
+carrying PIT/OPEN/RIB context across independent sources, sorting by clock
+labels, publishing partial output as complete, silently dropping uncertainty,
+fabricating packet provenance, and treating comparison agreement as protocol
+correctness or candidate admission.
+
+## Raw source and processing boundaries
+
+The additive `PCBMRT02` container stores exact original records. A bounded
+header binds labels and admitted length; consecutive frames bind ordinal,
+absolute original-source offset, raw length and bytes through a domain-separated
+chain. The terminal footer binds complete source SHA-256, byte length, record
+count, final chain and seal. Verification rejects truncation, growth, trailing
+bytes, discontinuity, duplication, reordering and inconsistent identities.
+Digests establish integrity, not collector authentication.
+
+Both whole-batch and incremental readers use the same canonical record grammar.
+The actual active peer table retains its original offset and digest through
+supported and opaque ADD-PATH RIB series. Unrelated records invalidate it.
+Canonical BGP4MP replay retains its bounded OPEN/FSM context within one source.
+Whole-source identity is known before normalization: a full verification pass
+precedes emitting replay; replay verifies the source again before completing
+its receipt. Intermediate sink output remains provisional.
+
+Memory admission covers current record, active peer table, capped session
+context and current output row. Source bytes, record size/count, work, retained
+state and output each have explicit caps. Disk admission includes original
+input, framed store and partial output coexistence. Failure retains an owned
+partial workspace for inspection; successful completion publishes the manifest
+last through a no-overwrite path.
+
+## Sequence, chronology and windows
+
+`pcap-evidence.bgp.source-sequence.v1` binds each entry's caller ordinal, full
+source identity, checkpoint label, store seal and predecessor digest. Sequence
+order is evidence-inspection order. Every source is replayed independently;
+adjacency never proves wire continuity. Chronology preserves record order,
+exact MRT seconds/microseconds, regressions, opaque and rejected records, and
+route-free events.
+
+Manifest identity binds source identities and seals, semantic profile and
+relationship options, row count/digest and coverage/disposition counts. Paths
+are navigation hints. Operational read-buffer sizes do not alter semantic
+identity. Row anchors use whole-source identity, absolute record offset/digest
+and entry coordinates, never replay-local observation indexes alone.
+
+ASN selectors use validated effective paths with explicit `path_member` or
+`origin` roles. Origin requires a unique supported terminal origin; AS_SET and
+unresolved transitions remain unknown. Time selectors require an explicit
+clock basis and scope, use exact integer nanoseconds and half-open intervals,
+and never substitute ingestion time, zero or a different clock for missing
+evidence. Outputs retain unresolved/unsupported witnesses and counts. A label
+inside a window does not establish certain occurrence-time membership.
+Missing or out-of-range BGP4MP_ET microseconds preserve raw values with unknown
+numeric time and precision. This rule also applies to the canonical imported
+observation clock, so changing time basis cannot create precision.
+These exports inspect historical source observations, without endpoint-current
+route installation or reachability claims.
+
+## External comparison
+
+`pcap-evidence.bgp.interpretation.v1` binds attributed producer and adapter
+versions, source digest/length, normalization/config identities, numeric source
+anchors, tagged imported-source provenance, coverage and typed dispositions.
+Ordered raw attribute occurrences, duplicate/discard dispositions and incomplete
+semantic identity are preserved. External commands are inert metadata.
+
+`pcap-evidence.bgp.differential.v1` compares only matching source identities and
+normalization profiles. Missing coverage is `not_comparable`; rejected versus
+accepted evidence is a disagreement. Supported matching fields are agreement
+within declared coverage. Comparison records `consensus_used=false` and cannot
+enter the core admission path.
+
+## Finite acceptance and remaining qualification
+
+Owning controls must exercise virtual input above 64 MiB without a large disk
+fixture, read splits and truncation, exact caps and one-below rejection, actual
+PIT association, canonical BGP4MP continuity, checkpoint isolation, reversed
+clock labels, seal/ordinal/source tampering, window endpoints and unknowns,
+stable semantic identity across buffer sizes, numeric comparison ordering and
+external source/profile refusal. Tiny ordinary CLI fixtures exercise fresh
+verified consumers and no-overwrite publication.
+
+Independent source review precedes integration; an additional independent
+coherence review checks assembled behavior. Local execution and exact-head
+hosted CI remain separate evidence. Real-corpus parity, sustained fuzzing,
+representative scale/RSS, complete normative review and broader security
+qualification require their own receipts. Resume cursors, unlimited state
+history, built-in external subprocess adapters and live feed operation are
+subsequent work, not implicit capabilities of this increment.
+
+## Command surface
+
+The additive depth commands use a create-new workspace:
+
+```sh
+pcap-depth bgp import-mrt-stream input.mrt --workspace imported \
+  --source-id collector-a --checkpoint checkpoint-a
+pcap-depth bgp chronology imported/bgp.mrt-stream --workspace chronology \
+  --with-store later/bgp.mrt-stream
+pcap-depth bgp window imported/bgp.mrt-stream --workspace window \
+  --asn 65001 --asn-role origin --time-basis mrt-record \
+  --clock-scope collector-a --start-ns 1000000000 --end-ns 2000000000
+python3 -m tools.research.bgp_compare native chronology/evidence.ndjson \
+  chronology/manifest.json --source-ordinal 0
+python3 -m tools.research.bgp_compare compare native.json external.json
+```
+
+Import publishes `bgp.mrt-stream` and `receipt.json`. Chronology/window publishes
+`evidence.ndjson`, `sequence.json` and `manifest.json`; the complete manifest is
+published last. Window exports retain all chronology rows with selector
+dispositions and a selection flag, including witnesses that cannot be resolved.
+Partial names remain available after publication as hard links to the completed
+files, sharing their allocated storage. Publication performs no pathname
+deletion; workspace retirement is a separate owner action.
+`--with-store` may repeat and its argument order is the explicit source order.
+Relationship configuration for these commands applies uniformly to the selected
+independent sources and is recorded as caller configuration.
+
+Time bases are `mrt-record`, `rib-originated` or `observation`; ASN roles are
+`origin` or `path-member`. Clock scope is an exact source ID, or explicit
+`all-source-clocks` to inspect each independent source's labels. The latter
+never establishes clock synchronization or a common occurrence-time interval.
+An exact clock scope must exist in the selected sequence; an absent scope is a
+typed refusal, without a completed export. Rows belonging to other admitted
+source clocks retain an `outside_clock_scope` disposition.
+
+Stream limits are `--max-source-bytes`, `--max-store-bytes`,
+`--max-record-bytes`, `--max-records` and `--max-work`; exports also accept
+`--max-output-bytes`. CLI output admission defaults to 64 MiB and has a 256 MiB
+ceiling. CLI admission also bounds a source to 8 GiB, a store to 16 GiB, a record
+to 16 MiB and record count to ten million. These are command ceilings, not
+measured scale qualifications or an aggregate filesystem quota. The local
+repository storage constraint continues to cover all project artifacts.
+
+The external interface accepts an independently produced, attributed normalized
+document. Each covered field carries an `observed`, `unknown`, `incomplete` or
+`unsupported` envelope. Only observed fields with complete coverage on both
+sides can agree or disagree. Multi-source exports require an explicit source
+ordinal when converting to a single-source interpretation. Commands stored in
+producer metadata are never executed.

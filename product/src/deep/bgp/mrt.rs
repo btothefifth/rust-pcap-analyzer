@@ -17,6 +17,45 @@ pub(crate) struct ReplayState {
 }
 
 impl ReplayState {
+    /// Logical aggregate session retention. Per-session parser caps remain in
+    /// force; streaming consumers also enforce one aggregate retained ceiling.
+    pub(crate) fn retained_bytes(&self, limits: &Limits) -> Result<usize> {
+        let mut bytes = self
+            .sessions
+            .capacity()
+            .checked_mul(std::mem::size_of::<ImportedSession>())
+            .ok_or_else(|| Error::limit("bgp_mrt_sessions_retained"))?;
+        for session in &self.sessions {
+            let identity = &session.identity;
+            let add = session.id.capacity()
+                + identity.source_id.capacity()
+                + identity.checkpoint_id.capacity()
+                + identity.peer_address.capacity()
+                + identity.local_address.capacity();
+            bytes = bytes
+                .checked_add(add)
+                .ok_or_else(|| Error::limit("bgp_mrt_sessions_retained"))?;
+            for opens in session.decoder.opens.values() {
+                bytes = bytes
+                    .checked_add(opens.capacity() * std::mem::size_of::<OpenState>())
+                    .ok_or_else(|| Error::limit("bgp_mrt_sessions_retained"))?;
+                for open in opens {
+                    let add = super::super::bgp_mrt_stream_store::json_memory(&open.witness.value)
+                        + open.capabilities.mp.len() * 48
+                        + open.capabilities.add_path.len() * 64
+                        + open.capability_issues.capacity() * std::mem::size_of::<&str>();
+                    bytes = bytes
+                        .checked_add(add)
+                        .ok_or_else(|| Error::limit("bgp_mrt_sessions_retained"))?;
+                }
+            }
+        }
+        if bytes > limits.retained_bytes {
+            return Err(Error::limit("bgp_mrt_sessions_retained"));
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn with_peer_relationship(peer_relationship: Option<PeerRelationship>) -> Self {
         Self {
             sessions: Vec::new(),
@@ -632,6 +671,9 @@ pub(crate) fn replay_message_record(
             }
 
             issues.extend(parsed.issues.iter().copied());
+            if observation_time_ns(record).is_none() {
+                issues.push("invalid_mrt_record_timestamp");
+            }
             let context = import_context(
                 source.event(&key, Some(direction), generation),
                 message_range.clone(),
@@ -1078,9 +1120,16 @@ pub(crate) fn record_id(
 }
 
 fn observation_time_ns(record: &MrtRecord) -> Option<i64> {
+    let micros = if record.record_type == 17 {
+        // RFC 6396 ET is an explicit microsecond field, not an optional zero.
+        // Preserve malformed raw values in record/event evidence, but expose
+        // no usable numeric observation time when the field is absent/invalid.
+        record.time.microseconds.filter(|us| *us < 1_000_000)?
+    } else {
+        0
+    };
     let seconds = i64::from(record.time.seconds).checked_mul(1_000_000_000)?;
-    let micros = i64::from(record.time.microseconds.unwrap_or(0)).checked_mul(1_000)?;
-    seconds.checked_add(micros)
+    seconds.checked_add(i64::from(micros).checked_mul(1_000)?)
 }
 
 /// Exact imported value bytes and message-relative coordinates, with no packet
@@ -1395,9 +1444,8 @@ fn import_context(
         provenance: vec![message_range],
     };
     context.validate(limits)?;
-    if observation_time_ns(event.source.record).is_none() {
-        return Err(Error::limit("bgp_mrt_timestamp"));
-    }
+    // A source label may have unknown numeric time. Exact byte provenance and
+    // checkpoint/session identity remain available independently of that clock.
     Ok(context)
 }
 
@@ -1757,6 +1805,49 @@ mod transition_tests {
             (6, 6),
         ] {
             assert!(!valid_fsm_transition(old, new), "{old} -> {new}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_time_tests {
+    use super::super::super::bgp_mrt::MrtTime;
+    use super::*;
+
+    #[test]
+    fn ordinary_and_extended_raw_time_have_distinct_numeric_admission() {
+        let mut record = MrtRecord {
+            offset: 0,
+            length: 0,
+            record_type: 16,
+            subtype: 99,
+            time: MrtTime {
+                seconds: 30,
+                microseconds: None,
+            },
+            sha256: String::new(),
+            body: MrtBody::Opaque {
+                reason: "test",
+                bytes: Vec::new(),
+            },
+        };
+        assert_eq!(observation_time_ns(&record), Some(30_000_000_000));
+        record.time.microseconds = Some(999_999);
+        assert_eq!(observation_time_ns(&record), Some(30_000_000_000));
+        record.record_type = 17;
+        for (raw, expected) in [
+            (None, None),
+            (Some(0), Some(30_000_000_000)),
+            (Some(999_999), Some(30_999_999_000)),
+            (Some(1_000_000), None),
+            (Some(u32::MAX), None),
+        ] {
+            record.time.microseconds = raw;
+            assert_eq!(observation_time_ns(&record), expected);
+            assert_eq!(
+                record.time.microseconds, raw,
+                "classification must preserve raw evidence"
+            );
         }
     }
 }

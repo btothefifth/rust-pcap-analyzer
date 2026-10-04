@@ -605,6 +605,133 @@ pub(crate) fn malformed_bgp4mp_scope(record: &MrtRecord) -> Result<Option<Bgp4mp
     }
 }
 
+/// The single canonical semantic record decoder. Both batch and stream paths
+/// supply exact original bytes and absolute coordinates; PIT identity survives
+/// only the RFC-defined contiguous RIB series.
+fn decode_record(
+    raw: &[u8],
+    offset: u64,
+    table: &mut Option<(u64, String, usize)>,
+    m: &mut Meter<'_>,
+) -> Result<MrtRecord> {
+    let at = usize::try_from(offset).map_err(|_| Error::limit("mrt_offset"))?;
+    // Every cursor base and field coordinate stays inside this checked absolute
+    // extent. Reject before parsing can change PIT association or add offsets.
+    at.checked_add(raw.len())
+        .ok_or_else(|| Error::limit("mrt_offset"))?;
+    if raw.len() < 12 {
+        return Err(bad("mrt_header", at, "partial common header"));
+    }
+    let len = u32::from_be_bytes(
+        raw[8..12]
+            .try_into()
+            .map_err(|_| Error::limit("mrt_length"))?,
+    );
+    if usize::try_from(len).ok().and_then(|n| n.checked_add(12)) != Some(raw.len()) {
+        return Err(bad("mrt_length", at, "record extent mismatch"));
+    }
+    let mut h = Cursor::new(&raw[..12], at);
+    let seconds = h.u32()?;
+    let record_type = h.u16()?;
+    let subtype = h.u16()?;
+    let declared = h.u32()?;
+    if declared != len {
+        return Err(bad("mrt_length", at + 8, "preflight mismatch"));
+    }
+    let digest = sha256::hex(&sha256::digest(raw));
+    let mut payload = &raw[12..];
+    let mut microseconds = None;
+    let malformed_et_prefix = record_type == 17 && payload.len() < 4;
+    if record_type == 17 && !malformed_et_prefix {
+        let mut et = Cursor::new(payload, at + 12);
+        let us = et.u32()?;
+        microseconds = Some(us);
+        payload = &payload[4..];
+    }
+    let base = at + 12 + usize::from(microseconds.is_some()) * 4;
+    // RFC 6396 binds a peer table only to the immediately following
+    // TABLE_DUMP_V2 RIB series. RFC 8050 adds RIB subtypes 8..=12;
+    // they remain in that series even while their bodies are opaque.
+    // An unrelated record ends the association with prior peers.
+    if record_type != 13 || !matches!(subtype, 1..=6 | 8..=12) {
+        *table = None;
+    }
+    let body = if malformed_et_prefix {
+        m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+        MrtBody::Opaque {
+            reason: "malformed_bgp4mp_record",
+            bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+        }
+    } else {
+        match (record_type, subtype) {
+            (13, 1) => {
+                let p = parse_peers(payload, base, m)?;
+                *table = Some((at as u64, digest.clone(), p.peers.len()));
+                MrtBody::PeerIndex(p)
+            }
+            (13, 2 | 4 | 6) => match parse_rib(payload, base, subtype, table.as_ref(), m)? {
+                Some(r) => MrtBody::Rib(r),
+                None => {
+                    m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+                    MrtBody::Opaque {
+                        reason: "unsupported_afi_safi",
+                        bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+                    }
+                }
+            },
+            (16 | 17, _) => match parse_bgp4mp(payload, base, subtype, m) {
+                Ok(Some(b)) => MrtBody::Bgp4mp(b),
+                Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
+                result => {
+                    m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+                    MrtBody::Opaque {
+                        reason: if result.is_err() {
+                            "malformed_bgp4mp_record"
+                        } else {
+                            "unsupported_bgp4mp_subtype_or_afi"
+                        },
+                        bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+                    }
+                }
+            },
+            _ => {
+                m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
+                MrtBody::Opaque {
+                    reason: "unsupported_type_or_subtype",
+                    bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
+                }
+            }
+        }
+    };
+    Ok(MrtRecord {
+        offset,
+        length: len,
+        record_type,
+        subtype,
+        time: MrtTime {
+            seconds,
+            microseconds,
+        },
+        sha256: digest,
+        body,
+    })
+}
+
+/// Per-record semantic admission for an incremental source. The meter is reset
+/// only for local allocation caps; callers must conserve cumulative work.
+pub(crate) fn decode_incremental(
+    raw: &[u8],
+    offset: u64,
+    table: &mut Option<(u64, String, usize)>,
+    source: &MrtSource,
+    limits: &MrtLimits,
+) -> Result<(MrtRecord, usize)> {
+    limits.validate()?;
+    let mut meter = Meter::new(limits, raw.len(), 1, source)?;
+    let record = decode_record(raw, offset, table, &mut meter)?;
+    Ok((record, meter.work))
+}
+
 impl MrtBatch {
     /// Parse all records before publishing any result. Input is an already
     /// available byte slice; no download or collector trust is involved.
@@ -666,94 +793,13 @@ impl MrtBatch {
             .try_reserve_exact(starts.len())
             .map_err(|_| Error::limit("mrt_records"))?;
         let mut table: Option<(u64, String, usize)> = None;
-        for (at, end, len) in starts {
-            let mut h = Cursor::new(&input[at..at + 12], at);
-            let seconds = h.u32()?;
-            let record_type = h.u16()?;
-            let subtype = h.u16()?;
-            let declared = h.u32()?;
-            if declared != len {
-                return Err(bad("mrt_length", at + 8, "preflight mismatch"));
-            }
-            let digest = sha256::hex(&sha256::digest(&input[at..end]));
-            let mut payload = &input[at + 12..end];
-            let mut microseconds = None;
-            let malformed_et_prefix = record_type == 17 && payload.len() < 4;
-            if record_type == 17 && !malformed_et_prefix {
-                let mut et = Cursor::new(payload, at + 12);
-                let us = et.u32()?;
-                microseconds = Some(us);
-                payload = &payload[4..];
-            }
-            let base = at + 12 + usize::from(microseconds.is_some()) * 4;
-            // RFC 6396 binds a peer table only to the immediately following
-            // TABLE_DUMP_V2 RIB series. RFC 8050 adds RIB subtypes 8..=12;
-            // they remain in that series even while their bodies are opaque.
-            // An unrelated record ends the association with prior peers.
-            if record_type != 13 || !matches!(subtype, 1..=6 | 8..=12) {
-                table = None;
-            }
-            let body = if malformed_et_prefix {
-                m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
-                MrtBody::Opaque {
-                    reason: "malformed_bgp4mp_record",
-                    bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
-                }
-            } else {
-                match (record_type, subtype) {
-                    (13, 1) => {
-                        let p = parse_peers(payload, base, &mut m)?;
-                        table = Some((at as u64, digest.clone(), p.peers.len()));
-                        MrtBody::PeerIndex(p)
-                    }
-                    (13, 2 | 4 | 6) => {
-                        match parse_rib(payload, base, subtype, table.as_ref(), &mut m)? {
-                            Some(r) => MrtBody::Rib(r),
-                            None => {
-                                m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
-                                MrtBody::Opaque {
-                                    reason: "unsupported_afi_safi",
-                                    bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
-                                }
-                            }
-                        }
-                    }
-                    (16 | 17, _) => match parse_bgp4mp(payload, base, subtype, &mut m) {
-                        Ok(Some(b)) => MrtBody::Bgp4mp(b),
-                        Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
-                        result => {
-                            m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
-                            MrtBody::Opaque {
-                                reason: if result.is_err() {
-                                    "malformed_bgp4mp_record"
-                                } else {
-                                    "unsupported_bgp4mp_subtype_or_afi"
-                                },
-                                bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
-                            }
-                        }
-                    },
-                    _ => {
-                        m.add(0, 0, 0, payload.len(), payload.len(), payload.len() * 2)?;
-                        MrtBody::Opaque {
-                            reason: "unsupported_type_or_subtype",
-                            bytes: copy_bounded_bytes(payload, "mrt_opaque_record")?,
-                        }
-                    }
-                }
-            };
-            records.push(MrtRecord {
-                offset: at as u64,
-                length: len,
-                record_type,
-                subtype,
-                time: MrtTime {
-                    seconds,
-                    microseconds,
-                },
-                sha256: digest,
-                body,
-            });
+        for (at, end, _) in starts {
+            records.push(decode_record(
+                &input[at..end],
+                at as u64,
+                &mut table,
+                &mut m,
+            )?);
         }
         Ok(Self {
             schema: SCHEMA,
@@ -1150,4 +1196,37 @@ fn semantic_attributes(
             .collect(),
         partial,
     }))
+}
+
+#[cfg(test)]
+mod incremental_offset_tests {
+    use super::*;
+
+    #[test]
+    fn absolute_record_extent_accepts_exact_usize_bound_and_rejects_one_over() {
+        // A header-only opaque record reaches absolute cursor arithmetic without
+        // allocating or reading a giant source. This applies on 32- and 64-bit.
+        let mut raw = [0u8; 12];
+        raw[4..6].copy_from_slice(&99u16.to_be_bytes());
+        let source = MrtSource {
+            source_id: "offset-boundary".into(),
+            checkpoint_id: "checkpoint-a".into(),
+        };
+        let limits = MrtLimits::default();
+        let mut table = None;
+        let exact = (usize::MAX - raw.len()) as u64;
+        let (record, _) = decode_incremental(&raw, exact, &mut table, &source, &limits)
+            .expect("exact absolute end remains representable");
+        assert_eq!(record.offset, exact);
+        assert!(matches!(record.body, MrtBody::Opaque { .. }));
+
+        // The failure must precede semantic PIT invalidation as well as panic.
+        let mut table = Some((7, "prior-pit".into(), 1));
+        let before = table.clone();
+        let error = decode_incremental(&raw, exact + 1, &mut table, &source, &limits)
+            .expect_err("one unit past the absolute addressable extent rejects");
+        assert_eq!(error.code, ErrorCode::LimitExceeded);
+        assert_eq!(error.field, "mrt_offset");
+        assert_eq!(table, before);
+    }
 }

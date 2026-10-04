@@ -90,6 +90,31 @@ class ValidationFrontier(unittest.TestCase):
             (root/'src/lib.rs').write_text('changed')
             self.assertNotEqual(after, validator.source_identity())
 
+    def test_nested_evidence_code_is_bound_while_root_receipts_are_excluded(self):
+        import tempfile
+        spec = importlib.util.spec_from_file_location('nested_evidence_validator', ROOT/'scripts/validate.py')
+        validator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(validator)
+        with tempfile.TemporaryDirectory(prefix='pcap-source-boundary-') as temporary:
+            root = Path(temporary)
+            nested = root/'tools/evidence'
+            nested.mkdir(parents=True)
+            source = nested/'reader.py'
+            source.write_bytes(b'original source')
+            validator.ROOT = root
+            before = validator.source_identity()
+            snapshot = frontier.source_snapshot(root)
+            self.assertEqual(set(snapshot), {'tools/evidence/reader.py'})
+            source.write_bytes(b'changed source')
+            self.assertNotEqual(before, validator.source_identity())
+            self.assertNotEqual(snapshot, frontier.source_snapshot(root))
+            after = validator.source_identity()
+            after_snapshot = frontier.source_snapshot(root)
+            (root/'evidence').mkdir()
+            (root/'evidence/receipt.json').write_bytes(b'generated receipt')
+            self.assertEqual(after, validator.source_identity())
+            self.assertEqual(after_snapshot, frontier.source_snapshot(root))
+
     def test_red_portable_preflight_suppresses_native_in_both_drivers(self):
         import subprocess
         import tempfile

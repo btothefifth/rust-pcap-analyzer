@@ -2,6 +2,14 @@
 
 ## Active objective work
 
+The additive incremental MRT, checkpoint chronology, evidence-manifest and
+external BGP comparison increment is governed by
+[the stream evidence contract](../product/BGP_STREAM_EVIDENCE.md). The
+[stream validation receipt](../../evidence/bgp-stream-validation.json) records
+its actual source generation, review and finite validation outcomes; a pending
+or absent receipt establishes no passing gate. Existing receipts remain bound
+to their own source generation.
+
 The repository-owner-authorized objectives 1–4 implementation and exact
 evidence record are tracked in the [objective ledger](OBJECTIVES_1_4.md). The
 ledger records source ownership, implementation progress, receipts, and

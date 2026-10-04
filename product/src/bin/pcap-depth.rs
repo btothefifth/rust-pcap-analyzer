@@ -1,5 +1,7 @@
 //! Actual opt-in pipeline. Does not change the established pcap-product default.
 #![forbid(unsafe_code)]
+#[path = "pcap_depth_support/bgp_stream_commands.rs"]
+mod bgp_stream_commands;
 use pcap_evidence::{
     json::Json,
     provenance::{EvidenceBytes, PacketId},
@@ -17,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
 };
 fn usage() -> Error {
-    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] [--peer-relationship unknown|internal|external] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] [--peer-relationship unknown|internal|external] [--other-peer-relationship unknown|internal|external] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N]")
+    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth bgp import-mrt-stream MRT --workspace NEW_DIR --source-id ID --checkpoint ID [STREAM_LIMITS] | bgp chronology STORE [--with-store STORE] --workspace NEW_DIR [--peer-relationship unknown|internal|external] [STREAM_LIMITS] | bgp window STORE [--with-store STORE] --workspace NEW_DIR --asn N --asn-role origin|path-member --time-basis mrt-record|rib-originated|observation --clock-scope SOURCE_ID|all-source-clocks --start-ns I --end-ns I [STREAM_LIMITS] | analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] [--peer-relationship unknown|internal|external] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] [--peer-relationship unknown|internal|external] [--other-peer-relationship unknown|internal|external] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | STREAM_LIMITS: --max-source-bytes N --max-store-bytes N --max-record-bytes N --max-records N --max-work N (exports also --max-output-bytes N)")
 }
 
 fn parse_peer_relationship(value: &str) -> Result<deep::bgp::PeerRelationship> {
@@ -568,6 +570,12 @@ fn bgp(v: &[String]) -> Result<()> {
         return Err(usage());
     }
     let command = v[1].as_str();
+    if command == "import-mrt-stream" {
+        return bgp_stream_commands::import(v);
+    }
+    if matches!(command, "chronology" | "window") {
+        return bgp_stream_commands::export(v);
+    }
     if command == "import-bmp" {
         return import_bmp(v);
     }
