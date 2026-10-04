@@ -497,6 +497,37 @@ fn parse_bgp4mp(
     subtype: u16,
     m: &mut Meter<'_>,
 ) -> Result<Option<Bgp4mp>> {
+    let Some((mut outer, mut c, state)) = parse_bgp4mp_header(body, base, subtype)? else {
+        return Ok(None);
+    };
+    outer.payload = if state {
+        let old = c.u16()?;
+        let new = c.u16()?;
+        Bgp4mpPayload::State { old, new }
+    } else {
+        let msg = c.rest();
+        if msg.is_empty() {
+            return Err(bad(
+                "mrt_bgp_message",
+                c.base + c.at - msg.len(),
+                "empty embedded BGP message",
+            ));
+        }
+        m.add(0, 0, 0, msg.len(), msg.len(), msg.len() * 2)?;
+        Bgp4mpPayload::Message(copy_bounded_bytes(msg, "mrt_bgp_message")?)
+    };
+    c.finish()?;
+    Ok(Some(outer))
+}
+
+/// Canonical subtype and address grammar, independent of payload validity.
+/// The empty payload is a private metadata placeholder, never an admitted
+/// message. Ordinary parsing fills and validates it before publishing BGP4MP.
+fn parse_bgp4mp_header(
+    body: &[u8],
+    base: usize,
+    subtype: u16,
+) -> Result<Option<(Bgp4mp, Cursor<'_>, bool)>> {
     let (width, state, local, add_path) = match subtype {
         0 => (2, true, false, false),
         1 => (2, false, false, false),
@@ -528,36 +559,50 @@ fn parse_bgp4mp(
     }
     let peer_address = address(&mut c, afi == 2)?;
     let local_address = address(&mut c, afi == 2)?;
-    let payload = if state {
-        let old = c.u16()?;
-        let new = c.u16()?;
-        Bgp4mpPayload::State { old, new }
-    } else {
-        let msg = c.rest();
-        if msg.is_empty() {
-            return Err(bad(
-                "mrt_bgp_message",
-                c.base + c.at - msg.len(),
-                "empty embedded BGP message",
-            ));
-        }
-        m.add(0, 0, 0, msg.len(), msg.len(), msg.len() * 2)?;
-        Bgp4mpPayload::Message(copy_bounded_bytes(msg, "mrt_bgp_message")?)
+    Ok(Some((
+        Bgp4mp {
+            peer_asn,
+            local_asn,
+            asn_width: width,
+            asn_width_source: AsnWidthSource::Bgp4mpSubtype,
+            interface_index,
+            address_afi: afi,
+            peer_address,
+            local_address,
+            locally_generated: local,
+            add_path,
+            payload: Bgp4mpPayload::Message(Vec::new()),
+        },
+        c,
+        state,
+    )))
+}
+
+/// Scope-only recovery from an exact opaque malformed record. Unsupported
+/// grammars are excluded; an incomplete header has no recoverable peer scope.
+/// Callers must use the full-record witness, never an empty message range.
+pub(crate) fn malformed_bgp4mp_scope(record: &MrtRecord) -> Result<Option<Bgp4mp>> {
+    let MrtBody::Opaque {
+        reason: "malformed_bgp4mp_record",
+        bytes,
+    } = &record.body
+    else {
+        return Ok(None);
     };
-    c.finish()?;
-    Ok(Some(Bgp4mp {
-        peer_asn,
-        local_asn,
-        asn_width: width,
-        asn_width_source: AsnWidthSource::Bgp4mpSubtype,
-        interface_index,
-        address_afi: afi,
-        peer_address,
-        local_address,
-        locally_generated: local,
-        add_path,
-        payload,
-    }))
+    if !matches!(record.record_type, 16 | 17)
+        || record.record_type == 17 && record.time.microseconds.is_none()
+    {
+        return Ok(None);
+    }
+    let base = usize::try_from(record.offset)
+        .map_err(|_| Error::limit("mrt_bgp4mp_scope"))?
+        .checked_add(12 + usize::from(record.time.microseconds.is_some()) * 4)
+        .ok_or_else(|| Error::limit("mrt_bgp4mp_scope"))?;
+    match parse_bgp4mp_header(bytes, base, record.subtype) {
+        Ok(header) => Ok(header.map(|(outer, _, _)| outer)),
+        Err(error) if error.code == ErrorCode::LimitExceeded => Err(error),
+        Err(_) => Ok(None),
+    }
 }
 
 impl MrtBatch {

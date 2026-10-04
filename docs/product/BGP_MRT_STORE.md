@@ -254,9 +254,51 @@ retained, sealed and replayed into an explicit rejected event with the exact
 record/message ranges and digests. A rejected or context-quarantined message
 marks continuity uncertain only in its tracked native RIB session partition;
 it does not fabricate reset or withdrawal. Empty embedded messages and malformed
-BGP4MP preambles retain exact opaque record bytes. Truncation of the outer MRT
+BGP4MP STATE_CHANGE payloads retain exact opaque record bytes, with recovered
+scope only when the canonical subtype/address header is complete. Their rejected
+events carry the nonempty full-record range and digest, with `message_range: null`.
+An identifiable malformed frame clears that session's OPEN/FSM grammar evidence
+without advancing its generation. A recognized malformed record whose header
+cannot identify its scope yields `quarantined_coverage_unknown`: its session and
+peer labels remain null, its coverage is the source/checkpoint, and every actual
+tracked scope there receives a gap and loses its decoder grammar evidence.
+Ordinary unsupported subtype/AFI opaque evidence is excluded from this malformed
+coverage rule. Truncation of the outer MRT
 header or declared body remains fail-closed before destination creation.
 Neither quarantine nor opaque evidence is a successful normalized route.
+
+An unknown interface or ASN can be compatible with several precise sessions.
+`quarantined_ambiguous_session` retains a bounded `detail.affected_scopes` array
+of their real session identities and current generations; a synthetic ambiguity
+label selects no winner. Every affected tracked native RIB scope receives a gap.
+Decoder OPEN/FSM evidence is cleared without changing generation, configured
+relationship, or scope. Repeated ambiguity therefore cannot skip the recorded
+generation predecessor. Gaps persist within a generation: fresh OPEN/FSM and
+same-generation UPDATEs cannot restore active-candidate eligibility. A precise
+reported reset retains the checked predecessor, advances only its own scope,
+and permits fresh successor evidence to establish candidates in that generation.
+Unrelated peers remain unaffected by an identifiable or ambiguous record.
+Precise session queries include the complete original ambiguity or unknown-
+coverage event when their real ID appears in `affected_scopes`; the event's
+synthetic or null top-level session label is preserved. An unrelated session,
+or one first observed after the event, does not inherit that raw event. The
+borrowed measurement and writer use the same inclusion predicate, including
+the exact newline budget and no partial output on a one-byte-short cap.
+
+The five `feedback_` regressions in `bgp_mrt_bgp4mp_replay.rs` exercise all eight
+message subtypes with zero/one-byte payloads and both timestamp containers,
+malformed state payloads, partial metadata, unknown-interface message/state
+ambiguity, repeated ambiguity, precise recovery and reset, and unsupported
+neighbors through sealed creation, fresh replay, native RIB state and persisted
+active selection, including a new CLI process. Earlier empty-record tests had
+no prior route; earlier ambiguity handling cleared decoder evidence without
+transporting the affected scopes to the native RIB. The retained F2 baseline
+failed four currency oracles and the repeated-ambiguity predecessor oracle.
+The post-reset recovery suffix explicitly includes the legal Idle-to-Active
+reported transition before its OpenSent sequence; this fixture reachability
+correction does not alter the earlier baseline defect location or receipt.
+These are bounded synthetic regressions; current execution and source identities
+belong in the feedback validation receipt.
 Multi-checkpoint chronology, crash-resume indexing, broad
 real-corpus/scale evidence, and sustained fuzzing remain completion gates.
 Full protocol-FSM reproduction—including TCP connection identity/collisions,

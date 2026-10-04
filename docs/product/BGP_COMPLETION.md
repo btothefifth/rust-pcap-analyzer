@@ -292,7 +292,7 @@ evidence retention.
 
 Exit: BGP-C10 passes the final same-generation fresh-process capture/import,
 replay, query, policy, export, and association workflows in the authoritative
-[PR feedback validation receipt](../../evidence/pr-feedback-validation.json).
+[round-two PR feedback validation receipt](../../evidence/pr-feedback-round2-validation.json).
 
 ### Phase 6 — qualification and promotion
 
@@ -348,7 +348,7 @@ cannot compensate for a stale fixture rejected by an earlier valid guard.
 | resource amplification | one UPDATE replicates many large attribute trees | preflight aggregate work/retention before cloning/publication | exact-limit and one-below route fanout |
 | formatter/document drift | tests pass while active docs describe repaired defects | current pointer and touched contracts must agree with code | doc consistency check |
 
-## Current implementation candidate — O14-1 with O14-F1 repairs
+## Current implementation candidate — O14-1 with O14-F2 repairs
 
 The frozen O14-1 candidate extends source-ordered BGP4MP replay through the
 canonical imported Adj-RIB-In reducer. Announcements, replacement, withdrawal,
@@ -375,10 +375,11 @@ are [MRT ingestion](BGP_MRT.md), [MRT storage](BGP_MRT_STORE.md),
 [semantic identity](BGP_SEMANTIC_IDENTITY.md).
 
 Current repair-generation validation is governed by the root-owned
-[PR feedback validation receipt](../../evidence/pr-feedback-validation.json).
+[round-two PR feedback validation receipt](../../evidence/pr-feedback-round2-validation.json).
 Its status and source inventory determine the current candidate's validated
 scope; a pending receipt does not establish a passed gate. The
-[O14-1 receipt](../../evidence/objectives-1-4-validation.json) remains historical
+[O14-F1 receipt](../../evidence/pr-feedback-validation.json) remains bound to the
+preceding `225b730` source generation. The [O14-1 receipt](../../evidence/objectives-1-4-validation.json) remains historical
 evidence for its preceding source generation. Full declared-profile conformance, sustained fuzzing, lawful real-corpus
 parity, measured scale/RSS, security review, exact-head platform CI, and source
 authenticity remain separate dimensions; this implementation candidate does

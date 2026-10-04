@@ -88,6 +88,84 @@ separately from intentional production go-red results. The repaired controls
 use the real serialized carriers and valid command prerequisites; production
 semantics were not weakened to satisfy those tests.
 
+## Second PR feedback repair contract — O14-F2
+
+Generation O14-F2 addresses [review 5403835689](https://github.com/btothefifth/rust-pcap-analyzer/pull/1#pullrequestreview-5403835689)
+against published baseline `225b730ef3740ea82aa38c4a5509bc38f73d5d1a`.
+The reviewer confirmed the O14-F1 fixes, then supplied three source-traced
+counterexamples without local native execution. Existing green CI does not
+establish these new boundaries. The [round-two receipt](../../evidence/pr-feedback-round2-validation.json)
+will record actual reproduction, repair and unchanged-source validation;
+PENDING is not PASS. Earlier receipts remain bound to their own generations.
+
+| Finding | Owning frontier / required outcome | Owning regression and forbidden inverse |
+| --- | --- | --- |
+| [P1 empty malformed BGP4MP](https://github.com/btothefifth/rust-pcap-analyzer/pull/1#discussion_r4175754779) | Canonical preamble recovery -> sealed replay -> native RIB -> persisted currency; preserve exact malformed bytes and known scope. Unidentifiable input exposes conservative source coverage uncertainty without guessing identity. | Compare zero/one-byte malformed payload after a valid route, unaffected sibling, fresh replay and active-candidate selection. Removing an invalid byte cannot restore continuity. |
+| [P1 ambiguous session](https://github.com/btothefifth/rust-pcap-analyzer/pull/1#discussion_r4175754783) | Resolver -> bounded actual affected identities -> native scope gaps; grammar invalidation and generation bookkeeping remain coherent. | Two precise interfaces plus unknown interface, repeated ambiguity, precise same-generation observations and explicit-boundary recovery. No winner, endpoint reset, withdrawal, skipped predecessor or stale resurrection is invented. |
+| [P2 route-free BMP observation](https://github.com/btothefifth/rust-pcap-analyzer/pull/1#discussion_r4175754786) | Normalized observation lifecycle -> native-RIB initialization -> peer/policy boundary -> fresh sealed replay; retain unsupported evidence and supported EOR. | Unsupported AFI25/SAFI70 EOR followed by Peer Down, Termination, repeated Peer Up and later recovery; unaffected peer/stream control. A valid boundary cannot abort because no native route was admitted. |
+
+MRT and BMP implementers own disjoint source, tests and leaf contracts. Root
+owns native scheduling (one shared target, two build jobs), integration,
+operator pointers, receipts and GitHub publication/responses. Separate source
+reviewers challenge both affected producer/consumer families; an additional
+assembled-coherence reviewer checks the integrated interfaces and evidence.
+Each lane stages a tiny native witness before production repair. Fixture or
+compiler failures are distinct from intentional product failures. Source
+acceptance, local execution and exact published-head hosted CI are separate.
+The strict 50,000,000,000-byte project ceiling and existing authority limits
+remain in force. Scale optimization remains an open follow-up.
+
+The intentional baseline runs reached the actual owning native consumers.
+All five new MRT selectors failed on the recorded pre-repair predicates: stale
+active candidates in four cases, and an incoherent generation predecessor in
+the repeated-ambiguity case. The BMP target passed its twenty existing cases
+and one new EOR/Gap control; three new selectors failed with
+`bgp_rib_reset: explicit advancing predecessor required`. These local
+counterexamples are distinct from hosted CI failures. The BMP production
+predicates remained identical to the published baseline during execution;
+unrelated MRT authoring inputs were separately frozen and recorded.
+
+Current execution graph: MRT and BMP repair source and final owning controls
+are accepted independently; CI history audit is complete. An additional
+assembled-coherence review precedes the final source freeze and aggregate
+validation. The round-two receipt owns completed local outcomes; publication,
+GitHub responses and hosted CI are bound separately to the resulting commit.
+
+### Round-two prevention gaps and finite controls
+
+The malformed MRT frontier previously dropped a recoverable preamble when its
+embedded payload was empty, while a one-byte invalid payload reached a scoped
+gap. The regression pairs these inputs after an active route and checks sealed
+creation, fresh replay and persisted active selection. Malformed state-change
+metadata and unidentifiable recognized records exercise the same ownership
+seam; unsupported AFI/subtype records retain their documented exclusion.
+
+The ambiguity frontier previously invalidated decoder context under real
+session identities but published an unmatched synthetic identity. Controls
+cover both compatible interfaces, an unrelated third peer, repeated ambiguity,
+precise same-generation input and recovery after a precise reported boundary.
+Uncertainty must clear applicable grammar without inventing a generation
+advance; native currency remains unresolved until a valid recovery frontier.
+Precise session queries retain the original uncertainty event when their real
+identity appears in its affected inventory, without rewriting a synthetic or
+null source label. Independent peer/interface and exact-output controls guard
+sibling selection, unrelated exclusion and no partial publication.
+
+BMP tests previously covered admitted routes, supported EOR and explicit gaps,
+but did not carry a route-free unsupported observation through its next valid
+boundary. The new controls retain that observation and journal lifecycle
+through Peer Down, repeated Peer Up and valid Termination, then exercise later
+native admission, an active sibling peer and pre/post-policy separation.
+Supported EOR-only and Gap-only scopes retain strict native reset validation.
+The store reuses admitted native events to check exact source/session
+initialization, charging work before identity comparisons, without a duplicate map. A tiny mixed-scope
+work-boundary control searches the actual successful floor, then checks exact
+create/fresh replay and one-below atomic refusal. Its first draft incorrectly
+assumed that two peers shared a source partition; native execution rejected
+that fixture assertion before the work probes. The corrected oracle follows
+the canonical peer-bearing import partition, with production semantics
+unchanged and the failed attempt retained separately.
+
 ## System, criteria, and owning seams
 
 | Criterion | Production seam / owner | Acceptance and cheapest falsifier |

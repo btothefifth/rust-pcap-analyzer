@@ -16,6 +16,28 @@ fn event_session(event: &Json) -> Option<&str> {
     }
 }
 
+/// Include the original source event without selecting a winner or rewriting
+/// its label when the queried real session belongs to its affected inventory.
+fn event_affects_session(event: &Json, session: &str) -> bool {
+    if event_session(event) == Some(session) {
+        return true;
+    }
+    if !matches!(
+        event_text(event, "parse_status"),
+        Some("quarantined_ambiguous_session" | "quarantined_coverage_unknown")
+    ) {
+        return false;
+    }
+    let Some(Json::Array(scopes)) =
+        event_value(event, "detail").and_then(|detail| event_value(detail, "affected_scopes"))
+    else {
+        return false;
+    };
+    scopes
+        .iter()
+        .any(|scope| event_text(scope, "session") == Some(session))
+}
+
 pub(crate) struct Projection<'a> {
     writer: Option<&'a mut dyn Write>,
     used: usize,
@@ -451,7 +473,7 @@ impl MrtReplayArchive {
             && !self
                 .bgp4mp_events
                 .iter()
-                .any(|event| event_session(event) == Some(session))
+                .any(|event| event_affects_session(event, session))
         {
             return Err(Error::new(
                 ErrorCode::InvalidIndex,
@@ -576,7 +598,7 @@ impl MrtReplayArchive {
         for event in self
             .bgp4mp_events
             .iter()
-            .filter(|event| event_session(event) == Some(session))
+            .filter(|event| event_affects_session(event, session))
         {
             if !first {
                 out.raw(",")?;

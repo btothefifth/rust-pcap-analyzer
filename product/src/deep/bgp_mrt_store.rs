@@ -1024,12 +1024,34 @@ fn build_archive(
                     )?;
                 }
             },
-            MrtBody::Opaque { .. } => {
+            MrtBody::Opaque { reason, .. } => {
                 opaque_records = increment(opaque_records, "bgp_mrt_opaque_records")?;
+                if *reason == "malformed_bgp4mp_record" {
+                    let event = bgp::mrt::replay_malformed_record(
+                        &batch,
+                        record_index,
+                        record,
+                        &limits,
+                        &mut imported_sessions,
+                    )?;
+                    retain_bgp4mp_event(
+                        &mut bgp4mp_events,
+                        &mut bgp4mp_event_bytes,
+                        event,
+                        &limits,
+                    )?;
+                }
             }
             MrtBody::PeerIndex(_) => {}
         }
-        if matches!(record.body, MrtBody::Bgp4mp(_)) {
+        if matches!(
+            record.body,
+            MrtBody::Bgp4mp(_)
+                | MrtBody::Opaque {
+                    reason: "malformed_bgp4mp_record",
+                    ..
+                }
+        ) {
             for observation in &observations[observations_before..] {
                 if let Some(event) = rib_support::observation_event(observation, &limits)? {
                     bgp4mp_rib.apply(event)?;

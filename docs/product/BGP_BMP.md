@@ -35,6 +35,17 @@ The `bmp_rib` projection owns the scoped active, unresolved, superseded,
 withdrawn, and rejected route statuses. A generic candidate journal entry does
 not independently prove uninterrupted BMP monitoring coverage.
 
+Normalized journal publication and native RIB initialization are separate facts.
+A complete UPDATE containing only an unsupported family remains normalized
+journal evidence, including its exact source bytes and later generation
+boundaries, without inventing a native route or EOR marker. A native reset is
+forwarded only after that exact source partition/session has admitted a native
+event. Supported EOR and Gap events establish that scope even without routes.
+Once established, every reset retains the canonical reducer's explicit
+predecessor and exact-successor validation. The adapter looks up this fact in
+the existing admitted event inventory, charging comparison bytes to the work
+cap before inspecting source/session identity; it keeps no duplicate scope map.
+
 ## Framing, exact bytes, and supported records
 
 The common header is six bytes: version, big-endian total message length, and

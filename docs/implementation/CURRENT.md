@@ -51,8 +51,10 @@ outcome are separate; use the receipt below for the exact assembled generation.
 ## Current validation status
 
 PR review repairs are governed by the
-[O14-F1 feedback receipt](../../evidence/pr-feedback-validation.json) and the
-repair contract in the [objective ledger](OBJECTIVES_1_4.md). A pending receipt
+[O14-F2 feedback receipt](../../evidence/pr-feedback-round2-validation.json) and the
+repair contracts in the [objective ledger](OBJECTIVES_1_4.md). The
+[O14-F1 receipt](../../evidence/pr-feedback-validation.json) describes the preceding
+`225b730` source generation. A pending receipt
 does not establish a passing result. The earlier
 [O14-1 validation receipt](../../evidence/objectives-1-4-validation.json)
 remains bound to its recorded source generation preceding those repairs.
@@ -107,7 +109,7 @@ is not a production-readiness claim.
 ## Remaining work and priority
 
 1. Close the assembled-source PR feedback test and integration gates with the exact
-   source inventory and outcomes in the [feedback receipt](../../evidence/pr-feedback-validation.json).
+   source inventory and outcomes in the [round-two feedback receipt](../../evidence/pr-feedback-round2-validation.json).
    A pending or partial receipt does not establish a final validation pass.
 2. Complete independent RFC/IANA review and broader executable coverage for
    every declared BGP profile row. Registration and typed parsing do not by

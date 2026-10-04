@@ -34,6 +34,94 @@ struct ImportedSession {
     state_conflict: bool,
 }
 
+impl ImportedSession {
+    fn clear_grammar(&mut self) {
+        self.decoder.opens.clear();
+        self.fsm = None;
+        self.state_conflict = true;
+    }
+}
+
+struct AffectedScope {
+    session: String,
+    generation: u64,
+}
+
+enum SessionResolution {
+    Selected(usize),
+    Ambiguous(Vec<AffectedScope>),
+}
+
+fn affected_scopes(
+    state: &ReplayState,
+    predicate: impl Fn(&ImportedSession) -> bool,
+    limits: &Limits,
+) -> Result<Vec<AffectedScope>> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for session in state.sessions.iter().filter(|s| predicate(s)) {
+        count = count
+            .checked_add(1)
+            .filter(|n| *n <= limits.elements)
+            .ok_or_else(|| Error::limit("bgp_mrt_affected_scopes"))?;
+        bytes = session
+            .id
+            .len()
+            .checked_mul(6)
+            .and_then(|escaped| bytes.checked_add(escaped))
+            .and_then(|n| n.checked_add(128))
+            .filter(|n| {
+                *n <= limits.retained_bytes && *n <= limits.output_bytes && *n <= limits.work
+            })
+            .ok_or_else(|| Error::limit("bgp_mrt_affected_scopes"))?;
+    }
+    let mut scopes = Vec::new();
+    scopes
+        .try_reserve_exact(count)
+        .map_err(|_| Error::limit("bgp_mrt_affected_scopes"))?;
+    for session in state.sessions.iter().filter(|s| predicate(s)) {
+        scopes.push(AffectedScope {
+            session: session.id.clone(),
+            generation: session.decoder.generation(),
+        });
+    }
+    Ok(scopes)
+}
+
+fn affected_json(scopes: Vec<AffectedScope>) -> Json {
+    Json::array(scopes.into_iter().map(|scope| {
+        Json::object([
+            ("session", scope.session.into()),
+            ("generation", scope.generation.into()),
+        ])
+    }))
+}
+
+fn ambiguous_event(
+    source: RecordContext<'_>,
+    direction: Option<u8>,
+    kind: &str,
+    scopes: Vec<AffectedScope>,
+    range: Option<SourceRange>,
+) -> Json {
+    event_json(
+        source.event(
+            &ambiguous_session_key(source.batch, source.outer),
+            direction,
+            0,
+        ),
+        kind,
+        "quarantined_ambiguous_session",
+        vec!["ambiguous_bgp4mp_session_identity"],
+        Some(Json::object([
+            ("coverage_scope", "compatible_sessions".into()),
+            ("affected_scopes", affected_json(scopes)),
+            ("decoder_generation_advanced", false.into()),
+        ])),
+        range,
+    )
+}
+
 #[derive(Default)]
 struct SessionIdentity {
     source_id: String,
@@ -155,15 +243,11 @@ pub(crate) fn replay_state_record(
     };
     let (old, new) = (*old, *new);
     let source_range = record_source_range(record)?;
-    let Some(session_index) = resolve_session(batch, outer, limits, state)? else {
-        return Ok(event_json(
-            source.event(&ambiguous_session_key(batch, outer), None, 0),
-            "state_change",
-            "quarantined_ambiguous_session",
-            vec!["ambiguous_bgp4mp_session_identity"],
-            Some(Json::object([("source_range", range_json(&source_range))])),
-            None,
-        ));
+    let session_index = match resolve_session(batch, outer, limits, state)? {
+        SessionResolution::Selected(index) => index,
+        SessionResolution::Ambiguous(scopes) => {
+            return Ok(ambiguous_event(source, None, "state_change", scopes, None))
+        }
     };
     let key = state.sessions[session_index].id.clone();
     let session = &mut state.sessions[session_index];
@@ -246,18 +330,20 @@ pub(crate) fn replay_message_record(
         ));
     };
     let direction = u8::from(outer.locally_generated);
-    let Some(session_index) = resolve_session(batch, outer, limits, state)? else {
-        return Ok(ReplayRecord {
-            event: event_json(
-                source.event(&ambiguous_session_key(batch, outer), Some(direction), 0),
-                "message",
-                "quarantined_ambiguous_session",
-                vec!["ambiguous_bgp4mp_session_identity"],
-                None,
-                Some(message_range),
-            ),
-            observation: None,
-        });
+    let session_index = match resolve_session(batch, outer, limits, state)? {
+        SessionResolution::Selected(index) => index,
+        SessionResolution::Ambiguous(scopes) => {
+            return Ok(ReplayRecord {
+                event: ambiguous_event(
+                    source,
+                    Some(direction),
+                    "message",
+                    scopes,
+                    Some(message_range),
+                ),
+                observation: None,
+            })
+        }
     };
     let key = state.sessions[session_index].id.clone();
     let session = &mut state.sessions[session_index];
@@ -271,6 +357,7 @@ pub(crate) fn replay_message_record(
         Ok(message_type) => message_type,
         Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
         Err(error) => {
+            session.clear_grammar();
             return Ok(ReplayRecord {
                 event: rejected_message_event(
                     source.event(&key, Some(direction), session.decoder.generation()),
@@ -790,7 +877,7 @@ fn resolve_session(
     outer: &Bgp4mp,
     limits: &Limits,
     state: &mut ReplayState,
-) -> Result<Option<usize>> {
+) -> Result<SessionResolution> {
     let incoming = SessionIdentity::from_record(batch, outer);
     let mut selected = None;
     let mut ambiguous = false;
@@ -801,18 +888,21 @@ fn resolve_session(
         }
     }
     if ambiguous {
+        let affected = affected_scopes(
+            state,
+            |session| session.identity.compatible(&incoming),
+            limits,
+        )?;
         for session in &mut state.sessions {
             if session.identity.compatible(&incoming) {
-                session.decoder.reset()?;
-                session.fsm = None;
-                session.state_conflict = true;
+                session.clear_grammar();
             }
         }
-        return Ok(None);
+        return Ok(SessionResolution::Ambiguous(affected));
     }
     if let Some(index) = selected {
         state.sessions[index].identity.enrich(&incoming);
-        return Ok(Some(index));
+        return Ok(SessionResolution::Selected(index));
     }
     if state.sessions.len() >= limits.active {
         return Err(Error::limit("bgp_mrt_active_sessions"));
@@ -837,7 +927,94 @@ fn resolve_session(
         decoder,
         ..ImportedSession::default()
     });
-    Ok(Some(state.sessions.len() - 1))
+    Ok(SessionResolution::Selected(state.sessions.len() - 1))
+}
+
+/// An opaque malformed record has a full-record witness, not an embedded
+/// message range. Recover only independently validated header scope; otherwise
+/// conservatively report unknown coverage of this source/checkpoint.
+pub(crate) fn replay_malformed_record(
+    batch: &MrtBatch,
+    record_index: usize,
+    record: &MrtRecord,
+    limits: &Limits,
+    state: &mut ReplayState,
+) -> Result<Json> {
+    if let Some(outer) = super::super::bgp_mrt::malformed_bgp4mp_scope(record)? {
+        let source = RecordContext::new(batch, record_index, record, &outer);
+        let index = match resolve_session(batch, &outer, limits, state)? {
+            SessionResolution::Selected(index) => index,
+            SessionResolution::Ambiguous(scopes) => {
+                return Ok(ambiguous_event(
+                    source,
+                    None,
+                    "malformed_record",
+                    scopes,
+                    None,
+                ))
+            }
+        };
+        let session = &mut state.sessions[index];
+        session.clear_grammar();
+        return Ok(event_json(
+            source.event(&session.id, None, session.decoder.generation()),
+            "malformed_record",
+            "rejected",
+            vec!["malformed_bgp4mp_record"],
+            Some(Json::object([
+                ("coverage_scope", "validated_header_session".into()),
+                ("decoder_generation_advanced", false.into()),
+            ])),
+            None,
+        ));
+    }
+    let affected = affected_scopes(state, |_| true, limits)?;
+    for session in &mut state.sessions {
+        session.clear_grammar();
+    }
+    Ok(Json::object([
+        ("schema", "pcap-evidence.bgp.mrt-session-event.v1".into()),
+        ("source_id", batch.source.source_id.clone().into()),
+        ("checkpoint_id", batch.source.checkpoint_id.clone().into()),
+        ("record_index", record_index.into()),
+        ("record_offset", record.offset.into()),
+        ("record_sha256", record.sha256.clone().into()),
+        ("record_range", range_json(&record_source_range(record)?)),
+        ("event_kind", "malformed_record".into()),
+        ("parse_status", "quarantined_coverage_unknown".into()),
+        ("session", Json::Null),
+        ("generation", Json::Null),
+        ("direction", Json::Null),
+        ("peer_asn", Json::Null),
+        ("local_asn", Json::Null),
+        ("peer_address", Json::Null),
+        ("local_address", Json::Null),
+        ("interface_index", Json::Null),
+        ("address_afi", Json::Null),
+        ("locally_generated", Json::Null),
+        ("container_add_path", Json::Null),
+        ("asn_width", Json::Null),
+        ("timestamp_seconds", record.time.seconds.into()),
+        (
+            "timestamp_microseconds",
+            record.time.microseconds.map_or(Json::Null, Json::from),
+        ),
+        ("message_range", Json::Null),
+        (
+            "issues",
+            Json::array(["malformed_bgp4mp_scope_unrecoverable".into()]),
+        ),
+        (
+            "detail",
+            Json::object([
+                ("coverage_scope", "source_checkpoint".into()),
+                ("affected_scopes", affected_json(affected)),
+                ("decoder_generation_advanced", false.into()),
+            ]),
+        ),
+        ("source_authenticated", false.into()),
+        ("endpoint_state_claimed", false.into()),
+    ]))
 }
 
 fn valid_fsm_transition(old: u16, new: u16) -> bool {

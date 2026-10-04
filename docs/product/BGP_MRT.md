@@ -36,7 +36,12 @@ successful parse authenticates the source.
   generated and ADD-PATH subtype labels, and either raw state numbers or exact
   embedded message bytes. Complete containers retain malformed embedded frames
   for shared-decoder quarantine. A malformed BGP4MP preamble or empty embedded
-  payload remains exact opaque record evidence. The ET microsecond field is part of the MRT
+  payload remains exact opaque record evidence. The canonical subtype/address
+  header parser can independently recover continuity scope from a complete
+  header even when the message or STATE_CHANGE payload is malformed. This
+  recovery admits no BGP message or route and uses the full-record witness;
+  empty embedded bytes never become an empty message provenance range.
+  The ET microsecond field is part of the MRT
   body length. A BGP4MP address AFI does not label the message's route family.
 - `MrtBatch::normalize_rib_entry` converts only the unambiguous subset of
   ordinary RIB attributes into the existing contextual imported route

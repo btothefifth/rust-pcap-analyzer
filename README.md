@@ -17,9 +17,10 @@ listing, validation/package-frontier, generation-CLI, and documentation work.
 See the [objectives 1–4 ledger](docs/implementation/OBJECTIVES_1_4.md),
 [BGP completion contract](docs/product/BGP_COMPLETION.md), and
 [current implementation pointer](docs/implementation/CURRENT.md). The
-authoritative [PR feedback validation receipt](evidence/pr-feedback-validation.json)
+authoritative [round-two PR feedback validation receipt](evidence/pr-feedback-round2-validation.json)
 controls the current repair generation's assembled-source status; a pending
-receipt is not a passed gate. The [O14-1 receipt](evidence/objectives-1-4-validation.json)
+receipt is not a passed gate. The [O14-F1 receipt](evidence/pr-feedback-validation.json)
+remains bound to the preceding `225b730` source generation. The [O14-1 receipt](evidence/objectives-1-4-validation.json)
 remains historical evidence for its preceding source generation. Full declared-profile,
 normative, sustained-fuzz, lawful real-corpus, scale/RSS, security, and
 exact-head platform qualification remain separate gates.

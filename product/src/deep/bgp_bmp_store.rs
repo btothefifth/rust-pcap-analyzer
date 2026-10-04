@@ -379,7 +379,16 @@ fn build_archive(
             if let Some(event) =
                 super::bgp_mrt_store::rib_support::observation_event(&observation, &limits)?
             {
-                rib.apply(event)?;
+                // Journal publication includes route-free, unsupported-family
+                // observations. Their boundaries must remain in CandidateState,
+                // but cannot reset a native scope that has never been admitted.
+                // Once admitted (including EOR or Gap), forward the exact reset
+                // so the canonical reducer still validates its predecessor.
+                if !matches!(event.kind, RibEventKind::Reset { .. })
+                    || native_scope_initialized(&rib, &event, &mut work, &limits)?
+                {
+                    rib.apply(event)?;
+                }
             }
             if observations.len() >= limits.elements {
                 return Err(Error::limit("bmp_replay_observations"));
@@ -444,6 +453,37 @@ fn build_archive(
         return Err(Error::limit("bmp_replay_retained"));
     }
     Ok(archive)
+}
+fn native_scope_initialized(
+    rib: &AdjRibIn,
+    event: &RibEvent,
+    work: &mut usize,
+    limits: &Limits,
+) -> Result<bool> {
+    // Reuse canonical admitted evidence instead of allocating a second scope
+    // inventory. Native SessionKey consists only of source partition/session;
+    // direction and generation cannot turn a missing predecessor into a reset.
+    for prior in rib.events() {
+        let comparison_bytes = [
+            event.scope.source.source_id.len(),
+            event.scope.source.partition_id.len(),
+            event.scope.session.len(),
+            prior.scope.source.source_id.len(),
+            prior.scope.source.partition_id.len(),
+            prior.scope.session.len(),
+        ]
+        .into_iter()
+        .try_fold(1usize, usize::checked_add)
+        .ok_or_else(|| Error::limit("bmp_replay_work"))?;
+        *work = work
+            .checked_add(comparison_bytes)
+            .filter(|n| *n <= limits.work)
+            .ok_or_else(|| Error::limit("bmp_replay_work"))?;
+        if prior.scope.source == event.scope.source && prior.scope.session == event.scope.session {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 fn scope(context: &ImportContext, limits: &Limits) -> Result<RibScope> {
     Ok(RibScope {

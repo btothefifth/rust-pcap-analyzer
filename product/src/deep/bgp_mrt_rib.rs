@@ -130,22 +130,74 @@ pub(super) fn quarantine_event(
         return Ok(0);
     }
     // Reset dispositions already have an exact checked boundary. Ambiguous
-    // session identity cannot select a tracked peer partition.
-    if matches!(
-        status,
-        "quarantined_session_reset" | "quarantined_ambiguous_session"
-    ) {
+    // and unknown-coverage events instead carry every affected real scope.
+    if status == "quarantined_session_reset" {
         return Ok(0);
     }
-    let Some(session) = event_text(event, "session") else {
-        return Ok(0);
+    let affected = if matches!(
+        status,
+        "quarantined_ambiguous_session" | "quarantined_coverage_unknown"
+    ) {
+        let scopes =
+            event_value(event, "detail").and_then(|detail| event_value(detail, "affected_scopes"));
+        let Some(Json::Array(scopes)) = scopes else {
+            return Err(bad(
+                "bgp_mrt_gap_scope",
+                0,
+                "affected session scopes absent",
+            ));
+        };
+        if scopes.len() > limits.elements {
+            return Err(Error::limit("bgp_mrt_gap_scope"));
+        }
+        for scope in scopes {
+            if event_text(scope, "session").is_none() || event_number(scope, "generation").is_none()
+            {
+                return Err(bad(
+                    "bgp_mrt_gap_scope",
+                    0,
+                    "affected session identity or generation absent",
+                ));
+            }
+        }
+        Some(scopes)
+    } else {
+        None
     };
+    let session = event_text(event, "session");
+    if session.is_none() && affected.is_none() {
+        return Ok(0);
+    }
     let Some(record_id) = event_text(event, "record_sha256") else {
         return Ok(0);
     };
     for ((known_session, _), context) in contexts {
-        if known_session != session {
+        let generation = if let Some(scopes) = affected {
+            work = work
+                .checked_add(scopes.len())
+                .filter(|work| *work <= limits.work)
+                .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+            scopes
+                .iter()
+                .find(|scope| event_text(scope, "session") == Some(known_session.as_str()))
+                .and_then(|scope| event_number(scope, "generation"))
+        } else if session == Some(known_session.as_str()) {
+            event_number(event, "generation")
+        } else {
+            None
+        };
+        let Some(generation) = generation else {
             continue;
+        };
+        if generation != context.generation
+            || event_text(event, "source_id") != Some(context.source_id.as_str())
+            || event_text(event, "checkpoint_id") != Some(context.checkpoint_id.as_str())
+        {
+            return Err(bad(
+                "bgp_mrt_gap_scope",
+                0,
+                "gap differs from exact tracked source scope",
+            ));
         }
         rib.apply(RibEvent {
             scope: RibScope {

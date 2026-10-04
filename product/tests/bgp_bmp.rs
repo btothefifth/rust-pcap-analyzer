@@ -2,12 +2,15 @@
 use pcap_evidence::{
     json::Json,
     provenance::{EvidenceBytes, PacketId},
-    sha256,
+    sha256, ErrorCode,
 };
 use pcap_evidence_product::deep::{
     bgp::{self, PcapMetadata, SessionState},
     bgp_bmp::{BmpBatch, BmpBody, BmpLimits, BmpSource},
     bgp_bmp_store,
+    bgp_mrt::MrtLimits,
+    bgp_mrt_store::MrtReplayOptions,
+    bgp_persisted::{Query, VerifiedStore},
     bgp_rib::RouteStatus,
     bgp_state::Observation,
     Limits,
@@ -174,6 +177,416 @@ fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
         panic!("object required")
     };
     &items.iter().find(|(name, _)| *name == key).unwrap().1
+}
+
+// Literal MP_UNREACH-only EOR for AFI 25 / SAFI 70. This family is outside
+// the native RIB profile, while the complete UPDATE remains journal evidence.
+fn unsupported_family_eor(peer_id: u8, flags: u8) -> Vec<u8> {
+    let mut body = peer(peer_id, flags, 1);
+    body.extend_from_slice(&bgp(2, &[0, 0, 0, 6, 0x80, 15, 3, 0, 25, 70]));
+    message(0, &body)
+}
+fn supported_eor(peer_id: u8) -> Vec<u8> {
+    let mut body = peer(peer_id, 0, 1);
+    body.extend_from_slice(&bgp(2, &[0, 0, 0, 0]));
+    message(0, &body)
+}
+fn assert_fresh_bmp_replay(scratch: &Scratch, archive: &bgp_bmp_store::BmpReplayArchive) {
+    let path = scratch.file("bgp.bmp");
+    let sealed = fs::read(&path).unwrap();
+    let replay =
+        bgp_bmp_store::replay(&path, 1_000_000, BmpLimits::default(), Limits::default()).unwrap();
+    assert_eq!(archive.json(), replay.json());
+    assert_eq!(archive.state.encode(), replay.state.encode());
+    assert_eq!(sealed, fs::read(path).unwrap());
+}
+
+#[test]
+fn unsupported_family_only_boundaries_preserve_journal_and_fresh_replay() {
+    let unsupported = unsupported_family_eor(1, 0);
+    assert_eq!(unsupported.len(), 77);
+    assert_eq!(
+        sha256::hex(&sha256::digest(&unsupported)),
+        "4256b53a163424bfaf84771bc0cd6684b5618c27c3fb9c6b2553a78285f9bb46"
+    );
+    for boundary in [down(1, 4), message(5, &[0, 1, 0, 2, 0, 1]), up(1)] {
+        let bytes = append(&[up(1), unsupported.clone(), boundary]);
+        let parsed = BmpBatch::parse(&bytes, source("collector-a"), &BmpLimits::default()).unwrap();
+        let BmpBody::RouteMonitoring { message } = &parsed.records[1].body else {
+            panic!("complete Route Monitoring required")
+        };
+        assert_eq!(parsed.range_bytes(message).unwrap(), &unsupported[48..]);
+        assert_eq!(
+            parsed
+                .range_bytes(&parsed.record_range(&parsed.records[1]))
+                .unwrap(),
+            unsupported
+        );
+        let (scratch, archive) = store(&bytes);
+        assert_eq!(archive.state.observations().len(), 2);
+        assert!(archive.state.observations()[0].routes().is_empty());
+        assert!(archive.state.observations()[0].import_boundary().is_none());
+        assert!(archive.state.observations()[1].import_boundary().is_some());
+        assert!(archive.bmp_rib.entries().is_empty());
+        assert!(archive.bmp_rib.eors().is_empty());
+        assert!(archive.bmp_rib.events().is_empty());
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+    // Each recovery follows the actual reported context. Termination requires
+    // a new Initiation; repeated Peer Up itself supplies the fresh OPENs.
+    for (boundary, recovery, generation) in [
+        (down(1, 4), vec![up(1)], 2),
+        (
+            message(5, &[0, 1, 0, 2, 0, 1]),
+            vec![message(4, &[0, 1, 0, 1, b'd', 0, 2, 0, 1, b'n']), up(1)],
+            2,
+        ),
+        (up(1), vec![], 1),
+        (append(&[down(1, 4), down(1, 4)]), vec![up(1)], 3),
+    ] {
+        let mut parts = vec![up(1), unsupported.clone(), boundary];
+        parts.extend(recovery);
+        parts.push(rm(1, 0, 2, true));
+        let (scratch, archive) = store(&append(&parts));
+        assert!(archive.state.observations()[0].routes().is_empty());
+        assert!(archive.bmp_rib.eors().is_empty());
+        assert_eq!(archive.bmp_rib.entries().len(), 1);
+        let entry = archive.bmp_rib.entries().values().next().unwrap();
+        assert_eq!(entry.status, RouteStatus::Active);
+        assert_eq!(entry.key.scope.generation, generation);
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+}
+
+#[test]
+fn route_free_boundaries_preserve_supported_eor_gap_and_later_native_admission() {
+    let mut malformed_up = up(1);
+    malformed_up.pop();
+    let length = malformed_up.len() as u32;
+    malformed_up[1..5].copy_from_slice(&length.to_be_bytes());
+    for (middle, eors, gaps) in [
+        (vec![supported_eor(1)], 1, 0),
+        (vec![unsupported_family_eor(1, 0), malformed_up], 0, 1),
+        (vec![unsupported_family_eor(1, 0), rm(1, 0, 2, true)], 0, 0),
+    ] {
+        let mut parts = vec![up(1)];
+        parts.extend(middle);
+        parts.extend([down(1, 4), up(1), rm(1, 0, 3, true)]);
+        let (scratch, archive) = store(&append(&parts));
+        assert_eq!(archive.bmp_rib.eors().len(), eors);
+        assert_eq!(archive.bmp_rib.gaps().len(), gaps);
+        assert!(archive
+            .bmp_rib
+            .entries()
+            .values()
+            .any(|entry| entry.status == RouteStatus::Active && entry.key.scope.generation == 2));
+        assert_eq!(
+            archive
+                .bmp_rib
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    pcap_evidence_product::deep::bgp_rib::RibEventKind::Reset { .. }
+                ))
+                .count(),
+            2
+        );
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+    // No journal/native publication before a boundary permits a later first
+    // supported message to establish the reported nonzero generation.
+    let (scratch, archive) = store(&append(&[up(1), down(1, 4), up(1), rm(1, 0, 3, true)]));
+    assert_eq!(archive.state.observations().len(), 1);
+    assert_eq!(
+        archive
+            .bmp_rib
+            .entries()
+            .values()
+            .next()
+            .unwrap()
+            .key
+            .scope
+            .generation,
+        1
+    );
+    assert_fresh_bmp_replay(&scratch, &archive);
+
+    // The admitted sibling precedes the target, so closing the target must
+    // inspect both a mismatching native scope and the matching predecessor.
+    let bytes = append(&[
+        up(1),
+        up(2),
+        rm(2, 0, 2, true),
+        rm(1, 0, 3, true),
+        down(1, 4),
+    ]);
+    let (_scratch, reference) = store(&bytes);
+    let native = reference.bmp_rib.events();
+    assert_eq!(native.len(), 3);
+    assert_ne!(native[0].scope.session, native[2].scope.session);
+    assert_eq!(native[1].scope.session, native[2].scope.session);
+    assert_ne!(native[0].scope.source, native[2].scope.source);
+    assert_eq!(native[1].scope.source, native[2].scope.source);
+    assert!(matches!(
+        native[2].kind,
+        pcap_evidence_product::deep::bgp_rib::RibEventKind::Reset { .. }
+    ));
+    assert!(reference
+        .state
+        .observations()
+        .last()
+        .unwrap()
+        .import_boundary()
+        .is_some());
+
+    // Search the actual parser/store boundary without reproducing its byte-cost
+    // formula. Every probe has a new tiny file namespace, removed on return.
+    let probe = |work| {
+        let scratch = Scratch::new();
+        let path = scratch.file("probe.bmp");
+        match bgp_bmp_store::create(
+            &path,
+            &bytes,
+            source("collector-a"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits {
+                work,
+                ..Limits::default()
+            },
+        ) {
+            Ok(_) => {
+                assert!(path.is_file());
+                true
+            }
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::LimitExceeded);
+                assert!(!path.exists(), "failed probe published a source store");
+                false
+            }
+        }
+    };
+    let mut below = 1;
+    let mut exact = Limits::default().work;
+    assert!(!probe(below));
+    assert!(probe(exact));
+    let mut probes = 2;
+    while exact - below > 1 {
+        let middle = below + (exact - below) / 2;
+        if probe(middle) {
+            exact = middle;
+        } else {
+            below = middle;
+        }
+        probes += 1;
+        assert!(probes <= usize::BITS as usize + 2);
+    }
+    assert_eq!(below, exact - 1);
+    let scratch = Scratch::new();
+    let path = scratch.file("exact.bmp");
+    let limits = Limits {
+        work: exact,
+        ..Limits::default()
+    };
+    let accepted = bgp_bmp_store::create(
+        &path,
+        &bytes,
+        source("collector-a"),
+        1_000_000,
+        BmpLimits::default(),
+        limits.clone(),
+    )
+    .unwrap();
+    assert_eq!(accepted.json(), reference.json());
+    let sealed = fs::read(&path).unwrap();
+    let replayed = bgp_bmp_store::replay(&path, 1_000_000, BmpLimits::default(), limits).unwrap();
+    assert_eq!(accepted.json(), replayed.json());
+    assert_eq!(accepted.state.encode(), replayed.state.encode());
+    let rejected = scratch.file("below.bmp");
+    let Err(error) = bgp_bmp_store::create(
+        &rejected,
+        &bytes,
+        source("collector-a"),
+        1_000_000,
+        BmpLimits::default(),
+        Limits {
+            work: below,
+            ..Limits::default()
+        },
+    ) else {
+        panic!("one-below work budget must reject")
+    };
+    assert_eq!(error.code, ErrorCode::LimitExceeded);
+    assert!(!rejected.exists());
+    let Err(error) = bgp_bmp_store::replay(
+        &path,
+        1_000_000,
+        BmpLimits::default(),
+        Limits {
+            work: below,
+            ..Limits::default()
+        },
+    ) else {
+        panic!("one-below fresh replay must reject")
+    };
+    assert_eq!(error.code, ErrorCode::LimitExceeded);
+    assert_eq!(fs::read(path).unwrap(), sealed);
+}
+
+#[test]
+fn unsupported_family_recovery_preserves_persisted_peer_and_policy_currency() {
+    let bytes = append(&[
+        up(1),
+        up(2),
+        unsupported_family_eor(1, 0),
+        rm(1, 0x40, 2, true),
+        rm(2, 0, 2, true),
+        down(1, 4),
+        up(1),
+        rm(1, 0, 3, true),
+        rm(1, 0x40, 3, true),
+        rm(1, 0, 4, false),
+    ]);
+    let (scratch, archive) = store(&bytes);
+    assert_eq!(archive.bmp_rib.entries().len(), 4);
+    assert_eq!(
+        archive
+            .bmp_rib
+            .entries()
+            .values()
+            .filter(|entry| entry.status == RouteStatus::Active)
+            .count(),
+        2
+    );
+    assert_eq!(
+        archive
+            .bmp_rib
+            .entries()
+            .values()
+            .filter(|entry| entry.status == RouteStatus::Superseded)
+            .count(),
+        1
+    );
+    assert_eq!(
+        archive
+            .bmp_rib
+            .entries()
+            .values()
+            .filter(|entry| entry.status == RouteStatus::Withdrawn)
+            .count(),
+        1
+    );
+    assert!(archive.state.observations()[0].routes().is_empty());
+    assert_fresh_bmp_replay(&scratch, &archive);
+    let verified = VerifiedStore::load(
+        &scratch.file("bgp.bmp"),
+        1_000_000,
+        MrtLimits::default(),
+        Limits::default(),
+        MrtReplayOptions::default(),
+    )
+    .unwrap();
+    for (session, current, generation) in [
+        ("bmp:0:post", 1, 2),
+        ("bmp:1:pre", 1, 0),
+        ("bmp:0:pre", 0, 2),
+    ] {
+        let query = Query {
+            session: Some(session.into()),
+            status: Some("active".into()),
+            ..Query::default()
+        };
+        let output = verified.query(&query, &Limits::default()).unwrap();
+        assert_eq!(
+            output.matches("\"native_current\":true").count(),
+            current,
+            "{output}"
+        );
+        if current != 0 {
+            assert!(
+                output.contains(&format!("\"generation\":{generation}")),
+                "{output}"
+            );
+        } else {
+            assert!(output.contains("\"routes\":[]"), "{output}");
+        }
+    }
+    let output = verified
+        .query(&Query::default(), &Limits::default())
+        .unwrap();
+    assert_eq!(output.matches("\"native_current\":true").count(), 2);
+    assert_eq!(output.matches("\"native_current\":false").count(), 2);
+}
+
+#[test]
+fn cli_unsupported_family_boundary_recovery_uses_sealed_fresh_consumers() {
+    let scratch = Scratch::new();
+    let input = scratch.file("input.bmp");
+    let bytes = append(&[
+        up(1),
+        unsupported_family_eor(1, 0),
+        down(1, 4),
+        up(1),
+        rm(1, 0, 3, true),
+    ]);
+    fs::write(&input, &bytes).unwrap();
+    let workspace = scratch.file("run");
+    let result = Command::new(env!("CARGO_BIN_EXE_pcap-depth"))
+        .args(["bgp", "import-bmp"])
+        .arg(&input)
+        .arg("--workspace")
+        .arg(&workspace)
+        .args([
+            "--source-id",
+            "fixture",
+            "--checkpoint",
+            "bmp-test",
+            "--max-bmp-bytes",
+            "65536",
+            "--max-journal-bytes",
+            "1000000",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(&input).unwrap(), bytes);
+    let path = workspace.join("bgp.bmp");
+    let sealed = fs::read(&path).unwrap();
+    for verb in ["query", "state", "export"] {
+        let output = scratch.file(&format!("{verb}.json"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pcap-depth"));
+        command
+            .args(["bgp", verb])
+            .arg(&path)
+            .arg("--output")
+            .arg(&output);
+        if verb == "query" {
+            command.args(["--session", "bmp:0:pre", "--status", "active"]);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap();
+        if verb == "query" {
+            assert_eq!(text.matches("\"native_current\":true").count(), 1, "{text}");
+            assert!(text.contains("\"generation\":2"), "{text}");
+        } else {
+            assert!(text.contains("\"import_boundary\""), "{text}");
+            assert!(
+                text.contains("e430357032ab5f98b51a71a31a9b6f66ca4cc70bc74bc24e8d7ebcf65421016d"),
+                "{text}"
+            );
+        }
+    }
+    assert_eq!(fs::read(path).unwrap(), sealed);
 }
 
 #[test]

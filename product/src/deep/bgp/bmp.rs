@@ -16,6 +16,8 @@ struct PeerState {
     index: usize,
     decoder: SessionState,
     reported_up: bool,
+    // Tracks normalized journal publication, including route-free observations;
+    // native RIB admission is a separate fact owned by the store/reducer seam.
     used_streams: [bool; 2],
     context_unresolved: bool,
 }
