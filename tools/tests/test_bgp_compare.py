@@ -13,6 +13,7 @@ import struct
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from tools.research import bgp_compare as bgp
 from tools.research.contract import InvalidResearch, canonical, decode_json
@@ -130,7 +131,44 @@ def extended_timestamp_export(microseconds):
     return row, rebind_rows(row, manifest), manifest
 
 
+def write_native_rows(path, count, *, corrupt_suffix=False):
+    """Bounded generated NDJSON only; caller owns TemporaryDirectory cleanup."""
+    row, _, manifest = native_export()
+    row.update(full_source_bytes=str(16 * count), entry_index=None, observation=None,
+               event={"parse_status": "decoded_keepalive", "issues": []})
+    entry = manifest["sequence"]["entries"][0]
+    entry.update(source_bytes=str(16 * count), record_count=str(count))
+    commitment, size = hashlib.sha256(), 0
+    with path.open("wb") as stream:
+        for index in range(count):
+            row.update(record_offset=str(16 * index), record_ordinal=str(index))
+            if corrupt_suffix and index == count - 1:
+                row["record_bytes"] = "15"  # Valid self-seal, incomplete source coverage.
+            part = json.dumps(row, separators=(",", ":")).encode() + b"\n"
+            size += len(part)
+            commitment.update(part)
+            stream.write(part)
+        manifest.update(rows=str(count), rows_bytes=str(size), rows_sha256=commitment.hexdigest())
+        manifest["coverage"].update(records=str(count), rows=str(count), observations="0",
+                                    selected=str(count), route_free=str(count))
+        seal_fixture_manifest(manifest)
+        stream.write(canonical(manifest) + b"\n")
+    return manifest
+
+
 class BgpComparisonTests(unittest.TestCase):
+    def test_same_anchor_different_source_range_blocks_all_semantic_votes(self):
+        for differing_disposition in (False, True):
+            left, right = independent_external(), independent_external()
+            right["observations"][0]["source_range"]["end"] = "11"
+            if differing_disposition:
+                right["observations"][0]["disposition"] = "rejected"
+            result = bgp.compare(left, right)
+            self.assertEqual(result["counts"], {"agreement": 0, "disagreement": 1, "not_comparable": 3})
+            self.assertEqual(result["rows"][0]["reason"], "source_range_differs")
+            self.assertEqual(result["first_observed_disagreement"], 0)
+            self.assertTrue(all(row["reason"] == "source_range_mismatch" for row in result["rows"][1:]))
+
     def test_independent_fixture_agreement_is_inert(self):
         left, right = independent_external(), independent_external()
         right["producer"]["id"] = "second-fixture"
@@ -315,6 +353,141 @@ class BgpComparisonTests(unittest.TestCase):
 
 
 class NativeConversionTests(unittest.TestCase):
+    def test_typed_clock_scope_and_legacy_manifests_join_converter(self):
+        for kind in (None, "source", "all_source_clocks", "unrecognized"):
+            _, raw, manifest = native_export()
+            window = {"time_basis": "observation_time", "clock_scope": "all-source-clocks"}
+            if kind is not None:
+                window["clock_scope_kind"] = kind
+            window.update(clock_scope_semantics="independent_source_checkpoint_labels",
+                          start_ns="0", end_ns="1", interval="half_open", certain_occurrence_time_claimed=False, asn=None)
+            manifest["window"] = window
+            seal_fixture_manifest(manifest)
+            if kind == "unrecognized":
+                with self.assertRaisesRegex(InvalidResearch, "clock scope kind"):
+                    bgp.from_native(raw, manifest)
+            else:
+                self.assertEqual(bgp.from_native(raw, manifest)["native_evidence"]["window"], window)
+
+    def test_native_semantic_uncertainty_survives_conversion_and_comparison(self):
+        for completeness in ("complete", "incomplete", "unresolved", None):
+            row, _, manifest = native_export()
+            route = row["observation"]["routes"][0]
+            identity = {"schema": bgp.NATIVE_PROFILE, "completeness": completeness,
+                        "fingerprint_sha256": "e" * 64 if completeness == "complete" else None,
+                        "opaque_occurrence_fingerprints": ["d" * 64],
+                        "incompleteness_reasons": [] if completeness == "complete" else ["unsupported_attribute"],
+                        "canonical_payload": {} if completeness == "complete" else None}
+            if completeness is not None:
+                route["semantic_identity"] = identity
+            raw = rebind_rows(row, manifest)
+            document = bgp.from_native(raw, manifest)
+            converted = document["observations"][0]
+            semantic = converted["fields"]["nlri"]["semantic_identity"]
+            self.assertEqual(semantic["value"], [identity if completeness is not None else None])
+            comparison = bgp.compare(document, document)
+            for group, name in (("nlri", "semantic_identity"), ("attributes", "route_attributes")):
+                result = next(item for item in comparison["rows"] if item["group"] == group and item["field"] == name)
+                self.assertEqual(result["result"], "agreement" if completeness == "complete" else "not_comparable")
+                self.assertEqual(converted["fields"][group][name]["status"],
+                                 "observed" if completeness == "complete" else "incomplete")
+                self.assertEqual(converted["coverage"][group], "complete" if completeness == "complete" else "partial")
+            raw_result = next(item for item in comparison["rows"] if item["field"] == "imported_attribute_occurrences")
+            self.assertEqual(raw_result["result"], "agreement")
+            self.assertEqual(raw_result["left"]["value"][0], route["imported_attribute_occurrences"])
+
+    def test_streaming_large_export_requires_explicit_source_bound_partition(self):
+        with tempfile.TemporaryDirectory(prefix="bgp-compare-bounded-") as temp:
+            path = Path(temp) / "rows.ndjson"
+            manifest = write_native_rows(path, bgp.MAX_ROWS + 1)
+            self.assertGreater(path.stat().st_size, bgp.MAX_DOCUMENT)
+            self.assertLess(path.stat().st_size, 30 * 1024 * 1024)
+            with self.assertRaisesRegex(InvalidResearch, "interpretation output budget"):
+                bgp.convert_native_file(path)
+            output = bgp.convert_native_file(path, row_start=bgp.MAX_ROWS - 1, row_count=2)
+            self.assertEqual(output["native_partition"], {
+                "schema": "pcap-evidence.bgp.interpretation-partition.v1", "source_ordinal": "0",
+                "row_start": "9999", "row_end": "10001", "source_rows": "10001", "whole_export_verified": True})
+            self.assertEqual([item["record_offset"] for item in output["observations"]], ["159984", "160000"])
+            self.assertEqual(output["native_evidence"], manifest)
+            comparison = bgp.compare(output, output)
+            self.assertEqual(comparison["native_partitions"], [output["native_partition"]] * 2)
+            invalid = copy.deepcopy(output)
+            invalid["native_partition"]["source_ordinal"] = "1"
+            with self.assertRaisesRegex(InvalidResearch, "partition source ordinal"):
+                bgp.validate(invalid)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(bgp.main(["native", str(path), "--row-start", "10000", "--row-count", "1"]), 0)
+            self.assertEqual(json.loads(stdout.getvalue())["native_partition"]["source_rows"], "10001")
+        self.assertFalse(path.exists())
+
+    def test_partition_verifies_unselected_suffix_and_requires_exact_interval(self):
+        with tempfile.TemporaryDirectory(prefix="bgp-compare-suffix-") as temp:
+            path = Path(temp) / "rows.ndjson"
+            write_native_rows(path, 3, corrupt_suffix=True)
+            with self.assertRaisesRegex(InvalidResearch, "cover full source"):
+                bgp.convert_native_file(path, row_start=0, row_count=1)
+            write_native_rows(path, 3)
+            for kwargs in ({"row_start": 3, "row_count": 1}, {"row_start": 2, "row_count": 2},
+                           {"row_start": 0}, {"row_count": 0}, {"row_count": bgp.MAX_ROWS + 1}):
+                with self.subTest(kwargs=kwargs), self.assertRaises(InvalidResearch):
+                    bgp.convert_native_file(path, **kwargs)
+            for suffix in (b'{"torn":', b'{}\n'):
+                write_native_rows(path, 3)
+                with path.open("ab") as stream:
+                    stream.write(suffix)
+                with self.subTest(suffix=suffix), self.assertRaises(InvalidResearch):
+                    bgp.convert_native_file(path, row_count=1)
+
+    def test_two_pass_changed_backing_bytes_are_rejected(self):
+        row, raw, manifest = native_export()
+        changed = copy.deepcopy(row)
+        changed["event"]["issues"] = ["changed"]
+        changed_raw = json.dumps(changed, separators=(",", ":")).encode() + b"\n"
+        class ChangingStream(io.BytesIO):
+            def seek(self, offset, whence=0):
+                self.truncate(0)
+                super().seek(0)
+                self.write(changed_raw)
+                return super().seek(offset, whence)
+        with self.assertRaisesRegex(InvalidResearch, "changed between verification passes"):
+            bgp._from_native_stream(ChangingStream(raw), manifest, row_count=1)
+
+    def test_two_pass_terminal_deletion_duplication_and_reordering_are_rejected(self):
+        _, raw, manifest = native_export()
+        terminal = canonical(manifest) + b"\n"
+        original = raw + terminal
+        for replacement in (raw, raw + terminal * 2, terminal + raw):
+            class ChangingStream(io.BytesIO):
+                def seek(self, offset, whence=0):
+                    self.truncate(0)
+                    super().seek(0)
+                    self.write(replacement)
+                    return super().seek(offset, whence)
+            with self.subTest(replacement=replacement[-30:]), self.assertRaisesRegex(InvalidResearch, "manifest"):
+                bgp._from_native_stream(ChangingStream(original), row_count=1)
+
+    def test_native_admission_boundaries_remain_independent_of_interpretation_limits(self):
+        _, raw, manifest = native_export()
+        export = raw + canonical(manifest) + b"\n"
+        with mock.patch.object(bgp, "MAX_NATIVE_DOCUMENT", len(export)):
+            self.assertEqual(len(bgp.from_native(export)["observations"]), 1)
+            self.assertEqual(len(bgp.from_native(raw, manifest)["observations"]), 1)
+        with mock.patch.object(bgp, "MAX_NATIVE_DOCUMENT", len(export) - 1):
+            with self.assertRaisesRegex(InvalidResearch, "byte budget"):
+                bgp.from_native(export)
+            with self.assertRaisesRegex(InvalidResearch, "byte budget"):
+                bgp.from_native(raw, manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rows.ndjson"
+            write_native_rows(path, 2)
+            with mock.patch.object(bgp, "MAX_NATIVE_ROWS", 2):
+                self.assertEqual(len(bgp.convert_native_file(path, row_count=1)["observations"]), 1)
+            with mock.patch.object(bgp, "MAX_NATIVE_ROWS", 1):
+                with self.assertRaisesRegex(InvalidResearch, "record budget"):
+                    bgp.convert_native_file(path, row_count=1)
+
     def test_invalid_extended_time_suppresses_derived_clock_for_valid_bgp_bytes(self):
         for microseconds in (1_000_000, 999_999):
             row, _, manifest = extended_timestamp_export(microseconds)
@@ -447,7 +620,7 @@ class NativeConversionTests(unittest.TestCase):
         row = doc["observations"][0]
         self.assertEqual(row["source_range"], {"kind": "source_range", "start": "0", "end": "16"})
         self.assertEqual(row["disposition"], "accepted")
-        self.assertEqual(len(row["fields"]["attributes"]["route_attributes"]["value"][0]["imported_attribute_occurrences"]), 2)
+        self.assertEqual(len(row["fields"]["raw_evidence"]["imported_attribute_occurrences"]["value"][0]), 2)
         self.assertEqual(row["evidence"]["event"], json.loads(raw)["event"])
         self.assertEqual(doc["native_evidence"], manifest)
         self.assertNotIn("frames", row["evidence"])

@@ -1,7 +1,9 @@
 use pcap_evidence::sha256;
 use pcap_evidence_product::deep::{
     bgp::PeerRelationship,
-    bgp_evidence::{self, AsnRole, AsnSelector, EvidenceLimits, TimeBasis, WindowQuery},
+    bgp_evidence::{
+        self, AsnRole, AsnSelector, ClockScope, EvidenceLimits, TimeBasis, WindowQuery,
+    },
     bgp_mrt::MrtSource,
     bgp_mrt_store::MrtReplayOptions,
     bgp_mrt_stream_store::{write_stream, MrtStreamLimits},
@@ -317,6 +319,84 @@ fn exact_microseconds_and_clock_scope_never_sort_or_merge_sources() {
         .unwrap()
         .contains("\"microseconds\":\"123456\""));
     assert!(text.lines().nth(1).unwrap().contains("outside_clock_scope"));
+}
+
+#[test]
+fn literal_all_source_clocks_selects_exact_source_and_explicit_all_selects_both() {
+    let scratch = Scratch::new();
+    let raw = [table(10), rib(20, 19, 2, 65551)].concat();
+    let literal = scratch.store("literal", "all-source-clocks", &raw, 1);
+    let other = scratch.store("other", "other", &raw, 7);
+    let paths = [literal, other.clone()];
+    // Both sources carry the same timestamps and ASN. Only scope can distinguish
+    // them; source-order rows must remain present even when not selected.
+    for (basis, start) in [
+        (TimeBasis::MrtRecordTime, 20_000_000_000),
+        (TimeBasis::RibOriginatedTime, 19_000_000_000),
+    ] {
+        let mut query = window(basis, start, start + 1, Some(AsnRole::Origin));
+        query.clock_scope = "all-source-clocks".into();
+        assert_eq!(
+            query.clock_scope,
+            ClockScope::Source("all-source-clocks".into())
+        );
+        assert_eq!(
+            ClockScope::from(String::from("all-source-clocks")),
+            query.clock_scope
+        );
+        let (exact, bytes) = export(
+            &paths,
+            &EvidenceLimits::default(),
+            Some(&query),
+            &MrtReplayOptions::default(),
+        );
+        assert_eq!(exact.rows, 4);
+        assert_eq!(exact.coverage.selected, 1);
+        let text = String::from_utf8(bytes).unwrap();
+        let rows = text.lines().collect::<Vec<_>>();
+        assert!(rows[1].contains("\"selected\":true"));
+        for row in &rows[2..4] {
+            assert!(row.contains("\"source_id\":\"other\""));
+            assert!(row.contains("\"window_disposition\":\"outside_clock_scope\""));
+            assert!(row.contains("\"selected\":false"));
+        }
+        assert!(exact
+            .json()
+            .encode()
+            .contains("\"clock_scope\":\"all-source-clocks\",\"clock_scope_kind\":\"source\""));
+
+        query.clock_scope = ClockScope::AllSourceClocks;
+        let (all, bytes) = export(
+            &paths,
+            &EvidenceLimits::default(),
+            Some(&query),
+            &MrtReplayOptions::default(),
+        );
+        assert_eq!(all.rows, 4);
+        assert_eq!(all.coverage.selected, 2);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("outside_clock_scope"));
+        assert_eq!(text.matches("\"selected\":true").count(), 2);
+        assert!(all.json().encode().contains(
+            "\"clock_scope\":\"all-source-clocks\",\"clock_scope_kind\":\"all_source_clocks\""
+        ));
+    }
+    // An absent literal sentinel is an error, not permission to broaden scope.
+    let mut query = window(TimeBasis::MrtRecordTime, 0, 100_000_000_000, None);
+    query.clock_scope = "all-source-clocks".into();
+    let mut bytes = Vec::new();
+    let error = bgp_evidence::export_sequence(
+        &[other],
+        &MrtStreamLimits::default(),
+        &Limits::default(),
+        &EvidenceLimits::default(),
+        &MrtReplayOptions::default(),
+        Some(&query),
+        &mut bytes,
+    )
+    .unwrap_err();
+    assert_eq!(error.field, "bgp_evidence_clock_scope");
+    assert!(bytes.is_empty());
 }
 
 #[test]

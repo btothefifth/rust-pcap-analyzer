@@ -58,6 +58,15 @@ outcome are separate; use the receipt below for the exact assembled generation.
 
 ## Current validation status
 
+The latest stream/evidence comparison feedback repairs are recorded in the
+[round-three feedback receipt](../../evidence/pr-feedback-round3-validation.json).
+It binds typed exact/all-source clock selection, preservation of incomplete
+semantic identities, exact byte-extent comparison prerequisites, and bounded
+source-local conversion after complete native-export verification. A pending
+or absent receipt establishes no pass. The preceding
+[stream receipt](../../evidence/bgp-stream-validation.json) remains bound to its
+original generation; its hosted results do not qualify later changes.
+
 PR review repairs are governed by the
 [O14-F2 feedback receipt](../../evidence/pr-feedback-round2-validation.json) and the
 repair contracts in the [objective ledger](OBJECTIVES_1_4.md). The

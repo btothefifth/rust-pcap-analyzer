@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import io
 import json
 import re
 from pathlib import Path
@@ -17,11 +19,13 @@ from .contract import MAX_DOCUMENT, MAX_ROWS, InvalidResearch, canonical, decode
 SCHEMA = "pcap-evidence.bgp.interpretation.v1"
 DIFFERENTIAL_SCHEMA = "pcap-evidence.bgp.differential.v1"
 NORMALIZATION = "bgp-source-fields-v1"
-GROUPS = ("disposition", "framing", "message", "attributes", "nlri", "validation")
+GROUPS = ("disposition", "framing", "message", "attributes", "nlri", "raw_evidence", "validation")
 COVERAGE = {"complete", "partial", "unsupported", "not_collected"}
 DISPOSITIONS = {"accepted", "rejected", "incomplete", "unknown", "unsupported"}
 FIELD_STATES = {"observed", "unknown", "incomplete", "unsupported"}
 NATIVE_PROFILE = "pcap-evidence.bgp.semantic-route-identity.v2"
+MAX_NATIVE_DOCUMENT = 256 * 1024 * 1024
+MAX_NATIVE_ROWS = 1_000_000
 ENTRY_KEYS = ("ordinal", "source_id", "checkpoint_id", "source_sha256", "source_bytes", "record_count",
               "final_chain", "store_seal", "predecessor_digest")
 COVERAGE_KEYS = ("records", "rows", "observations", "route_free", "opaque", "rejected", "unsupported",
@@ -61,8 +65,16 @@ def _native_manifest_payload(manifest):
     payload["coverage"] = coverage
     window = manifest["window"]
     if window is not None:
-        window_keys = ("time_basis", "clock_scope", "clock_scope_semantics", "start_ns", "end_ns", "interval", "certain_occurrence_time_claimed", "asn")
+        window_keys = ("time_basis", "clock_scope") + (("clock_scope_kind",) if "clock_scope_kind" in window else ()) + ("clock_scope_semantics", "start_ns", "end_ns", "interval", "certain_occurrence_time_claimed", "asn")
         window = _ordered(window, window_keys, "native window")
+        if "clock_scope_kind" in window:
+            kind = window["clock_scope_kind"]
+            if type(kind) is not str or kind not in {"source", "all_source_clocks"}:
+                raise InvalidResearch("native window clock scope kind")
+            if window["clock_scope_semantics"] != "independent_source_checkpoint_labels":
+                raise InvalidResearch("native window clock scope semantics mismatch")
+            if kind == "all_source_clocks" and window["clock_scope"] != "all-source-clocks":
+                raise InvalidResearch("native window all-source clock scope label mismatch")
         if window["asn"] is not None:
             window["asn"] = _ordered(window["asn"], ("number", "role"), "window ASN")
         payload["window"] = window
@@ -119,7 +131,7 @@ def validate(value):
     """
     if len(canonical(value)) > MAX_DOCUMENT:
         raise InvalidResearch("BGP interpretation byte budget")
-    _keys(value, ("schema", "source", "normalization", "producer", "observations"), ("native_evidence",), "interpretation")
+    _keys(value, ("schema", "source", "normalization", "producer", "observations"), ("native_evidence", "native_partition"), "interpretation")
     if value["schema"] != SCHEMA:
         raise InvalidResearch("unsupported BGP interpretation schema")
     out = copy.deepcopy(value)
@@ -145,6 +157,31 @@ def validate(value):
     rows = out["observations"]
     if type(rows) is not list or len(rows) > MAX_ROWS:
         raise InvalidResearch("BGP observation budget")
+    if "native_partition" in out:
+        partition = out["native_partition"]
+        _keys(partition, ("schema", "source_ordinal", "row_start", "row_end", "source_rows", "whole_export_verified"), label="native partition")
+        if partition["schema"] != "pcap-evidence.bgp.interpretation-partition.v1" or partition["whole_export_verified"] is not True:
+            raise InvalidResearch("invalid native partition verification")
+        for key in ("source_ordinal", "row_start", "row_end", "source_rows"):
+            partition[key] = str(_uint(partition[key], "native partition " + key))
+        start, end, total = (int(partition[key]) for key in ("row_start", "row_end", "source_rows"))
+        if not 0 <= start <= end <= total or end - start != len(rows):
+            raise InvalidResearch("native partition row bounds/count mismatch")
+        manifest = out.get("native_evidence")
+        if type(manifest) is not dict:
+            raise InvalidResearch("native partition requires its export manifest")
+        sequence = manifest.get("sequence")
+        if type(sequence) is not dict or type(sequence.get("entries")) is not list:
+            raise InvalidResearch("native partition manifest sequence required")
+        entries = sequence["entries"]
+        ordinal = int(partition["source_ordinal"])
+        if ordinal >= len(entries) or type(entries[ordinal]) is not dict:
+            raise InvalidResearch("native partition source ordinal absent")
+        entry = entries[ordinal]
+        if (entry.get("source_sha256") != source["sha256"]
+                or _uint(entry.get("source_bytes"), "partition source bytes") != length
+                or total > _uint(manifest.get("rows"), "partition export rows")):
+            raise InvalidResearch("native partition source/manifest mismatch")
     seen = set()
     for row in rows:
         _keys(row, ("record_offset", "source_range", "disposition", "coverage", "fields"), ("entry_index", "evidence"), "observation")
@@ -245,6 +282,17 @@ def compare(left, right, *, maximum=MAX_ROWS, output_limit=MAX_DOCUMENT):
         if l is None or r is None:
             add(anchor, "disposition", "/", "not_comparable", "missing_observation", l, r, l, r)
             continue
+        if l["source_range"] != r["source_range"]:
+            add(anchor, "framing", "source_range", "disagreement", "source_range_differs",
+                l["source_range"], r["source_range"], l, r)
+            add(anchor, "disposition", "/", "not_comparable", "source_range_mismatch",
+                l["disposition"], r["disposition"], l, r)
+            for group in sorted(set(l["fields"]) | set(r["fields"])):
+                lf, rf = l["fields"].get(group, {}), r["fields"].get(group, {})
+                for name in sorted(lf.keys() | rf.keys()) or ["/"]:
+                    add(anchor, group, name, "not_comparable", "source_range_mismatch",
+                        lf.get(name), rf.get(name), l, r)
+            continue
         complete = l["coverage"].get("disposition") == r["coverage"].get("disposition") == "complete"
         ld, rd = l["disposition"], r["disposition"]
         comparable = complete and ld in {"accepted", "rejected"} and rd in {"accepted", "rejected"}
@@ -280,6 +328,8 @@ def compare(left, right, *, maximum=MAX_ROWS, output_limit=MAX_DOCUMENT):
               "comparison_changes_canonical_evidence": False,
               "producer_authentication": "not_established", "semantic_correctness_proven": False,
               "policy": "raw_source_witness_and_primary_specification_adjudication_required"}
+    if "native_partition" in left or "native_partition" in right:
+        result["native_partitions"] = [left.get("native_partition"), right.get("native_partition")]
     if len(canonical(result)) > output_limit:
         raise InvalidResearch("comparison output byte budget")
     return result
@@ -319,12 +369,23 @@ def _native_observation(row):
         coverage["message"] = "complete"
         routes = observation.get("routes")
         if type(routes) is list and all(type(route) is dict for route in routes):
-            fields["nlri"] = {"routes": _field([{key: route.get(key) for key in ("action", "prefix")} for route in routes])}
-            attribute_keys = ("attributes", "attribute_ranges", "imported_attribute_occurrences")
+            identities = [route.get("semantic_identity") for route in routes]
+            complete = all(type(identity) is dict and identity.get("schema") == NATIVE_PROFILE
+                           and identity.get("completeness") == "complete" for identity in identities)
+            semantic_status = "observed" if complete else "incomplete"
+            fields["nlri"] = {"routes": _field(
+                [{key: route.get(key) for key in ("action", "prefix")} for route in routes], semantic_status),
+                "semantic_identity": _field(identities, semantic_status)}
+            attributes_complete = complete and all("attributes" in route for route in routes)
             fields["attributes"] = {"route_attributes": _field(
-                [{key: route[key] for key in attribute_keys if key in route} for route in routes])}
-            coverage["nlri"] = "complete"
-            coverage["attributes"] = "complete" if all("attributes" in r for r in routes) else "partial"
+                [{"attributes": route["attributes"]} if "attributes" in route else {} for route in routes],
+                "observed" if attributes_complete else "incomplete")}
+            raw_keys = ("attribute_ranges", "imported_attribute_occurrences")
+            fields["raw_evidence"] = {key: _field([route.get(key) for route in routes],
+                "observed" if all(key in route for route in routes) else "unknown") for key in raw_keys}
+            coverage["raw_evidence"] = "complete"
+            coverage["nlri"] = "complete" if complete else "partial"
+            coverage["attributes"] = "complete" if attributes_complete else "partial"
         fields["validation"]["normalized_issues"] = _field(observation.get("issues"))
     return {"record_offset": row["record_offset"], "entry_index": row.get("entry_index"),
             "source_range": {"kind": "source_range", "start": row["record_offset"],
@@ -334,21 +395,47 @@ def _native_observation(row):
                                                     "source_id", "checkpoint_id", "store_seal", "event", "observation")}}
 
 
-def from_native(raw, manifest=None, *, source_ordinal=None):
-    """Convert exact native NDJSON bytes, verifying the export byte commitment.
-
-    The terminal manifest may be the last NDJSON line or supplied separately.
-    Multiple source entries require an explicit ordinal; no source partitions
-    are merged. Store seals remain attributed claims, not authenticated inputs.
-    """
-    if type(raw) is not bytes or len(raw) > MAX_DOCUMENT:
-        raise InvalidResearch("native evidence byte budget")
-    rows, row_parts = [], []
-    terminal = None
-    for part in raw.splitlines(keepends=True):
+def _native_lines(stream):
+    """Bound each decode and the complete producer-sized export independently."""
+    used = 0
+    while True:
+        part = stream.readline(MAX_DOCUMENT + 1)
+        if not part:
+            return
+        used += len(part)
+        if len(part) > MAX_DOCUMENT or used > MAX_NATIVE_DOCUMENT:
+            raise InvalidResearch("native evidence byte budget")
         if not part.endswith(b"\n") or not part.strip():
             raise InvalidResearch("native NDJSON needs nonempty newline-terminated rows")
-        value = decode_json(part)
+        yield part, decode_json(part)
+
+
+def from_native(raw, manifest=None, *, source_ordinal=None, row_start=None, row_count=None):
+    """Convert bounded native bytes; file callers use the streaming entrypoint."""
+    if type(raw) is not bytes or len(raw) > MAX_NATIVE_DOCUMENT:
+        raise InvalidResearch("native evidence byte budget")
+    return _from_native_stream(io.BytesIO(raw), manifest, source_ordinal=source_ordinal,
+                               row_start=row_start, row_count=row_count)
+
+
+def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start=None, row_count=None):
+    """Verify the entire seekable export before publishing a bounded partition.
+
+    A first pass verifies exact NDJSON commitments and the terminal manifest.
+    The second pass verifies all source rows and retains only explicitly selected
+    source-local rows. Each pass has its own digest, so changed backing bytes
+    cannot pass through a previously checked commitment.
+    """
+    narrowed = row_start is not None or row_count is not None
+    if narrowed:
+        row_start = 0 if row_start is None else _uint(row_start, "partition row start")
+        if row_count is None or type(row_count) is not int or not 1 <= row_count <= MAX_ROWS:
+            raise InvalidResearch("explicit partition row count between 1 and 10000 required")
+    else:
+        row_start = 0
+    rows_count, rows_bytes, row_hash = 0, 0, hashlib.sha256()
+    terminal = None
+    for part, value in _native_lines(stream):
         if type(value) is dict and value.get("schema") == "pcap-evidence.bgp.evidence-manifest.v1":
             if terminal is not None:
                 raise InvalidResearch("multiple native manifests")
@@ -356,15 +443,18 @@ def from_native(raw, manifest=None, *, source_ordinal=None):
         else:
             if terminal is not None:
                 raise InvalidResearch("native rows after terminal manifest")
-            if len(rows) >= MAX_ROWS:
+            rows_count += 1
+            if rows_count > MAX_NATIVE_ROWS:
                 raise InvalidResearch("native evidence record budget")
-            rows.append(value)
-            row_parts.append(part)
+            rows_bytes += len(part)
+            row_hash.update(part)
     if manifest is None:
         manifest = terminal
     elif terminal is not None and canonical(manifest) != canonical(terminal):
         raise InvalidResearch("sidecar/terminal manifest mismatch")
     _keys(manifest, MANIFEST_KEYS + ("semantic_identity",), label="native manifest")
+    if terminal is None and rows_bytes + len(_compact(manifest)) + 1 > MAX_NATIVE_DOCUMENT:
+        raise InvalidResearch("native evidence byte budget including manifest")
     if manifest["schema"] != "pcap-evidence.bgp.evidence-manifest.v1" or manifest["complete"] is not True:
         raise InvalidResearch("incomplete native evidence manifest")
     for flag in ("endpoint_state_claimed", "source_authenticated", "resume_cursor_supported"):
@@ -377,9 +467,8 @@ def from_native(raw, manifest=None, *, source_ordinal=None):
     if manifest["rows_digest_scope"] != "exact_ndjson_rows_including_newlines_excluding_manifest":
         raise InvalidResearch("native row digest scope")
     _hash(manifest["semantic_identity"], "native semantic identity")
-    row_raw = b"".join(row_parts)
-    if (_uint(manifest["rows"]) != len(rows) or _uint(manifest["rows_bytes"]) != len(row_raw)
-            or _hash(manifest["rows_sha256"], "native rows hash") != digest(row_raw)):
+    if (_uint(manifest["rows"]) != rows_count or _uint(manifest["rows_bytes"]) != rows_bytes
+            or _hash(manifest["rows_sha256"], "native rows hash") != row_hash.hexdigest()):
         raise InvalidResearch("native row count/bytes/digest mismatch")
     sequence = manifest["sequence"]
     _keys(sequence, ("schema", "entries", "sequence_digest", "ordering", "independent_checkpoints"), label="native sequence")
@@ -423,7 +512,7 @@ def from_native(raw, manifest=None, *, source_ordinal=None):
         if key not in {"witnesses", "count_unit"}:
             _uint(manifest["coverage"][key], "native coverage count")
     if (manifest["coverage"]["count_unit"] != "rows_except_records_unknown_mrt_record_time_and_timestamp_regressions"
-            or _uint(manifest["coverage"]["rows"]) != len(rows)):
+            or _uint(manifest["coverage"]["rows"]) != rows_count):
         raise InvalidResearch("native coverage row count/unit mismatch")
     if source_ordinal is None:
         if len(entries) != 1:
@@ -437,10 +526,23 @@ def from_native(raw, manifest=None, *, source_ordinal=None):
                     "full_source_bytes", "store_seal", "record_ordinal", "record_offset", "record_bytes", "record_type", "subtype", "record_sha256",
                     "mrt_record_time", "rib_originated_time_ns", "observation_time_ns", "event", "observation",
                     "window_disposition", "asn_disposition", "selected", "certain_occurrence_time_claimed")
-    seen_anchors, records = set(), {ordinal: {} for ordinal in by_ordinal}
+    records = {ordinal: {"count": 0, "end": 0, "last": None} for ordinal in by_ordinal}
     previous_anchor = None
-    unknown_mrt_records = set()
-    for row in rows:
+    unknown_mrt_records = observed_count = selected_count = source_rows = retained_bytes = 0
+    replay_hash, replay_bytes, replay_count = hashlib.sha256(), 0, 0
+    replay_terminal = False
+    stream.seek(0)
+    for part, row in _native_lines(stream):
+        if type(row) is dict and row.get("schema") == "pcap-evidence.bgp.evidence-manifest.v1":
+            if replay_terminal or terminal is None or canonical(row) != canonical(terminal):
+                raise InvalidResearch("native manifest changed between verification passes")
+            replay_terminal = True
+            continue
+        if replay_terminal:
+            raise InvalidResearch("native rows after terminal manifest during verification")
+        replay_hash.update(part)
+        replay_bytes += len(part)
+        replay_count += 1
         _keys(row, row_required, ("entry_index",), "native evidence row")
         if row["schema"] != "pcap-evidence.bgp.evidence-row.v1" or row["provisional"] is not True:
             raise InvalidResearch("invalid native evidence row schema")
@@ -487,54 +589,70 @@ def from_native(raw, manifest=None, *, source_ordinal=None):
         record_ordinal = _uint(row["record_ordinal"])
         if record_ordinal >= _uint(entry["record_count"]):
             raise InvalidResearch("native record ordinal outside source")
-        if time_ns is None:
-            unknown_mrt_records.add((ordinal, record_ordinal))
         _hash(row["record_sha256"], "native record digest")
         if row.get("entry_index") is not None:
             _uint(row["entry_index"], "native entry index")
         anchor = ordinal, offset, None if row.get("entry_index") is None else _uint(row["entry_index"])
-        if anchor in seen_anchors:
-            raise InvalidResearch("duplicate native source anchor")
         ordered_anchor = ordinal, record_ordinal, -1 if anchor[2] is None else anchor[2]
         if previous_anchor is not None and ordered_anchor <= previous_anchor:
             raise InvalidResearch("native chronology order mismatch")
         previous_anchor = ordered_anchor
-        seen_anchors.add(anchor)
         record_identity = offset, size, row["record_sha256"], row["record_type"], row["subtype"], _compact(time)
-        prior = records[ordinal].get(record_ordinal)
-        if prior is not None and prior != record_identity:
-            raise InvalidResearch("native entry record identity mismatch")
-        records[ordinal][record_ordinal] = record_identity
-        if ordinal == source_ordinal:
-            observations.append(_native_observation(row))
-    if any(len(records[ordinal]) != _uint(entry["record_count"]) for ordinal, entry in by_ordinal.items()):
-        raise InvalidResearch("native chronology coverage incomplete")
-    for ordinal, inventory in records.items():
-        expected_offset = 0
-        for offset, size, *_ in inventory.values():
-            if offset != expected_offset:
+        inventory = records[ordinal]
+        if record_ordinal == inventory["count"] - 1:
+            if inventory["last"] != record_identity:
+                raise InvalidResearch("native entry record identity mismatch")
+        else:
+            if record_ordinal != inventory["count"]:
+                raise InvalidResearch("native chronology coverage incomplete")
+            if offset != inventory["end"]:
                 raise InvalidResearch("native record ranges leave source gap or overlap")
-            expected_offset += size
-        if expected_offset != _uint(by_ordinal[ordinal]["source_bytes"]):
-            raise InvalidResearch("native record ranges do not cover full source")
-    if (_uint(manifest["coverage"]["records"]) != sum(map(len, records.values()))
-            or _uint(manifest["coverage"]["observations"]) != sum(row["observation"] is not None for row in rows)
-            or _uint(manifest["coverage"]["unknown_mrt_record_time"]) != len(unknown_mrt_records)
-            or _uint(manifest["coverage"]["selected"]) != sum(row["selected"] for row in rows)):
+            inventory.update(count=inventory["count"] + 1, end=offset + size, last=record_identity)
+            unknown_mrt_records += time_ns is None
+        observed_count += row["observation"] is not None
+        selected_count += row["selected"]
+        if ordinal == source_ordinal:
+            retain = source_rows >= row_start and (row_count is None or source_rows < row_start + row_count)
+            source_rows += 1
+            if retain:
+                projected = _native_observation(row)
+                retained_bytes += len(canonical(projected)) + 1
+                if len(observations) >= MAX_ROWS or retained_bytes > MAX_DOCUMENT:
+                    raise InvalidResearch("native interpretation output budget exceeded; use explicit row partition")
+                observations.append(projected)
+    if replay_terminal != (terminal is not None):
+        raise InvalidResearch("native manifest changed between verification passes")
+    if (replay_count != rows_count or replay_bytes != rows_bytes or replay_hash.digest() != row_hash.digest()):
+        raise InvalidResearch("native rows changed between verification passes")
+    if any(inventory["count"] != _uint(by_ordinal[ordinal]["record_count"]) for ordinal, inventory in records.items()):
+        raise InvalidResearch("native chronology coverage incomplete")
+    if any(inventory["end"] != _uint(by_ordinal[ordinal]["source_bytes"]) for ordinal, inventory in records.items()):
+        raise InvalidResearch("native record ranges do not cover full source")
+    if (_uint(manifest["coverage"]["records"]) != sum(inventory["count"] for inventory in records.values())
+            or _uint(manifest["coverage"]["observations"]) != observed_count
+            or _uint(manifest["coverage"]["unknown_mrt_record_time"]) != unknown_mrt_records
+            or _uint(manifest["coverage"]["selected"]) != selected_count):
         raise InvalidResearch("native coverage contradicts row evidence")
+    if narrowed and (row_start >= source_rows or row_start + row_count > source_rows):
+        raise InvalidResearch("native partition outside selected source rows")
     config = {"semantic_profile": manifest["semantic_profile"], "replay_relationship": manifest["replay_relationship"]}
-    return validate({"schema": SCHEMA, "source": {"sha256": selected["source_sha256"], "bytes": selected["source_bytes"]},
+    result = {"schema": SCHEMA, "source": {"sha256": selected["source_sha256"], "bytes": selected["source_bytes"]},
                      "normalization": {"profile": NORMALIZATION, "config_sha256": digest(canonical(config))},
-                     "producer": {"id": "pcap-evidence-native", "version": "evidence-row.v1", "adapter_version": "1",
+                     "producer": {"id": "pcap-evidence-native", "version": "evidence-row.v1", "adapter_version": "2",
                                   "origin": "native_evidence", "command": []},
-                     "observations": observations, "native_evidence": manifest})
+                     "observations": observations, "native_evidence": manifest}
+    if narrowed:
+        result["native_partition"] = {"schema": "pcap-evidence.bgp.interpretation-partition.v1",
+            "source_ordinal": str(source_ordinal), "row_start": str(row_start),
+            "row_end": str(row_start + row_count), "source_rows": str(source_rows), "whole_export_verified": True}
+    return validate(result)
 
 
-def convert_native_file(rows_path, manifest_path=None, *, source_ordinal=None):
-    with Path(rows_path).open("rb") as stream:
-        raw = stream.read(MAX_DOCUMENT + 1)
+def convert_native_file(rows_path, manifest_path=None, *, source_ordinal=None, row_start=None, row_count=None):
     manifest = None if manifest_path is None else read_json(manifest_path)
-    return from_native(raw, manifest, source_ordinal=source_ordinal)
+    with Path(rows_path).open("rb") as stream:
+        return _from_native_stream(stream, manifest, source_ordinal=source_ordinal,
+                                   row_start=row_start, row_count=row_count)
 
 
 def main(argv=None):
@@ -544,6 +662,8 @@ def main(argv=None):
     native.add_argument("rows", type=Path)
     native.add_argument("manifest", type=Path, nargs="?")
     native.add_argument("--source-ordinal", type=int)
+    native.add_argument("--row-start", type=int, help="source-local zero-based row start; requires --row-count")
+    native.add_argument("--row-count", type=int, help="explicit bounded partition size (1..10000)")
     compare_parser = commands.add_parser("compare", help="compare attributed interpretations")
     compare_parser.add_argument("left", type=Path)
     compare_parser.add_argument("right", type=Path)
@@ -551,7 +671,8 @@ def main(argv=None):
     compare_parser.add_argument("--output-bytes", type=int, default=MAX_DOCUMENT)
     args = parser.parse_args(argv)
     if args.command == "native":
-        result = convert_native_file(args.rows, args.manifest, source_ordinal=args.source_ordinal)
+        result = convert_native_file(args.rows, args.manifest, source_ordinal=args.source_ordinal,
+                                     row_start=args.row_start, row_count=args.row_count)
     else:
         result = compare(read_interpretation(args.left), read_interpretation(args.right),
                          maximum=args.max_rows, output_limit=args.output_bytes)

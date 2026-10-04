@@ -523,6 +523,109 @@ assert member['asn_disposition']=='matched' and member['selected'] is True, memb
     );
 }
 
+#[test]
+fn ordinary_window_distinguishes_literal_all_source_clocks_from_all_clock_selection() {
+    let root = Scratch::new();
+    let bytes = [peer_table(10, 9, 65551), rib(20, 19, 1, 65551, false)].concat();
+    let literal = import_source(&root, "literal", &bytes, "all-source-clocks");
+    let other = import_source(&root, "other", &bytes, "collector-b");
+    let mut exact = window_args(
+        &literal,
+        &root.path("literal-window"),
+        "mrt-record",
+        "all-source-clocks",
+        20_000_000_000,
+        20_000_000_001,
+    );
+    let scope_flag = exact.iter().position(|arg| arg == "--clock-scope").unwrap();
+    exact[scope_flag] = "--clock-source".into();
+    exact.extend(["--with-store".into(), other.as_os_str().into()]);
+    success(cli(exact));
+    // Preserve the existing deliberate all-clock CLI spelling.
+    let mut all = window_args(
+        &literal,
+        &root.path("all-window"),
+        "mrt-record",
+        "all-source-clocks",
+        20_000_000_000,
+        20_000_000_001,
+    );
+    all.extend(["--with-store".into(), other.as_os_str().into()]);
+    success(cli(all));
+    // Both syntaxes together are ambiguous and must fail before publication,
+    // regardless of their order or whether their textual values agree.
+    for (name, exact_first) in [("both-legacy-first", false), ("both-exact-first", true)] {
+        let output = root.path(name);
+        let mut both = window_args(
+            &literal,
+            &output,
+            "mrt-record",
+            "all-source-clocks",
+            20_000_000_000,
+            20_000_000_001,
+        );
+        let flag = both.iter().position(|arg| arg == "--clock-scope").unwrap();
+        if exact_first {
+            both[flag] = "--clock-source".into();
+            both.extend(["--clock-scope".into(), "all-source-clocks".into()]);
+        } else {
+            both.extend(["--clock-source".into(), "all-source-clocks".into()]);
+        }
+        rejected(cli(both));
+        assert!(
+            !output.exists(),
+            "ambiguous scope created an output workspace"
+        );
+    }
+    // The exact literal must be present; the all-clock sentinel cannot bypass
+    // ordinary source-reference admission when passed through --clock-source.
+    let absent = root.path("absent-literal");
+    let mut missing = window_args(
+        &other,
+        &absent,
+        "mrt-record",
+        "all-source-clocks",
+        20_000_000_000,
+        20_000_000_001,
+    );
+    let flag = missing
+        .iter()
+        .position(|arg| arg == "--clock-scope")
+        .unwrap();
+    missing[flag] = "--clock-source".into();
+    let refusal = cli(missing);
+    fs::write(root.path("absent-literal-error.json"), &refusal.stderr).unwrap();
+    rejected(refusal);
+    for artifact in ["evidence.ndjson", "sequence.json", "manifest.json"] {
+        assert!(!absent.join(artifact).exists());
+    }
+    check_json(
+        &root,
+        r#"
+exact,exact_manifest,_=validate_export(pathlib.Path('literal-window'))
+all_rows,all_manifest,_=validate_export(pathlib.Path('all-window'))
+for rows in [exact,all_rows]:
+    validate_source([row for row in rows if row['source_id']=='all-source-clocks'],'literal.mrt','all-source-clocks','literal')
+    validate_source([row for row in rows if row['source_id']=='collector-b'],'other.mrt','collector-b','other')
+    assert len(rows)==4, rows
+assert exact_manifest['window']['clock_scope']=='all-source-clocks', exact_manifest
+assert exact_manifest['window']['clock_scope_kind']=='source', exact_manifest
+assert all_manifest['window']['clock_scope']=='all-source-clocks', all_manifest
+assert all_manifest['window']['clock_scope_kind']=='all_source_clocks', all_manifest
+exact_selected=[row for row in exact if row['selected']]
+assert [(row['source_id'],int(row['record_ordinal'])) for row in exact_selected]==[('all-source-clocks',1)], exact_selected
+outside=[row for row in exact if row['source_id']=='collector-b']
+assert len(outside)==2 and all(row['window_disposition']=='outside_clock_scope' and row['selected'] is False for row in outside), outside
+all_selected=[row for row in all_rows if row['selected']]
+assert [(row['source_id'],int(row['record_ordinal'])) for row in all_selected]==[('all-source-clocks',1),('collector-b',1)], all_selected
+assert not any(row['window_disposition']=='outside_clock_scope' for row in all_rows), all_rows
+assert int(exact_manifest['coverage']['selected'])==1 and int(all_manifest['coverage']['selected'])==2
+error=load('absent-literal-error.json')
+assert error['error']=='protocol_framing' and error['field']=='bgp_evidence_clock_scope', error
+"#,
+    );
+}
+
 fn tree_bytes(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut entries = fs::read_dir(path)
         .unwrap()

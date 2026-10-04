@@ -118,7 +118,9 @@ pub(super) fn import(v: &[String]) -> Result<()> {
 }
 
 pub(super) fn export(v: &[String]) -> Result<()> {
-    use deep::bgp_evidence::{AsnRole, AsnSelector, EvidenceLimits, TimeBasis, WindowQuery};
+    use deep::bgp_evidence::{
+        AsnRole, AsnSelector, ClockScope, EvidenceLimits, TimeBasis, WindowQuery,
+    };
     let mut paths = vec![PathBuf::from(v.get(2).ok_or_else(usage)?)];
     let mut workspace = None;
     let mut stream = MrtStreamLimits {
@@ -134,6 +136,7 @@ pub(super) fn export(v: &[String]) -> Result<()> {
     let mut role = None;
     let mut basis = None;
     let mut scope = None;
+    let mut source_scope = None;
     let mut start = None;
     let mut end = None;
     let mut seen = BTreeSet::new();
@@ -180,6 +183,7 @@ pub(super) fn export(v: &[String]) -> Result<()> {
                 })
             }
             "--clock-scope" => scope = Some(value.clone()),
+            "--clock-source" => source_scope = Some(value.clone()),
             "--start-ns" => start = Some(value.parse::<i128>().map_err(|_| usage())?),
             "--end-ns" => end = Some(value.parse::<i128>().map_err(|_| usage())?),
             _ => return Err(usage()),
@@ -194,6 +198,17 @@ pub(super) fn export(v: &[String]) -> Result<()> {
         return Err(usage());
     }
     let selector = if v[1] == "window" {
+        let clock_scope = match (scope, source_scope) {
+            (Some(value), None) if !value.trim().is_empty() => {
+                if value == deep::bgp_evidence::ALL_SOURCE_CLOCKS {
+                    ClockScope::AllSourceClocks
+                } else {
+                    ClockScope::Source(value)
+                }
+            }
+            (None, Some(value)) if !value.trim().is_empty() => ClockScope::Source(value),
+            _ => return Err(usage()),
+        };
         let start_ns = start.ok_or_else(usage)?;
         let end_ns = end.ok_or_else(usage)?;
         if start_ns >= end_ns {
@@ -205,7 +220,7 @@ pub(super) fn export(v: &[String]) -> Result<()> {
                 role: role.ok_or_else(usage)?,
             }),
             time_basis: basis.ok_or_else(usage)?,
-            clock_scope: scope.filter(|v| !v.trim().is_empty()).ok_or_else(usage)?,
+            clock_scope,
             start_ns,
             end_ns,
         })
@@ -214,6 +229,7 @@ pub(super) fn export(v: &[String]) -> Result<()> {
             || role.is_some()
             || basis.is_some()
             || scope.is_some()
+            || source_scope.is_some()
             || start.is_some()
             || end.is_some()
         {

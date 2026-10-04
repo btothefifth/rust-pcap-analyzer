@@ -99,20 +99,56 @@ pub struct AsnSelector {
     pub asn: u32,
     pub role: AsnRole,
 }
+/// Source labels are data; selecting every independent clock is explicit control.
+/// String conversions always select one literal source, including `all-source-clocks`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClockScope {
+    Source(String),
+    AllSourceClocks,
+}
+impl ClockScope {
+    fn includes(&self, source_id: &str) -> bool {
+        match self {
+            Self::Source(source) => source == source_id,
+            Self::AllSourceClocks => true,
+        }
+    }
+    fn label(&self) -> &str {
+        match self {
+            Self::Source(source) => source,
+            Self::AllSourceClocks => ALL_SOURCE_CLOCKS,
+        }
+    }
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Source(_) => "source",
+            Self::AllSourceClocks => "all_source_clocks",
+        }
+    }
+}
+impl From<String> for ClockScope {
+    fn from(source: String) -> Self {
+        Self::Source(source)
+    }
+}
+impl From<&str> for ClockScope {
+    fn from(source: &str) -> Self {
+        Self::Source(source.into())
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowQuery {
     pub asn: Option<AsnSelector>,
     pub time_basis: TimeBasis,
-    /// Exact source label, or the caller's deliberate `all-source-clocks`.
-    /// Checkpoints remain independent clock labels in either case.
-    pub clock_scope: String,
+    /// Checkpoints remain independent clock labels in either variant.
+    pub clock_scope: ClockScope,
     pub start_ns: i128,
     pub end_ns: i128,
 }
 impl WindowQuery {
     pub fn validate(&self) -> Result<()> {
-        if self.clock_scope.is_empty()
-            || self.clock_scope.len() > 1024
+        if self.clock_scope.label().is_empty()
+            || self.clock_scope.label().len() > 1024
             || self.start_ns >= self.end_ns
             || matches!(self.asn, Some(AsnSelector { asn: 0, .. }))
         {
@@ -123,7 +159,8 @@ impl WindowQuery {
     pub fn json(&self) -> Json {
         Json::object([
             ("time_basis", self.time_basis.name().into()),
-            ("clock_scope", self.clock_scope.clone().into()),
+            ("clock_scope", self.clock_scope.label().into()),
+            ("clock_scope_kind", self.clock_scope.kind().into()),
             (
                 "clock_scope_semantics",
                 "independent_source_checkpoint_labels".into(),
@@ -524,11 +561,10 @@ fn export_inner<W: Write>(
     }
     if let Some(query) = window {
         query.validate()?;
-        if query.clock_scope != ALL_SOURCE_CLOCKS
-            && !sequence
-                .entries
-                .iter()
-                .any(|entry| entry.source_id == query.clock_scope)
+        if !sequence
+            .entries
+            .iter()
+            .any(|entry| query.clock_scope.includes(&entry.source_id))
         {
             return Err(bad(
                 "bgp_evidence_clock_scope",
@@ -827,9 +863,7 @@ fn classify(
         TimeBasis::RibOriginatedTime => originated,
         TimeBasis::ObservationTime => observation_time,
     };
-    let time_disposition = if query.clock_scope != ALL_SOURCE_CLOCKS
-        && query.clock_scope != event.receipt.source.source_id
-    {
+    let time_disposition = if !query.clock_scope.includes(&event.receipt.source.source_id) {
         "outside_clock_scope"
     } else {
         match time {

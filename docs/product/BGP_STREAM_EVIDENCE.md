@@ -92,12 +92,18 @@ versions, source digest/length, normalization/config identities, numeric source
 anchors, tagged imported-source provenance, coverage and typed dispositions.
 Ordered raw attribute occurrences, duplicate/discard dispositions and incomplete
 semantic identity are preserved. External commands are inert metadata.
+Normalized route attributes and semantic identities remain incomplete when the
+native identity is missing, unresolved or incomplete. Separately observed raw
+attribute evidence can still be compared without making those semantics complete.
 
 `pcap-evidence.bgp.differential.v1` compares only matching source identities and
 normalization profiles. Missing coverage is `not_comparable`; rejected versus
 accepted evidence is a disagreement. Supported matching fields are agreement
 within declared coverage. Comparison records `consensus_used=false` and cannot
 enter the core admission path.
+The exact source range must also match for a joined record/entry anchor. A
+framing disagreement about its extent prevents disposition and semantic fields
+from voting agreement or disagreement for that observation.
 
 ## Finite acceptance and remaining qualification
 
@@ -128,9 +134,11 @@ pcap-depth bgp chronology imported/bgp.mrt-stream --workspace chronology \
   --with-store later/bgp.mrt-stream
 pcap-depth bgp window imported/bgp.mrt-stream --workspace window \
   --asn 65001 --asn-role origin --time-basis mrt-record \
-  --clock-scope collector-a --start-ns 1000000000 --end-ns 2000000000
+  --clock-source collector-a --start-ns 1000000000 --end-ns 2000000000
 python3 -m tools.research.bgp_compare native chronology/evidence.ndjson \
   chronology/manifest.json --source-ordinal 0
+python3 -m tools.research.bgp_compare native chronology/evidence.ndjson \
+  chronology/manifest.json --source-ordinal 0 --row-start 0 --row-count 100
 python3 -m tools.research.bgp_compare compare native.json external.json
 ```
 
@@ -146,12 +154,19 @@ Relationship configuration for these commands applies uniformly to the selected
 independent sources and is recorded as caller configuration.
 
 Time bases are `mrt-record`, `rib-originated` or `observation`; ASN roles are
-`origin` or `path-member`. Clock scope is an exact source ID, or explicit
-`all-source-clocks` to inspect each independent source's labels. The latter
+`origin` or `path-member`. `--clock-source ID` selects an exact source ID,
+including a source literally named `all-source-clocks`. The legacy
+`--clock-scope ID` selects an exact source except that
+`--clock-scope all-source-clocks` explicitly inspects all independent source
+labels. These options are mutually exclusive. The all-source selection
 never establishes clock synchronization or a common occurrence-time interval.
 An exact clock scope must exist in the selected sequence; an absent scope is a
 typed refusal, without a completed export. Rows belonging to other admitted
 source clocks retain an `outside_clock_scope` disposition.
+The API uses `ClockScope::Source` or `ClockScope::AllSourceClocks`; converting a
+string into this type always creates an exact source selection. New manifests
+bind `clock_scope_kind` (`source` or `all_source_clocks`) alongside the label,
+so the two operations have distinct identities even when their labels match.
 
 Stream limits are `--max-source-bytes`, `--max-store-bytes`,
 `--max-record-bytes`, `--max-records` and `--max-work`; exports also accept
@@ -167,3 +182,16 @@ document. Each covered field carries an `observed`, `unknown`, `incomplete` or
 sides can agree or disagree. Multi-source exports require an explicit source
 ordinal when converting to a single-source interpretation. Commands stored in
 producer metadata are never executed.
+
+Native conversion streams and verifies the complete export, admitting up to
+256 MiB and 1,000,000 rows. The normalized interpretation remains bounded to
+8 MiB and 10,000 observations. For larger exports, use explicit `--row-start`
+and `--row-count` to select a source-local row interval after choosing the source
+ordinal. The complete requested interval must fit that source's row count;
+an interval beyond its last row is refused. Select smaller intervals when normalized bytes exceed the
+interpretation ceiling. No implicit truncation or source merging occurs.
+The `native_partition` metadata records the half-open row interval, total rows
+for that source, source ordinal and whole-export verification, alongside the
+complete bound native manifest. Corrupt or incomplete rows outside the selected
+interval still prevent conversion. All partitions remain offline attributed
+interpretations; their verification does not authenticate the collector.
