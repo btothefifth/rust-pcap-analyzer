@@ -373,6 +373,7 @@ fn build_archive(
     let mut retained = batch.retained_charge;
     for index in 0..batch.records.len() {
         let rib_work_before = rib.accounted_work();
+        let mut native_continuity = Vec::new();
         let replay =
             bgp::bmp::replay_record(&batch, index, &limits, bmp_limits.peers, &mut decoder)?;
         let event_bytes = replay.event.encoded_len_bounded(limits.output_bytes)?;
@@ -414,18 +415,24 @@ fn build_archive(
                 sum.checked_add(size)
                     .ok_or_else(|| Error::limit("bmp_source_event_retained"))
             })?;
-        let prospective = imported_event_parts_charge(event_bytes, 0, cut_charge)?;
+        let prospective = imported_event_parts_charge(
+            event_bytes,
+            batch.source.source_id.len() + batch.source.checkpoint_id.len(),
+            cut_charge,
+        )?;
         let references = replay.gaps.iter().try_fold(0usize, |n, c| {
             n.checked_add(c.provenance.len())
                 .ok_or_else(|| Error::limit("bmp_source_event_spans"))
         })?;
+        let (copy_retained, copy_work) =
+            imported_precopy_footprint(retained, work, &rib, &native_continuity, rib_work_before)?;
         admit_imported_event(
             prospective,
             source_events.len(),
             source_event_spans,
             references,
-            retained,
-            work,
+            copy_retained,
+            copy_work,
             &limits,
         )?;
         let cuts = replay
@@ -448,7 +455,11 @@ fn build_archive(
                 _ => K::SessionMetadata,
             }
         };
+        let container_index = source_events.len();
         let container = ImportedSourceEvent {
+            source_id: batch.source.source_id.clone(),
+            checkpoint_id: batch.source.checkpoint_id.clone(),
+            native_continuity: Vec::new(),
             source_record_index: index,
             observation_index: None,
             kind: container_kind,
@@ -496,19 +507,32 @@ fn build_archive(
             };
             let clone_charge = imported_event_parts_charge(
                 replay.event.encoded_len_bounded(limits.input_bytes)?,
-                context.retained_charge()?,
+                context
+                    .retained_charge()?
+                    .saturating_add(batch.source.source_id.len())
+                    .saturating_add(batch.source.checkpoint_id.len()),
                 0,
+            )?;
+            let (copy_retained, copy_work) = imported_precopy_footprint(
+                retained,
+                work,
+                &rib,
+                &native_continuity,
+                rib_work_before,
             )?;
             admit_imported_event(
                 clone_charge,
                 source_events.len(),
                 source_event_spans,
                 context.provenance.len(),
-                retained,
-                work,
+                copy_retained,
+                copy_work,
                 &limits,
             )?;
             let source_event = ImportedSourceEvent {
+                source_id: batch.source.source_id.clone(),
+                checkpoint_id: batch.source.checkpoint_id.clone(),
+                native_continuity: Vec::new(),
                 source_record_index: index,
                 observation_index: Some(observations.len()),
                 kind: source_kind,
@@ -535,7 +559,21 @@ fn build_archive(
                 if !matches!(event.kind, RibEventKind::Reset { .. })
                     || native_scope_initialized(&rib, &event, &mut work, &limits)?
                 {
-                    rib.apply_with_origin(event, observation.sha256())?;
+                    let admitted_work = work
+                        .checked_add(
+                            rib.accounted_work()
+                                .checked_sub(rib_work_before)
+                                .ok_or_else(|| Error::limit("bmp_replay_work"))?,
+                        )
+                        .ok_or_else(|| Error::limit("bmp_replay_work"))?;
+                    super::bgp_import::apply_native_event(
+                        &mut rib,
+                        event,
+                        Some(observation.sha256()),
+                        &mut native_continuity,
+                        (retained, admitted_work, 6, 6),
+                        &limits,
+                    )?;
                 }
             }
             if observations.len() >= limits.elements {
@@ -547,14 +585,43 @@ fn build_archive(
             observations.push(observation);
         }
         for (ordinal, context) in replay.gaps.into_iter().enumerate() {
-            rib.apply(RibEvent {
-                scope: scope(&context, &limits)?,
-                record_id: format!("bmp-gap:{index}:{ordinal}:{}", batch.records[index].sha256),
-                kind: RibEventKind::Gap {
-                    reason: "quarantined_bmp_context_continuity".into(),
+            let admitted_work = work
+                .checked_add(
+                    rib.accounted_work()
+                        .checked_sub(rib_work_before)
+                        .ok_or_else(|| Error::limit("bmp_replay_work"))?,
+                )
+                .ok_or_else(|| Error::limit("bmp_replay_work"))?;
+            super::bgp_import::apply_native_event(
+                &mut rib,
+                RibEvent {
+                    scope: scope(&context, &limits)?,
+                    record_id: format!("bmp-gap:{index}:{ordinal}:{}", batch.records[index].sha256),
+                    kind: RibEventKind::Gap {
+                        reason: "quarantined_bmp_context_continuity".into(),
+                    },
                 },
-            })?;
+                None,
+                &mut native_continuity,
+                (retained, admitted_work, 6, 6),
+                &limits,
+            )?;
         }
+        let native_bytes = native_continuity
+            .iter()
+            .try_fold(0usize, |n, e| n.checked_add(e.retained_charge()))
+            .and_then(|n| n.checked_mul(6))
+            .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+        // Move the admitted collector into its original container occurrence.
+        retained = retained
+            .checked_add(native_bytes)
+            .filter(|n| *n <= limits.retained_bytes)
+            .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+        work = work
+            .checked_add(native_bytes)
+            .filter(|n| *n <= limits.work)
+            .ok_or_else(|| Error::limit("bmp_source_event_work"))?;
+        source_events[container_index].native_continuity = native_continuity;
         // The canonical reducer owns and enforces its own retained representation.
         if rib
             .retained_bytes()
@@ -610,6 +677,30 @@ fn build_archive(
 fn decimal_digits(value: usize) -> usize {
     value.max(1).ilog10() as usize + 1
 }
+fn imported_precopy_footprint(
+    retained: usize,
+    work: usize,
+    rib: &AdjRibIn,
+    effects: &[super::bgp_import::ImportedNativeContinuity],
+    native_work_before: usize,
+) -> Result<(usize, usize)> {
+    let carrier = effects
+        .iter()
+        .try_fold(0usize, |n, e| n.checked_add(e.retained_charge()))
+        .and_then(|n| n.checked_mul(6))
+        .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+    let retained = retained
+        .checked_add(rib.retained_bytes())
+        .and_then(|n| n.checked_add(carrier))
+        .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+    let work = rib
+        .accounted_work()
+        .checked_sub(native_work_before)
+        .and_then(|n| n.checked_add(work))
+        .and_then(|n| n.checked_add(carrier))
+        .ok_or_else(|| Error::limit("bmp_source_event_work"))?;
+    Ok((retained, work))
+}
 fn imported_event_parts_charge(
     reference_bytes: usize,
     context_bytes: usize,
@@ -640,7 +731,16 @@ fn imported_event_charge(event: &super::bgp_import::ImportedSourceEvent) -> Resu
     })?;
     imported_event_parts_charge(
         event.reference.encoded_len_bounded(usize::MAX)?,
-        context_bytes,
+        context_bytes
+            .saturating_add(event.source_id.len())
+            .saturating_add(event.checkpoint_id.len())
+            .saturating_add(
+                event
+                    .native_continuity
+                    .iter()
+                    .map(|e| e.retained_charge())
+                    .sum::<usize>(),
+            ),
         cut_bytes,
     )
 }
@@ -865,15 +965,18 @@ mod typed_source_charge_tests {
         // 1024 + all ten independent label lengths + one 128/range and SHA64.
         let context_floor = 1024 + 1 + 6 + 1 + 5 + 5 + 64 + 2 + 7 + 4 + 5 + 128 + 64;
         let cut_floor = context_floor + 10 + 12 + 128;
-        let exact = 6 * (reference.encode().len() + 512 + context_floor + cut_floor);
+        let exact = 6 * (reference.encode().len() + 512 + context_floor + cut_floor + 2);
         let borrowed = imported_event_parts_charge(
             reference.encode().len(),
-            context.retained_charge().unwrap(),
+            context.retained_charge().unwrap() + 2,
             cut.context.retained_charge().unwrap() + cut.record_id.len() + cut.reason.len() + 128,
         )
         .unwrap();
         assert_eq!(borrowed, exact);
         let event = ImportedSourceEvent {
+            source_id: "s".into(),
+            checkpoint_id: "c".into(),
+            native_continuity: Vec::new(),
             source_record_index: 0,
             observation_index: None,
             kind: ImportedSourceEventKind::ContinuityGap,

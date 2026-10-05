@@ -15,7 +15,17 @@ unresolved differences. A newly applied native gap, reset or session end breaks 
 comparison segment. Captured decoded boundaries carry their original source
 ordinal, validated observation identity and owning native affected scope. Native
 quarantine can cover a whole session generation even when its reporting witness
-has a direction. Immutable replay remains a distinct source occurrence and does
+has a direction. Imported containers likewise carry the effect actually admitted
+by the native reducer, including its affected previous generation for Reset.
+Their original reporting context, record occurrence and source-range witnesses
+remain unchanged. Imported change events expose this inventory in
+`native_continuity`, alongside typed `source_id` and `checkpoint_id`; the original
+`reference`, `import_context` and `continuity_cuts` remain evidence of the source
+occurrence. The inventory contains newly admitted effects only; its generation
+fields are independent of the occurrence's original reporting generation. An empty native-effect inventory does not clear predecessor
+state or become an all-scope boundary. Metadata with unavailable session context
+still has its exact verified source and checkpoint identity; an explicit known
+source or checkpoint mismatch excludes it. Immutable replay remains a distinct source occurrence and does
 not reapply an old continuity barrier. Valid empty UPDATEs and explicit EOR do
 not create a gap by themselves. It never invents withdrawals. Filters reuse the typed query
 prefix, ASN-role, standard/large/extended community, next-hop and scoped reported
@@ -33,7 +43,8 @@ refer to this offline observation claim. They establish no installed route,
 reachability, source authentication or caller authorization.
 
 The profile is bounded UTF-8 LF `key=value` text. No comments, blank lines,
-whitespace normalization or escapes are accepted. Each required header occurs
+whitespace normalization are accepted. Version 1 accepts no escapes; version 2
+uses the native-text representation described below. Each required header occurs
 exactly once; unknown keys and duplicate expectation IDs are rejected. Integers
 are canonical unsigned decimal, IPs/CIDRs canonical, and ASN zero is rejected.
 
@@ -71,6 +82,32 @@ Native `absent` tokens match absence exactly; they never mean any peer, directio
 checkpoint, path or lifecycle. Exactly one of capture lifecycle and import
 checkpoint must be present. Attribute `unknown` means the caller supplied no
 predicate for that attribute.
+
+Version 1 remains accepted with its original syntax and meaning. Its bare
+`absent` token cannot represent the literal checkpoint or peer label `absent`.
+Use `schema=pcap-evidence.bgp.expectation-profile.v2` for that identity. Version 2
+changes native text fields three (source), five (session), eight (peer) and nine (checkpoint):
+
+- `none` means exact native absence in optional peer/checkpoint fields only.
+  Required source/session fields must use `text:VALUE`.
+- `text:VALUE` means an exact present native label. `VALUE` uses literal ASCII
+  letters, digits, `-`, `.`, `_`, and `~`. Every other UTF-8 byte must be encoded
+  as `%HH` with uppercase hexadecimal digits. Escaping an unreserved byte is
+  rejected, so each label has one canonical representation.
+- `text:absent` and `text:none` preserve those literal labels. A label `a|b%`
+  is `text:a%7Cb%25`; `text:` in a label is encoded as `text:text%3A`.
+
+Decoded labels must be nonempty after trimming, control-free UTF-8 and at most
+1024 bytes, matching the existing imported metadata owner. Their bytes remain
+exact, including encoded whitespace or Unicode. Encoded native text fields may
+occupy up to 3077 bytes; aggregate profile/input/allocation limits are unchanged.
+All other fields retain the version 1 grammar, including `absent` for missing
+numeric direction, lifecycle and path ID. Header order is unchanged: schema may
+appear before or after expectation rows. The result records the input
+`profile_schema` and the SHA-256 of the original profile bytes. Existing sealed
+source labels and raw-source store versions are unchanged; fresh replay builds
+the typed source and native-effect metadata from the checked source owner.
+Regular typed source/session/peer/checkpoint query selectors compare the decoded native label.
 
 A matching announcement directly supports `present` and contradicts `absent`;
 all repeated exact witnesses remain retained. Unknown/opaque selector evidence

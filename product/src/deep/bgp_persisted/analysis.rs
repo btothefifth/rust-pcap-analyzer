@@ -5,6 +5,7 @@ use super::*;
 use crate::deep::bgp_state::{ObservationKind, RouteObservation, RoutePathId};
 
 pub const EXPECTATION_PROFILE_SCHEMA: &str = "pcap-evidence.bgp.expectation-profile.v1";
+pub const EXPECTATION_PROFILE_SCHEMA_V2: &str = "pcap-evidence.bgp.expectation-profile.v2";
 pub const EXPECTATION_RESULT_SCHEMA: &str = "pcap-evidence.bgp.expectations.v1";
 pub const CHANGES_SCHEMA: &str = "pcap-evidence.bgp.changes.v1";
 
@@ -40,6 +41,7 @@ pub struct Expectation {
 }
 #[derive(Clone, Debug)]
 pub struct ExpectationProfile {
+    schema: &'static str,
     provenance: String,
     coverage: CoverageDeclaration,
     expectations: Vec<Expectation>,
@@ -71,8 +73,7 @@ impl ExpectationProfile {
             return Err(Error::limit("bgp_expectation_profile"));
         }
         let mut headers = BTreeMap::new();
-        let mut rows = Vec::new();
-        let mut ids = BTreeSet::new();
+        let mut raw_rows = Vec::new();
         for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
             let (key, value) = line
                 .split_once('=')
@@ -85,18 +86,10 @@ impl ExpectationProfile {
                 ));
             }
             if key == "expectation" {
-                if rows.len() >= limits.elements.min(256) {
+                if raw_rows.len() >= limits.elements.min(256) {
                     return Err(Error::limit("bgp_expectation_rows"));
                 }
-                let row = parse_expectation(value)?;
-                if !ids.insert(row.id.clone()) {
-                    return Err(bad(
-                        "bgp_expectation_profile",
-                        0,
-                        "duplicate expectation ID",
-                    ));
-                }
-                rows.push(row);
+                raw_rows.push(value);
             } else if matches!(key, "schema" | "provenance" | "time_basis" | "coverage") {
                 if headers.insert(key, value).is_some() {
                     return Err(bad("bgp_expectation_profile", 0, "duplicate header"));
@@ -111,13 +104,30 @@ impl ExpectationProfile {
                 .copied()
                 .ok_or_else(|| bad("bgp_expectation_profile", 0, "required header missing"))
         };
-        if required("schema")? != EXPECTATION_PROFILE_SCHEMA {
-            return Err(Error::new(
-                ErrorCode::UnsupportedVersion,
-                0,
-                "bgp_expectation_profile",
-                "unsupported schema",
-            ));
+        let schema = match required("schema")? {
+            EXPECTATION_PROFILE_SCHEMA => EXPECTATION_PROFILE_SCHEMA,
+            EXPECTATION_PROFILE_SCHEMA_V2 => EXPECTATION_PROFILE_SCHEMA_V2,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::UnsupportedVersion,
+                    0,
+                    "bgp_expectation_profile",
+                    "unsupported schema",
+                ))
+            }
+        };
+        let mut rows = Vec::new();
+        let mut ids = BTreeSet::new();
+        for value in raw_rows {
+            let row = parse_expectation(value, schema == EXPECTATION_PROFILE_SCHEMA_V2)?;
+            if !ids.insert(row.id.clone()) {
+                return Err(bad(
+                    "bgp_expectation_profile",
+                    0,
+                    "duplicate expectation ID",
+                ));
+            }
+            rows.push(row);
         }
         let provenance = required("provenance")?;
         identity(provenance)?;
@@ -147,6 +157,7 @@ impl ExpectationProfile {
             ));
         }
         Ok(Self {
+            schema,
             provenance: provenance.into(),
             coverage,
             expectations: rows,
@@ -199,12 +210,77 @@ fn canonical_u64(value: &str) -> Result<u64> {
         .parse()
         .map_err(|_| bad("bgp_expectation_profile", 0, "integer out of range"))
 }
-fn exact_optional_text(value: &str) -> Result<Option<String>> {
-    if value == "absent" {
+fn exact_optional_text(value: &str, v2: bool) -> Result<Option<String>> {
+    if !v2 {
+        if value == "absent" {
+            return Ok(None);
+        }
+        identity(value)?;
+        return Ok(Some(value.into()));
+    }
+    if value == "none" {
         return Ok(None);
     }
-    identity(value)?;
-    Ok(Some(value.into()))
+    let encoded = value.strip_prefix("text:").ok_or_else(|| {
+        bad(
+            "bgp_expectation_profile",
+            0,
+            "none or text:encoded optional text required",
+        )
+    })?;
+    let mut decoded = Vec::new();
+    let mut bytes = encoded.bytes();
+    while let Some(byte) = bytes.next() {
+        let decoded_byte = if byte == b'%' {
+            let hex = |b: u8| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            };
+            let high = bytes.next().and_then(hex);
+            let low = bytes.next().and_then(hex);
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err(bad(
+                    "bgp_expectation_profile",
+                    0,
+                    "uppercase percent escape required",
+                ));
+            };
+            let b = high * 16 + low;
+            if optional_text_unreserved(b) {
+                return Err(bad(
+                    "bgp_expectation_profile",
+                    0,
+                    "unreserved bytes must be literal",
+                ));
+            }
+            b
+        } else {
+            if !optional_text_unreserved(byte) {
+                return Err(bad(
+                    "bgp_expectation_profile",
+                    0,
+                    "non-unreserved bytes require percent escape",
+                ));
+            }
+            byte
+        };
+        if decoded.len() >= 1024 {
+            return Err(bad(
+                "bgp_expectation_profile",
+                0,
+                "bounded decoded identity required",
+            ));
+        }
+        decoded.push(decoded_byte);
+    }
+    let text = String::from_utf8(decoded)
+        .map_err(|_| bad("bgp_expectation_profile", 0, "UTF-8 optional text required"))?;
+    native_optional_identity(&text)?;
+    Ok(Some(text))
+}
+fn optional_text_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
 }
 fn exact_optional_u64(value: &str) -> Result<Option<u64>> {
     if value == "absent" {
@@ -213,11 +289,19 @@ fn exact_optional_u64(value: &str) -> Result<Option<u64>> {
         canonical_u64(value).map(Some)
     }
 }
-fn parse_expectation(value: &str) -> Result<Expectation> {
+fn parse_expectation(value: &str, v2: bool) -> Result<Expectation> {
     let f: Vec<_> = value.split('|').collect();
     if f.len() != 19
-        || f.iter()
-            .any(|v| v.is_empty() || v.trim() != *v || v.len() > 1024)
+        || f.iter().enumerate().any(|(i, v)| {
+            v.is_empty()
+                || v.trim() != *v
+                || v.len()
+                    > if v2 && matches!(i, 2 | 4 | 7 | 8) {
+                        5 + 3 * 1024
+                    } else {
+                        1024
+                    }
+        })
     {
         return Err(bad(
             "bgp_expectation_profile",
@@ -225,9 +309,30 @@ fn parse_expectation(value: &str) -> Result<Expectation> {
             "nineteen bounded exact fields required",
         ));
     }
-    for i in [0, 2, 3, 4] {
+    for i in [0, 3] {
         identity(f[i])?;
     }
+    let required_text = |value: &str| -> Result<String> {
+        exact_optional_text(value, v2)?.ok_or_else(|| {
+            bad(
+                "bgp_expectation_profile",
+                0,
+                "present source/session text required",
+            )
+        })
+    };
+    let source = if v2 {
+        required_text(f[2])?
+    } else {
+        identity(f[2])?;
+        f[2].into()
+    };
+    let session = if v2 {
+        required_text(f[4])?
+    } else {
+        identity(f[4])?;
+        f[4].into()
+    };
     let presence = match f[1] {
         "present" => ExpectedPresence::Present,
         "absent" => ExpectedPresence::Absent,
@@ -244,8 +349,8 @@ fn parse_expectation(value: &str) -> Result<Expectation> {
             u8::try_from(v).map_err(|_| bad("bgp_expectation_profile", 0, "direction out of range"))
         })
         .transpose()?;
-    let peer = exact_optional_text(f[7])?;
-    let checkpoint = exact_optional_text(f[8])?;
+    let peer = exact_optional_text(f[7], v2)?;
+    let checkpoint = exact_optional_text(f[8], v2)?;
     let lifecycle = exact_optional_u64(f[9])?;
     if let Some(life) = lifecycle {
         if !f[3].ends_with(&format!(":captured-lifecycle:{life}")) {
@@ -327,9 +432,9 @@ fn parse_expectation(value: &str) -> Result<Expectation> {
         Some(a)
     };
     let query = Query {
-        source: Some(f[2].into()),
+        source: Some(source),
         partition: Some(f[3].into()),
-        session: Some(f[4].into()),
+        session: Some(session),
         generation: Some(canonical_u64(f[5])?),
         direction,
         peer: peer.clone(),
@@ -520,7 +625,10 @@ impl VerifiedStore {
         let cut_members = self
             .imported_source_events
             .iter()
-            .try_fold(0usize, |n, e| n.checked_add(e.continuity_cuts.len()))
+            .try_fold(0usize, |n, e| {
+                n.checked_add(e.continuity_cuts.len())
+                    .and_then(|n| n.checked_add(e.native_continuity.len()))
+            })
             .ok_or_else(|| Error::limit("bgp_expectation_work"))?;
         let member_bound = profile
             .expectations
@@ -666,41 +774,44 @@ impl VerifiedStore {
                     return Err(Error::limit("bgp_expectation_work"));
                 }
                 let mut matches = false;
-                for cut in &event.continuity_cuts {
-                    let scope = NativeScope {
-                        source: crate::deep::bgp_session::SourcePartition::from_import_context(
-                            &cut.context,
-                            limits,
-                        )?,
-                        session: Some(cut.context.session.clone()),
-                        generation: Some(cut.context.generation),
-                        direction: cut.context.direction,
-                        peer: cut.context.peer.clone(),
-                        checkpoint: Some(cut.context.checkpoint_id.clone()),
-                        lifecycle: None,
-                    };
-                    matches |= expectation_scope(e, &scope);
-                }
-                use crate::deep::bgp_import::ImportedSourceEventKind as IK;
-                if matches!(
-                    event.kind,
-                    IK::Opaque | IK::ContinuityGap | IK::GenerationBoundary
-                ) {
-                    if let Some(c) = &event.context {
-                        let scope = NativeScope {
-                            source: crate::deep::bgp_session::SourcePartition::from_import_context(
-                                c, limits,
-                            )?,
-                            session: Some(c.session.clone()),
-                            generation: Some(c.generation),
-                            direction: c.direction,
-                            peer: c.peer.clone(),
-                            checkpoint: Some(c.checkpoint_id.clone()),
-                            lifecycle: None,
-                        };
-                        matches |= expectation_scope(e, &scope);
-                    } else if event.continuity_cuts.is_empty() {
-                        matches = true;
+                if e.query.source.as_deref() == Some(event.source_id.as_str())
+                    && e.checkpoint.as_deref() == Some(event.checkpoint_id.as_str())
+                    && e.lifecycle.is_none()
+                {
+                    for effect in &event.native_continuity {
+                        charge_work(&mut work, 1, limits)?;
+                        for (oi, _) in self.observations.iter().enumerate() {
+                            charge_work(&mut work, 1, limits)?;
+                            let scope = native_scope(self, oi, limits)?;
+                            if expectation_scope(e, &scope) {
+                                if let (Some(session), Some(generation)) =
+                                    (&scope.session, scope.generation)
+                                {
+                                    matches |=
+                                        effect.affects_scope(&crate::deep::bgp_rib::RibScope {
+                                            source: scope.source,
+                                            session: session.clone(),
+                                            generation,
+                                            direction: scope.direction,
+                                            peer: scope.peer,
+                                        });
+                                }
+                            }
+                        }
+                        let scope = imported_effect_scope(effect, &event.checkpoint_id);
+                        if expectation_scope(e, &scope) {
+                            matches = true;
+                        }
+                    }
+                    // Opaque source evidence can contain unparsed routes even
+                    // without a native mutation. Preserve source/checkpoint-
+                    // fenced coverage uncertainty separately from continuity.
+                    if event.kind == crate::deep::bgp_import::ImportedSourceEventKind::Opaque {
+                        if let Some(c) = &event.context {
+                            matches |= expectation_scope(e, &import_context_scope(c, limits)?);
+                        } else if event.continuity_cuts.is_empty() {
+                            matches = true;
+                        }
                     }
                 }
                 if matches {
@@ -806,6 +917,7 @@ fn expectation_document(
         ("schema", EXPECTATION_RESULT_SCHEMA.into()),
         ("store", store.reference()),
         ("profile_sha256", profile.profile_sha256.clone().into()),
+        ("profile_schema", profile.schema.into()),
         ("caller_provenance", profile.provenance.clone().into()),
         ("time_basis", "source_occurrence_order".into()),
         ("coverage_declaration", profile.coverage.name().into()),
@@ -1399,18 +1511,19 @@ impl VerifiedStore {
                 }
                 SourceItem::ImportedBoundary(ei) => {
                     let e = &self.imported_source_events[ei];
-                    charge_work(&mut work, e.continuity_cuts.len(), limits)?;
-                    for cut in &e.continuity_cuts {
+                    charge_work(
+                        &mut work,
+                        e.native_continuity
+                            .len()
+                            .checked_mul(2)
+                            .ok_or_else(|| Error::limit("bgp_changes_work"))?,
+                        limits,
+                    )?;
+                    for effect in &e.native_continuity {
                         charge_work(&mut work, previous.len(), limits)?;
-                        clear_import_context(&mut previous, &cut.context, limits)?;
+                        clear_import_effect(&mut previous, effect);
                     }
-                    if imported_event_breaks_continuity(e) {
-                        if let Some(context) = &e.context {
-                            charge_work(&mut work, previous.len(), limits)?;
-                            clear_import_context(&mut previous, context, limits)?;
-                        }
-                    }
-                    if import_event_matches(query, e, limits)? {
+                    if import_event_matches(self, query, e, &mut work, limits)? {
                         changes.push(Change {
                             item: item.item,
                             route_index: None,
@@ -1562,64 +1675,107 @@ fn imported_event_breaks_continuity(e: &crate::deep::bgp_import::ImportedSourceE
         K::ContinuityGap | K::GenerationBoundary | K::Notification
     ) || e.kind == K::Opaque && e.context.is_some()
 }
-fn clear_import_context(
+fn clear_import_effect(
     previous: &mut BTreeMap<ChangeKey, (usize, usize)>,
+    effect: &crate::deep::bgp_import::ImportedNativeContinuity,
+) {
+    previous.retain(|key, _| {
+        let (Some(session), Some(generation)) = (&key.scope.session, key.scope.generation) else {
+            return true;
+        };
+        !effect.affects_scope(&crate::deep::bgp_rib::RibScope {
+            source: key.scope.source.clone(),
+            session: session.clone(),
+            generation,
+            direction: key.scope.direction,
+            peer: key.scope.peer.clone(),
+        })
+    });
+}
+fn import_context_scope(
     c: &crate::deep::bgp_import::ImportContext,
     limits: &Limits,
-) -> Result<()> {
-    let partition = crate::deep::bgp_session::SourcePartition::from_import_context(c, limits)?;
-    previous.retain(|key, _| {
-        key.scope.source != partition
-            || key.scope.session.as_deref() != Some(c.session.as_str())
-            || key.scope.generation != Some(c.generation)
-            || key.scope.direction != c.direction
-            || key.scope.peer != c.peer
-    });
-    Ok(())
+) -> Result<NativeScope> {
+    Ok(NativeScope {
+        source: crate::deep::bgp_session::SourcePartition::from_import_context(c, limits)?,
+        session: Some(c.session.clone()),
+        generation: Some(c.generation),
+        direction: c.direction,
+        peer: c.peer.clone(),
+        checkpoint: Some(c.checkpoint_id.clone()),
+        lifecycle: None,
+    })
+}
+fn imported_effect_scope(
+    effect: &crate::deep::bgp_import::ImportedNativeContinuity,
+    checkpoint: &str,
+) -> NativeScope {
+    NativeScope {
+        source: effect.scope.source.clone(),
+        session: Some(effect.scope.session.clone()),
+        generation: Some(effect.generations().0),
+        direction: effect.scope.direction,
+        peer: effect.scope.peer.clone(),
+        checkpoint: Some(checkpoint.into()),
+        lifecycle: None,
+    }
 }
 fn import_event_matches(
+    store: &VerifiedStore,
     q: &Query,
     e: &crate::deep::bgp_import::ImportedSourceEvent,
+    work: &mut usize,
     limits: &Limits,
 ) -> Result<bool> {
-    if let Some(c) = &e.context {
-        let s = NativeScope {
-            source: crate::deep::bgp_session::SourcePartition::from_import_context(c, limits)?,
-            session: Some(c.session.clone()),
-            generation: Some(c.generation),
-            direction: c.direction,
-            peer: c.peer.clone(),
-            checkpoint: Some(c.checkpoint_id.clone()),
-            lifecycle: None,
-        };
-        return Ok(query_scope(q, &s));
-    }
-    if !e.continuity_cuts.is_empty() {
-        for cut in &e.continuity_cuts {
-            let s = NativeScope {
-                source: crate::deep::bgp_session::SourcePartition::from_import_context(
-                    &cut.context,
-                    limits,
-                )?,
-                session: Some(cut.context.session.clone()),
-                generation: Some(cut.context.generation),
-                direction: cut.context.direction,
-                peer: cut.context.peer.clone(),
-                checkpoint: Some(cut.context.checkpoint_id.clone()),
-                lifecycle: None,
-            };
-            if query_scope(q, &s) {
-                return Ok(true);
-            }
-        }
+    if q.source
+        .as_deref()
+        .is_some_and(|source| source != e.source_id)
+        || q.checkpoint
+            .as_deref()
+            .is_some_and(|checkpoint| checkpoint != e.checkpoint_id)
+        || q.lifecycle.is_some()
+    {
         return Ok(false);
     }
-    Ok(q.session.is_none()
+    for effect in &e.native_continuity {
+        // Canonical continuity can broaden direction within an admitted native
+        // partition. Select the actual scope first; query peer text cannot
+        // manufacture a different peer inside that immutable partition.
+        for (oi, _) in store.observations.iter().enumerate() {
+            charge_work(work, 1, limits)?;
+            let scope = native_scope(store, oi, limits)?;
+            if query_scope(q, &scope) {
+                if let (Some(session), Some(generation)) = (&scope.session, scope.generation) {
+                    if effect.affects_scope(&crate::deep::bgp_rib::RibScope {
+                        source: scope.source,
+                        session: session.clone(),
+                        generation,
+                        direction: scope.direction,
+                        peer: scope.peer,
+                    }) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        // Gap-only native scopes can precede normalized observations. Their
+        // original peer/direction identity remains exact for selector purposes.
+        if query_scope(q, &imported_effect_scope(effect, &e.checkpoint_id)) {
+            return Ok(true);
+        }
+    }
+    if let Some(c) = &e.context {
+        return Ok(query_scope(q, &import_context_scope(c, limits)?));
+    }
+    // Source/checkpoint are known even when peer/session metadata is unavailable.
+    // Exact matching source selectors preserve ordinary route-free metadata.
+    Ok(e.continuity_cuts.is_empty()
+        && e.native_continuity.is_empty()
+        && q.session.is_none()
         && q.partition.is_none()
         && q.generation.is_none()
-        && q.peer.is_none()
-        && q.checkpoint.is_none()
-        && q.lifecycle.is_none())
+        && q.direction.is_none()
+        && q.peer.is_none())
 }
 fn changes_document(
     store: &VerifiedStore,
@@ -1774,6 +1930,12 @@ fn changes_document(
                         ("source_record_index", e.source_record_index.into()),
                         ("difference", c.difference.into()),
                         ("reference", e.reference.clone()),
+                        ("source_id", e.source_id.clone().into()),
+                        ("checkpoint_id", e.checkpoint_id.clone().into()),
+                        (
+                            "native_continuity",
+                            Json::array(e.native_continuity.iter().map(|effect| effect.json())),
+                        ),
                         (
                             "import_context",
                             e.context.as_ref().map_or(Json::Null, |c| c.json()),

@@ -175,6 +175,18 @@ impl PolicyProfile {
         Self::parse(&bytes, limits)
     }
 }
+// Optional native labels preserve the imported owner's existing grammar. The
+// profile's versioned text decoder owns its escaping; queries compare raw text.
+fn native_optional_identity(value: &str) -> Result<()> {
+    if value.len() > 1024 || value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(bad(
+            "bgp_persisted_identity",
+            0,
+            "bounded control-free native identity required",
+        ));
+    }
+    Ok(())
+}
 fn identity(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 1024
@@ -2083,7 +2095,17 @@ fn imported_source_event_charge(
     let mut charge = event
         .reference
         .encoded_len_bounded(limits.input_bytes)?
-        .saturating_add(1024);
+        .saturating_add(1024)
+        .saturating_add(event.source_id.len())
+        .saturating_add(event.checkpoint_id.len());
+    if event.native_continuity.len() > limits.elements {
+        return Err(Error::limit("bgp_persisted_source_events"));
+    }
+    for effect in &event.native_continuity {
+        charge = charge
+            .checked_add(effect.retained_charge())
+            .ok_or_else(|| Error::limit("bgp_persisted_source_events"))?;
+    }
     if let Some(c) = &event.context {
         charge = charge
             .checked_add(c.retained_charge()?)
@@ -3070,6 +3092,9 @@ mod prospective_note_tests {
         context.validate(&high).unwrap();
         let events = (0..2)
             .map(|index| ImportedSourceEvent {
+                source_id: context.source_id.clone(),
+                checkpoint_id: context.checkpoint_id.clone(),
+                native_continuity: Vec::new(),
                 source_record_index: index,
                 observation_index: None,
                 kind: ImportedSourceEventKind::SessionMetadata,

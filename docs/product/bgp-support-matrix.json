@@ -182,7 +182,8 @@
         "product/tests/bgp_session_rib_policy.rs",
         "product/tests/bgp_persisted_cli.rs",
         "product/tests/bgp_persisted_selectors.rs",
-        "product/tests/bgp_persisted_analysis.rs"
+        "product/tests/bgp_persisted_analysis.rs",
+        "product/tests/bgp_imported_analysis_feedback.rs"
       ],
       "remaining": "Typed persisted selectors cover directional prefix containment, origin/path-member ASN, standard/large/extended communities, next hop, source/session/partition, generation, direction, path-ID state, lifecycle, and caller-reported clock windows. The observation-event selector owner suite returned 11 passing finite checks; selector-field coverage remains distinct from complete source coverage. Change/expectation analysis is source ordered and caller scoped; missing time, boundaries, or incomplete fields remain unknown rather than proving absence. Captured decoded Gap/Reset continuity is bound to verified observation and journal occurrences and processed before filters. Independent policy and normative qualification remain open."
     },
@@ -241,7 +242,8 @@
         "product/tests/bgp_persisted_selectors.rs",
         "product/tests/bgp_persisted_analysis.rs",
         "product/tests/bgp_persisted_evidence.rs",
-        "product/tests/bgp_persisted_evidence_schema_vectors.py"
+        "product/tests/bgp_persisted_evidence_schema_vectors.py",
+        "product/tests/bgp_imported_analysis_feedback.rs"
       ],
       "remaining": "Captured/MRT/BMP replay, rich typed query, source-ordered changes and caller-scoped expectations, policy, association, export, and full persisted evidence are offline product surfaces. The 12-case persisted-evidence owner suite returned 12 passing finite checks, including captured continuity. Native version-origin references bind only checked observation digests and route/action ordinals; they do not authenticate sources or establish endpoint state. The captured decoded-Gap continuity handoff is described in BGP_CAPTURED_CONTINUITY.md. The planned root-owned receipt will record executed outcomes and exact source inventory; local, hosted, and qualification scopes remain separate."
     },

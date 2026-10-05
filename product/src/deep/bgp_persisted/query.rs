@@ -132,11 +132,7 @@ pub struct Query {
 impl Query {
     pub fn validate(&self) -> Result<()> {
         for value in [
-            &self.session,
             &self.prefix,
-            &self.peer,
-            &self.source,
-            &self.checkpoint,
             &self.status,
             &self.partition,
             &self.occurrence_id,
@@ -145,6 +141,12 @@ impl Query {
         .flatten()
         {
             identity(value)?;
+        }
+        for value in [&self.source, &self.session, &self.peer, &self.checkpoint]
+            .into_iter()
+            .flatten()
+        {
+            native_optional_identity(value)?;
         }
         if self.afi == Some(0) || self.safi == Some(0) {
             return Err(bad("bgp_query_family", 0, "nonzero family required"));
@@ -175,7 +177,7 @@ impl Query {
             return Err(bad("bgp_query_prefix", 0, "conflicting prefix selectors"));
         }
         if let Some(window) = &self.time_window {
-            identity(&window.source)?;
+            native_optional_identity(&window.source)?;
             identity(&window.clock_id)?;
             if window.clock_policy == ClockPolicy::Unknown
                 || window.start_ns >= window.end_ns

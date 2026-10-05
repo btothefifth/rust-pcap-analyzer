@@ -239,6 +239,7 @@ pub(crate) enum NativeContinuityEffect {
 }
 #[derive(Clone, Copy)]
 pub(crate) struct NativeContinuityRef<'a> {
+    pub(crate) record_id: &'a str,
     pub(crate) scope: &'a RibScope,
     pub(crate) status: ApplyStatus,
     pub(crate) kind: NativeContinuityKind,
@@ -296,6 +297,12 @@ pub(crate) struct PreparedRibEvent {
     rejection_growth: Option<Vec<RejectedRecord>>,
 }
 impl PreparedRibEvent {
+    pub(crate) fn prospective_retained_bytes(&self) -> usize {
+        self.retained
+    }
+    pub(crate) fn prospective_work(&self) -> usize {
+        self.work
+    }
     pub(crate) fn status(&self) -> ApplyStatus {
         self.status
     }
@@ -336,6 +343,7 @@ impl PreparedRibEvent {
             _ => return None,
         };
         Some(NativeContinuityRef {
+            record_id: &event.record_id,
             scope: &event.scope,
             status: self.status,
             kind,

@@ -511,6 +511,21 @@ fn table_fixture_reference(record_index: usize, rib_index: usize, raw: &[u8]) ->
 fn source_event_units(event: &ImportedSourceEvent, original_reference: &Json) -> usize {
     std::mem::size_of::<ImportedSourceEvent>()
         + json_allocation_units(original_reference)
+        + event.source_id.len()
+        + event.checkpoint_id.len()
+        + event
+            .native_continuity
+            .iter()
+            .map(|e| {
+                std::mem::size_of_val(e)
+                    + e.scope.source.source_id.len()
+                    + e.scope.source.partition_id.len()
+                    + e.scope.session.len()
+                    + e.scope.peer.as_ref().map_or(0, String::len)
+                    + e.record_id.len()
+                    + e.reason.len()
+            })
+            .sum::<usize>()
         + event.context.as_ref().map_or(0, imported_context_units)
         + event
             .continuity_cuts
@@ -703,6 +718,9 @@ fn output_and_combined_retention_failures_precede_destination_creation() {
             assert_eq!(actual.source_record_index, expected.source_record_index);
             assert_eq!(actual.observation_index, expected.observation_index);
             assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.source_id, expected.source_id);
+            assert_eq!(actual.checkpoint_id, expected.checkpoint_id);
+            assert_eq!(actual.native_continuity, expected.native_continuity);
             assert_eq!(actual.context, expected.context);
             assert_eq!(actual.continuity_cuts, expected.continuity_cuts);
             assert_eq!(actual.reference, expected.reference);

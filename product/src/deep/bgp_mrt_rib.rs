@@ -134,6 +134,8 @@ pub(super) fn quarantine_event(
     rib: &mut AdjRibIn,
     event: &Json,
     contexts: &BTreeMap<(String, ImportPartition), ImportContext>,
+    native_continuity: &mut Vec<bgp_import::ImportedNativeContinuity>,
+    admission: (usize, usize),
     limits: &Limits,
 ) -> Result<usize> {
     let mut work = 0usize;
@@ -214,23 +216,38 @@ pub(super) fn quarantine_event(
             ));
         }
         let before = rib.accounted_work();
-        rib.apply(RibEvent {
-            scope: RibScope {
-                source: SourcePartition::from_import_context(context, limits)?,
-                session: context.session.clone(),
-                generation: context.generation,
-                direction: None,
-                peer: context.peer.clone(),
+        bgp_import::apply_native_event(
+            rib,
+            RibEvent {
+                scope: RibScope {
+                    source: SourcePartition::from_import_context(context, limits)?,
+                    session: context.session.clone(),
+                    generation: context.generation,
+                    direction: None,
+                    peer: context.peer.clone(),
+                },
+                record_id: format!(
+                    "mrt-bgp4mp-quarantine:{}:{}",
+                    event_number(event, "record_index").unwrap_or(0),
+                    record_id
+                ),
+                kind: RibEventKind::Gap {
+                    reason: format!("source_message_{status}"),
+                },
             },
-            record_id: format!(
-                "mrt-bgp4mp-quarantine:{}:{}",
-                event_number(event, "record_index").unwrap_or(0),
-                record_id
+            None,
+            native_continuity,
+            (
+                admission.0,
+                admission
+                    .1
+                    .checked_add(work)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+                1,
+                8,
             ),
-            kind: RibEventKind::Gap {
-                reason: format!("source_message_{status}"),
-            },
-        })?;
+            limits,
+        )?;
         work = work
             .checked_add(
                 rib.accounted_work()
@@ -246,25 +263,42 @@ pub(super) fn quarantine_event(
 pub(super) fn apply_continuity_cuts(
     rib: &mut AdjRibIn,
     cuts: &[super::super::bgp_import::ImportContinuityCut],
+    native_continuity: &mut Vec<bgp_import::ImportedNativeContinuity>,
+    admission: (usize, usize),
     limits: &Limits,
 ) -> Result<usize> {
     let mut work = 0usize;
     for cut in cuts {
         let context = &cut.context;
         let before = rib.accounted_work();
-        rib.apply(RibEvent {
-            scope: RibScope {
-                source: SourcePartition::from_import_context(context, limits)?,
-                session: context.session.clone(),
-                generation: context.generation,
-                direction: context.direction,
-                peer: context.peer.clone(),
+        bgp_import::apply_native_event(
+            rib,
+            RibEvent {
+                scope: RibScope {
+                    source: SourcePartition::from_import_context(context, limits)?,
+                    session: context.session.clone(),
+                    generation: context.generation,
+                    direction: context.direction,
+                    peer: context.peer.clone(),
+                },
+                record_id: cut.record_id.clone(),
+                kind: RibEventKind::Gap {
+                    reason: cut.reason.clone(),
+                },
             },
-            record_id: cut.record_id.clone(),
-            kind: RibEventKind::Gap {
-                reason: cut.reason.clone(),
-            },
-        })?;
+            None,
+            native_continuity,
+            (
+                admission.0,
+                admission
+                    .1
+                    .checked_add(work)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+                1,
+                8,
+            ),
+            limits,
+        )?;
         work = work
             .checked_add(
                 rib.accounted_work()
@@ -285,6 +319,8 @@ pub(super) fn reset_native_scopes(
     event: &Json,
     record_index: usize,
     record: &MrtRecord,
+    native_continuity: &mut Vec<bgp_import::ImportedNativeContinuity>,
+    admission: (usize, usize),
     limits: &Limits,
 ) -> Result<usize> {
     let Some((generation, reason)) = bgp4mp_reset_generation(event, record_index)? else {
@@ -336,7 +372,22 @@ pub(super) fn reset_native_scopes(
     }
     for reset in resets {
         let before = rib.accounted_work();
-        rib.apply(reset)?;
+        bgp_import::apply_native_event(
+            rib,
+            reset,
+            None,
+            native_continuity,
+            (
+                admission.0,
+                admission
+                    .1
+                    .checked_add(work)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+                1,
+                8,
+            ),
+            limits,
+        )?;
         work = work
             .checked_add(
                 rib.accounted_work()

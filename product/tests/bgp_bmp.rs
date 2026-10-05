@@ -1485,7 +1485,26 @@ fn typed_source_logical_units(archive: &bgp_bmp_store::BmpReplayArchive) -> usiz
                         + 128
                 })
                 .sum::<usize>();
-            6 * (512 + e.reference.encode().len() + context + cuts)
+            let native = e
+                .native_continuity
+                .iter()
+                .map(|effect| {
+                    std::mem::size_of_val(effect)
+                        + effect.scope.source.source_id.len()
+                        + effect.scope.source.partition_id.len()
+                        + effect.scope.session.len()
+                        + effect.scope.peer.as_ref().map_or(0, String::len)
+                        + effect.record_id.len()
+                        + effect.reason.len()
+                })
+                .sum::<usize>();
+            6 * (512
+                + e.reference.encode().len()
+                + e.source_id.len()
+                + e.checkpoint_id.len()
+                + context
+                + cuts
+                + native)
         })
         .sum()
 }

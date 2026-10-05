@@ -460,9 +460,9 @@ fn imported_source(format: &str, gap: bool, sibling: bool) -> Vec<u8> {
         )
     };
     if format == "mrt" {
-        let record = |subtype: u16, payload: &[u8]| {
+        let record = |peer: u8, subtype: u16, payload: &[u8]| {
             let mut body = vec![0xfd, 0xe9, 0xfd, 0xe8, 0, 7, 0, 1];
-            body.extend_from_slice(&[192, 0, 2, 1, 192, 0, 2, 254]);
+            body.extend_from_slice(&[192, 0, 2, peer, 192, 0, 2, 254]);
             body.extend_from_slice(payload);
             let mut out = 100u32.to_be_bytes().to_vec();
             out.extend_from_slice(&16u16.to_be_bytes());
@@ -472,22 +472,31 @@ fn imported_source(format: &str, gap: bool, sibling: bool) -> Vec<u8> {
             out
         };
         let mut records = vec![
-            record(0, &[0, 3, 0, 4]),
-            record(1, &open(65001, 1)),
-            record(6, &open(65000, 254)),
-            record(0, &[0, 4, 0, 5]),
-            record(0, &[0, 5, 0, 6]),
-            record(1, &imported_update(2, true)),
+            record(1, 0, &[0, 3, 0, 4]),
+            record(1, 1, &open(65001, 1)),
+            record(1, 6, &open(65000, 254)),
+            record(1, 0, &[0, 4, 0, 5]),
+            record(1, 0, &[0, 5, 0, 6]),
+            record(1, 1, &imported_update(2, true)),
         ];
         if sibling {
-            records.push(record(6, &imported_update(2, true)));
+            // A separate peer owns a separate canonical session/partition.
+            // The opposite direction of peer 1 shares its Gap scope.
+            records.extend([
+                record(2, 0, &[0, 3, 0, 4]),
+                record(2, 1, &open(65001, 2)),
+                record(2, 6, &open(65000, 254)),
+                record(2, 0, &[0, 4, 0, 5]),
+                record(2, 0, &[0, 5, 0, 6]),
+                record(2, 1, &imported_update(2, true)),
+            ]);
         }
         if gap {
-            records.push(record(1, &imported_update(2, false)));
+            records.push(record(1, 1, &imported_update(2, false)));
         }
-        records.push(record(1, &imported_update(2, true)));
+        records.push(record(1, 1, &imported_update(2, true)));
         if sibling {
-            records.push(record(6, &imported_update(2, true)));
+            records.push(record(2, 1, &imported_update(2, true)));
         }
         records.concat()
     } else {
@@ -625,6 +634,37 @@ fn native_mrt_and_bmp_route_free_gaps_break_exact_predecessors() {
 fn filtered_native_gap_cannot_bridge_selected_events_and_sibling_remains_valid() {
     for format in ["mrt", "bmp"] {
         let (_s, store) = native_import_fixture(format, true, true);
+        let scopes: Vec<_> = store
+            .observations()
+            .iter()
+            .filter(|observation| !observation.routes().is_empty())
+            .filter_map(|observation| observation.import_context())
+            .map(|context| pcap_evidence_product::deep::bgp_rib::RibScope {
+                source:
+                    pcap_evidence_product::deep::bgp_session::SourcePartition::from_import_context(
+                        context,
+                        &Limits::default(),
+                    )
+                    .unwrap(),
+                session: context.session.clone(),
+                generation: context.generation,
+                direction: context.direction,
+                peer: context.peer.clone(),
+            })
+            .collect();
+        let main = &scopes[0];
+        let sibling = scopes
+            .iter()
+            .find(|scope| scope.source != main.source || scope.session != main.session)
+            .expect("sibling has an independent canonical partition or session");
+        let effects: Vec<_> = store
+            .imported_source_events()
+            .iter()
+            .flat_map(|event| &event.native_continuity)
+            .filter(|effect| !effect.is_reset())
+            .collect();
+        assert!(effects.iter().any(|effect| effect.affects_scope(main)));
+        assert!(effects.iter().all(|effect| !effect.affects_scope(sibling)));
         // A known nonmatching next hop excludes every announcement, but the
         // complete source predecessor/boundary walk still executes.
         let out = store
