@@ -80,7 +80,7 @@ remain collector candidates with unresolved direction scope; they are never
 promoted into a captured Adj-RIB-In. Imported BGP4MP and BMP use their native
 RIB reducer outputs rather than the legacy candidate projection.
 
-Imported native announcement rejections are separate rich rows with
+Captured and imported native announcement rejections are separate rich rows with
 `status=rejected`, `native_current=false`, and no accepted attribute versions.
 Their `rejection` object retains the reducer's exact reason and record ID,
 the normalized observation SHA-256, and its observation occurrence ID. The
@@ -89,6 +89,11 @@ to the sealed raw replay. Other rows carry `rejection=null`. Repeated rejected
 occurrences remain distinct; they cannot replace an older accepted route with
 the same key or become policy candidates. Policy lists these rows as rejected
 exclusions and keeps their occurrence metadata among the alternatives.
+Captured rejections retain their original partition and exact lifecycle; their
+occurrence ID combines the lifecycle, verified journal-record digest and
+normalized observation digest, using the same identity as association. Capture
+checkpoint and imported-clock evidence remain absent. END, CLEAR and subsequent
+session-label reuse preserve old rejection rows as historical exclusions.
 
 Policy evaluates each exact original partition, direction and prefix separately.
 All decisions and alternatives are returned; there is no cross-partition or

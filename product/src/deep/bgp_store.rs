@@ -269,6 +269,15 @@ pub struct CapturedObservationEvidence {
     pub journal_record_sha256: [u8; 32],
 }
 
+/// A native rejected action bound when the reducer first emits it. The index
+/// selects the exact normalized observation and its journal/lifecycle witness;
+/// record labels alone cannot identify reused occurrences.
+#[derive(Clone, Debug)]
+pub struct CapturedRejection {
+    pub rejection: super::bgp_rib::RejectedRecord,
+    pub observation_index: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReplayArchive {
     pub receipt: JournalReceipt,
@@ -279,6 +288,7 @@ pub struct ReplayArchive {
     /// Typed terminal entries sampled from the canonical reducer before each
     /// session leaves the manager. Reused session labels remain occurrences.
     pub route_entries: Vec<super::bgp_rib::RouteEntry>,
+    pub route_rejections: Vec<CapturedRejection>,
     /// Successful normalized observations rebuilt from verified source bytes.
     pub observations: Vec<super::bgp_state::Observation>,
     pub route_entry_evidence: Vec<CapturedEntryEvidence>,
@@ -352,6 +362,7 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
         CapturedSessionManager::new(capture_namespace, source_id.clone(), limits.clone())?;
     let mut sessions = Vec::new();
     let mut route_entries = Vec::new();
+    let mut route_rejections = Vec::new();
     let mut observations = Vec::new();
     let mut route_entry_evidence = Vec::new();
     let mut observation_evidence = Vec::new();
@@ -411,6 +422,7 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
                 let (session, bytes, metadata) = decoder.message(&source_id, capture_namespace)?;
                 decoder.finish()?;
                 messages = checked_increment(messages, "bgp_journal_messages")?;
+                let rejection_start = manager.rib(session).map_or(0, |rib| rib.rejections().len());
                 match manager.apply_message(session, &bytes, metadata) {
                     Ok(receipt) => {
                         let observation = super::bgp_state::Observation::from_normalized(
@@ -429,6 +441,7 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
                             .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
                         if observations.len() >= limits.elements
                             || adapter_bytes > limits.retained_bytes
+                            || adapter_bytes > limits.work
                         {
                             return Err(Error::limit("bgp_journal_adapter"));
                         }
@@ -443,10 +456,20 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
                             .checked_add(extra)
                             .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
                         if adapter_bytes > limits.retained_bytes
+                            || adapter_bytes > limits.work
                             || latest_observations.len() >= limits.elements
                         {
                             return Err(Error::limit("bgp_journal_adapter"));
                         }
+                        retain_rejections(
+                            &manager,
+                            session,
+                            rejection_start,
+                            observations.len(),
+                            &mut route_rejections,
+                            &mut adapter_bytes,
+                            &limits,
+                        )?;
                         latest_observations.insert(key, observation.sha256());
                         observation_evidence.push(CapturedObservationEvidence {
                             lifecycle: *lifecycles.get(&session).unwrap_or(&0),
@@ -598,6 +621,7 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
         boundaries,
         rejected_records,
         route_entries,
+        route_rejections,
         observations,
         route_entry_evidence,
         observation_evidence,
@@ -618,7 +642,7 @@ fn advance_lifecycle(
         *retained = retained
             .checked_add(64)
             .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
-        if *retained > limits.retained_bytes {
+        if *retained > limits.retained_bytes || *retained > limits.work {
             return Err(Error::limit("bgp_journal_adapter"));
         }
     }
@@ -694,7 +718,10 @@ fn retain_entries(
             *bytes = bytes
                 .checked_add(size)
                 .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
-            if entries.len() >= limits.elements || *bytes > limits.retained_bytes {
+            if entries.len() >= limits.elements
+                || *bytes > limits.retained_bytes
+                || *bytes > limits.work
+            {
                 return Err(Error::limit("bgp_journal_adapter"));
             }
             let observation_sha256 = entry
@@ -709,6 +736,58 @@ fn retain_entries(
                 lifecycle: selection.lifecycle,
                 current: selection.current,
                 observation_sha256,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn retain_rejections(
+    manager: &CapturedSessionManager,
+    session: u64,
+    start: usize,
+    observation_index: usize,
+    rejections: &mut Vec<CapturedRejection>,
+    retained: &mut usize,
+    limits: &Limits,
+) -> Result<()> {
+    if let Some(rib) = manager.rib(session) {
+        let added = rib.rejections().get(start..).ok_or_else(|| {
+            bad(
+                "bgp_journal_rejection",
+                0,
+                "native rejection history shortened",
+            )
+        })?;
+        for rejection in added {
+            let size = rejection
+                .key
+                .scope
+                .source
+                .source_id
+                .len()
+                .saturating_add(rejection.key.scope.source.partition_id.len())
+                .saturating_add(rejection.key.scope.session.len())
+                .saturating_add(rejection.key.scope.peer.as_ref().map_or(0, String::len))
+                .saturating_add(rejection.key.prefix.address.len())
+                .saturating_add(rejection.record_id.len())
+                .saturating_add(rejection.reason.len())
+                .saturating_add(2048)
+                .saturating_mul(3);
+            *retained = retained
+                .checked_add(size)
+                .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+            if rejections.len() >= limits.elements
+                || *retained > limits.retained_bytes
+                || *retained > limits.work
+            {
+                return Err(Error::limit("bgp_journal_adapter"));
+            }
+            // Retain before END/CLEAR can drop the owning session. Rejections
+            // are always historical and cannot change an accepted entry.
+            rejections.push(CapturedRejection {
+                rejection: rejection.clone(),
+                observation_index,
             });
         }
     }
@@ -732,7 +811,7 @@ fn retain_snapshot(
                 .saturating_mul(3),
         )
         .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
-    if *retained > limits.retained_bytes {
+    if *retained > limits.retained_bytes || *retained > limits.work {
         return Err(Error::limit("bgp_journal_adapter"));
     }
     sessions.push(snapshot);

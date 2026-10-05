@@ -322,6 +322,7 @@ pub struct Coverage {
     pub route_free: u64,
     pub opaque: u64,
     pub rejected: u64,
+    pub quarantined: u64,
     pub unsupported: u64,
     pub unknown_time: u64,
     pub unknown_mrt_record_time: u64,
@@ -340,6 +341,7 @@ impl Coverage {
             ("route_free", self.route_free.to_string().into()),
             ("opaque", self.opaque.to_string().into()),
             ("rejected", self.rejected.to_string().into()),
+            ("quarantined", self.quarantined.to_string().into()),
             ("unsupported", self.unsupported.to_string().into()),
             ("unknown_time", self.unknown_time.to_string().into()),
             (
@@ -647,13 +649,17 @@ fn export_inner<W: Write>(
                 .or_else(|| text_at(event.event, "status"))
                 .or_else(|| text_at(event.event, "kind"))
                 .unwrap_or("unknown");
-            if status.contains("opaque") {
+            let status_coverage = StatusCoverage::new(status);
+            if status_coverage.opaque {
                 coverage.opaque = increment(coverage.opaque)?;
             }
-            if status.contains("reject") {
+            if status_coverage.rejected {
                 coverage.rejected = increment(coverage.rejected)?;
             }
-            if status.contains("unsupported") {
+            if status_coverage.quarantined {
+                coverage.quarantined = increment(coverage.quarantined)?;
+            }
+            if status_coverage.unsupported {
                 coverage.unsupported = increment(coverage.unsupported)?;
             }
             if time_disposition == Some("unknown_time") {
@@ -671,10 +677,7 @@ fn export_inner<W: Write>(
                     .is_none()
                     .then_some(mrt_time_validity(&event)),
                 asn_disposition.filter(|value| *value == "unknown_asn"),
-                (status.contains("reject")
-                    || status.contains("unsupported")
-                    || status.contains("opaque"))
-                .then_some(status),
+                status_coverage.needs_witness().then_some(status),
             ]
             .into_iter()
             .flatten()
@@ -953,6 +956,29 @@ fn asn_match(observation: &Observation, selector: AsnSelector) -> &'static str {
     }
 }
 
+/// Overlapping diagnostic row classes, independent of reducer admission.
+/// Keep the converter's mirrored classifier and canonical coverage order in
+/// sync. Unrecognized statuses retain their original event and unknown
+/// interpretation; this summary never promotes them to accepted or rejected.
+struct StatusCoverage {
+    opaque: bool,
+    rejected: bool,
+    quarantined: bool,
+    unsupported: bool,
+}
+impl StatusCoverage {
+    fn new(status: &str) -> Self {
+        Self {
+            opaque: status.contains("opaque"),
+            rejected: status.contains("reject"),
+            quarantined: status.contains("quarantin"),
+            unsupported: status.contains("unsupported"),
+        }
+    }
+    fn needs_witness(&self) -> bool {
+        self.opaque || self.rejected || self.quarantined || self.unsupported
+    }
+}
 struct Budget {
     work: u64,
     output: usize,

@@ -212,6 +212,75 @@ fn caller_order_and_all_records_survive_clock_regressions() {
 }
 
 #[test]
+fn plain_quarantine_has_distinct_counts_and_bounded_witnesses_with_valid_neighbor() {
+    let scratch = Scratch::new();
+    // Independently encoded BGP4MP FSM reports: Idle -> Established is illegal;
+    // the separate source's Idle -> Connect is the nearest legal transition.
+    let state_record = |time, old: u16, new: u16| {
+        let mut payload = old.to_be_bytes().to_vec();
+        payload.extend(new.to_be_bytes());
+        record(time, 16, 0, &bgp4mp_body(&payload))
+    };
+    let quarantined = scratch.store("quarantined", "collector", &state_record(10, 1, 6), 1);
+    let neighbor = scratch.store("neighbor", "other", &state_record(20, 1, 2), 3);
+    let paths = [quarantined, neighbor];
+    let query = WindowQuery {
+        asn: None,
+        time_basis: TimeBasis::MrtRecordTime,
+        clock_scope: "other".into(),
+        start_ns: 20_000_000_000,
+        end_ns: 21_000_000_000,
+    };
+    for selected_window in [None, Some(&query)] {
+        for cap in [0, 1] {
+            let limits = EvidenceLimits {
+                witnesses: cap,
+                ..EvidenceLimits::default()
+            };
+            let (manifest, bytes) = export(
+                &paths,
+                &limits,
+                selected_window,
+                &MrtReplayOptions::default(),
+            );
+            assert_eq!(manifest.coverage.records, 2);
+            assert_eq!(manifest.coverage.rows, 2);
+            assert!(manifest
+                .coverage
+                .json()
+                .encode()
+                .contains("\"quarantined\":\"1\""));
+            assert_eq!(manifest.coverage.rejected, 0);
+            assert_eq!(manifest.coverage.opaque, 0);
+            assert_eq!(manifest.coverage.unsupported, 0);
+            assert_eq!(
+                manifest.coverage.selected,
+                if selected_window.is_some() { 1 } else { 2 }
+            );
+            assert_eq!(manifest.coverage.witnesses.len(), cap);
+            assert_eq!(manifest.coverage.witnesses_truncated, (1 - cap) as u64);
+            if cap == 1 {
+                let witness = manifest.coverage.witnesses[0].encode();
+                assert!(witness.contains("\"reason\":\"quarantined\""));
+                assert!(witness.contains("\"sequence_ordinal\":\"0\""));
+                assert!(witness.contains("\"record_ordinal\":\"0\""));
+                assert!(witness.contains("\"record_offset\":\"0\""));
+            }
+            let text = String::from_utf8(bytes).unwrap();
+            let rows = text.lines().collect::<Vec<_>>();
+            assert!(rows[0].contains("\"parse_status\":\"quarantined\""));
+            assert!(rows[0].contains("illegal_reported_fsm_transition"));
+            assert!(rows[1].contains("\"parse_status\":\"reported_transition\""));
+            if selected_window.is_some() {
+                assert!(rows[0].contains("outside_clock_scope"));
+                assert!(rows[0].contains("\"selected\":false"));
+                assert!(rows[1].contains("\"selected\":true"));
+            }
+        }
+    }
+}
+
+#[test]
 fn independent_checkpoints_cannot_borrow_an_earlier_peer_table() {
     let scratch = Scratch::new();
     let first = scratch.store("pit", "collector", &table(20), 3);

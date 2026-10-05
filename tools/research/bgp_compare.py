@@ -36,6 +36,30 @@ MANIFEST_KEYS = ("schema", "complete", "rows", "rows_bytes", "rows_sha256", "row
                  "endpoint_state_claimed", "resume_cursor_supported")
 
 
+def _coverage_keys(coverage):
+    # The additive field participates in new v1 payloads only. Reconstruct
+    # legacy commitments verbatim; absence never establishes zero quarantine.
+    if type(coverage) is dict and "quarantined" in coverage:
+        index = COVERAGE_KEYS.index("rejected") + 1
+        return COVERAGE_KEYS[:index] + ("quarantined",) + COVERAGE_KEYS[index:]
+    return COVERAGE_KEYS
+
+
+def _native_status(event):
+    """Mirror the exporter's text-valued parse_status -> status -> kind owner."""
+    if type(event) is dict:
+        for key in ("parse_status", "status", "kind"):
+            if type(event.get(key)) is str:
+                return event[key]
+    return "unknown"
+
+
+def _status_counts(status):
+    # These overlapping diagnostic classes do not establish reducer admission.
+    return {"opaque": "opaque" in status, "rejected": "reject" in status,
+            "quarantined": "quarantin" in status, "unsupported": "unsupported" in status}
+
+
 def _compact(value):
     """Rust Json wire identity uses prescribed insertion order, never sorted keys."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -57,7 +81,7 @@ def _native_manifest_payload(manifest):
     payload["sequence"] = {key: sequence[key] for key in ("schema", "ordering", "independent_checkpoints", "entries", "sequence_digest")}
     payload["sequence"]["entries"] = [{**{key: entry[key] for key in ENTRY_KEYS}, "entry_digest": entry["entry_digest"]}
                                        for entry in sequence["entries"]]
-    coverage = _ordered(manifest["coverage"], COVERAGE_KEYS, "native coverage")
+    coverage = _ordered(manifest["coverage"], _coverage_keys(manifest["coverage"]), "native coverage")
     if type(coverage["witnesses"]) is not list or len(coverage["witnesses"]) > 4096:
         raise InvalidResearch("native coverage witness budget")
     witness_keys = ("sequence_ordinal", "source_sha256", "record_ordinal", "record_offset", "record_sha256", "entry_index", "reason")
@@ -131,10 +155,18 @@ def validate(value):
     """
     if len(canonical(value)) > MAX_DOCUMENT:
         raise InvalidResearch("BGP interpretation byte budget")
-    _keys(value, ("schema", "source", "normalization", "producer", "observations"), ("native_evidence", "native_partition"), "interpretation")
+    _keys(value, ("schema", "source", "normalization", "producer", "observations"),
+          ("native_evidence", "native_partition", "native_coverage_verification"), "interpretation")
     if value["schema"] != SCHEMA:
         raise InvalidResearch("unsupported BGP interpretation schema")
     out = copy.deepcopy(value)
+    if "native_coverage_verification" in out:
+        verification = out["native_coverage_verification"]
+        manifest = out.get("native_evidence")
+        if (verification not in ("complete", "legacy_quarantine_unavailable")
+                or type(manifest) is not dict or type(manifest.get("coverage")) is not dict
+                or (verification == "complete") != ("quarantined" in manifest["coverage"])):
+            raise InvalidResearch("native coverage verification availability mismatch")
     source = out["source"]
     _keys(source, ("sha256", "bytes"), label="source")
     _hash(source["sha256"], "source digest")
@@ -330,6 +362,9 @@ def compare(left, right, *, maximum=MAX_ROWS, output_limit=MAX_DOCUMENT):
               "policy": "raw_source_witness_and_primary_specification_adjudication_required"}
     if "native_partition" in left or "native_partition" in right:
         result["native_partitions"] = [left.get("native_partition"), right.get("native_partition")]
+    if "native_coverage_verification" in left or "native_coverage_verification" in right:
+        result["native_coverage_verifications"] = [left.get("native_coverage_verification"),
+                                                    right.get("native_coverage_verification")]
     if len(canonical(result)) > output_limit:
         raise InvalidResearch("comparison output byte budget")
     return result
@@ -526,7 +561,9 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     expected = _domain_hash("pcap-evidence/bgp-evidence-manifest/v1", _compact(payload))
     if manifest["semantic_identity"] != expected:
         raise InvalidResearch("native manifest semantic identity mismatch")
-    for key in COVERAGE_KEYS:
+    coverage_keys = _coverage_keys(manifest["coverage"])
+    quarantine_available = "quarantined" in coverage_keys
+    for key in coverage_keys:
         if key not in {"witnesses", "count_unit"}:
             _uint(manifest["coverage"][key], "native coverage count")
     if (manifest["coverage"]["count_unit"] != "rows_except_records_unknown_mrt_record_time_and_timestamp_regressions"
@@ -544,9 +581,11 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
                     "full_source_bytes", "store_seal", "record_ordinal", "record_offset", "record_bytes", "record_type", "subtype", "record_sha256",
                     "mrt_record_time", "rib_originated_time_ns", "observation_time_ns", "event", "observation",
                     "window_disposition", "asn_disposition", "selected", "certain_occurrence_time_claimed")
-    records = {ordinal: {"count": 0, "end": 0, "last": None} for ordinal in by_ordinal}
+    records = {ordinal: {"count": 0, "end": 0, "last": None, "time": None} for ordinal in by_ordinal}
     previous_anchor = None
-    unknown_mrt_records = observed_count = selected_count = source_rows = retained_bytes = 0
+    counts = {key: 0 for key in coverage_keys if key not in {"witnesses", "witnesses_truncated", "count_unit"}}
+    witnesses = manifest["coverage"]["witnesses"]
+    witness_count = source_rows = retained_bytes = 0
     replay_hash, replay_bytes, replay_count = hashlib.sha256(), 0, 0
     replay_terminal = False
     stream.seek(0)
@@ -626,9 +665,43 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
             if offset != inventory["end"]:
                 raise InvalidResearch("native record ranges leave source gap or overlap")
             inventory.update(count=inventory["count"] + 1, end=offset + size, last=record_identity)
-            unknown_mrt_records += time_ns is None
-        observed_count += row["observation"] is not None
-        selected_count += row["selected"]
+            counts["records"] += 1
+            counts["unknown_mrt_record_time"] += time_ns is None
+            counts["timestamp_regressions"] += (time_ns is not None and inventory["time"] is not None
+                                                 and time_ns < inventory["time"])
+            # Unknown labels interrupt adjacent-record comparison. Each source
+            # has its own clock and record inventory; entries do not multiply it.
+            inventory["time"] = time_ns
+        counts["rows"] += 1
+        counts["observations"] += row["observation"] is not None
+        counts["selected"] += row["selected"]
+        routes = row["observation"].get("routes") if type(row["observation"]) is dict else None
+        counts["route_free"] += not (type(routes) is list and routes)
+        status = _native_status(row["event"])
+        status_counts = _status_counts(status)
+        for key, counted in status_counts.items():
+            if key in counts:
+                counts[key] += counted
+        counts["unknown_time"] += row["window_disposition"] == "unknown_time"
+        counts["unknown_asn"] += row["asn_disposition"] == "unknown_asn"
+        reasons = []
+        if row["window_disposition"] == "unknown_time":
+            reasons.append("unknown_time")
+        if time_ns is None:
+            reasons.append(validity)
+        if row["asn_disposition"] == "unknown_asn":
+            reasons.append("unknown_asn")
+        if any(counted for key, counted in status_counts.items() if key != "quarantined" or quarantine_available):
+            reasons.append(status)
+        for reason in reasons:
+            if witness_count < len(witnesses):
+                expected_witness = {"sequence_ordinal": str(ordinal), "source_sha256": entry["source_sha256"],
+                    "record_ordinal": str(record_ordinal), "record_offset": str(offset),
+                    "record_sha256": row["record_sha256"],
+                    "entry_index": None if anchor[2] is None else str(anchor[2]), "reason": reason}
+                if witnesses[witness_count] != expected_witness:
+                    raise InvalidResearch("native coverage witness contradicts row evidence")
+            witness_count += 1
         if ordinal == source_ordinal:
             retain = source_rows >= row_start and (row_count is None or source_rows < row_start + row_count)
             source_rows += 1
@@ -646,19 +719,20 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
         raise InvalidResearch("native chronology coverage incomplete")
     if any(inventory["end"] != _uint(by_ordinal[ordinal]["source_bytes"]) for ordinal, inventory in records.items()):
         raise InvalidResearch("native record ranges do not cover full source")
-    if (_uint(manifest["coverage"]["records"]) != sum(inventory["count"] for inventory in records.values())
-            or _uint(manifest["coverage"]["observations"]) != observed_count
-            or _uint(manifest["coverage"]["unknown_mrt_record_time"]) != unknown_mrt_records
-            or _uint(manifest["coverage"]["selected"]) != selected_count):
+    if any(_uint(manifest["coverage"][key]) != value for key, value in counts.items()):
         raise InvalidResearch("native coverage contradicts row evidence")
+    if (len(witnesses) > witness_count
+            or _uint(manifest["coverage"]["witnesses_truncated"]) != witness_count - len(witnesses)):
+        raise InvalidResearch("native coverage witness truncation contradicts row evidence")
     if narrowed and (row_start >= source_rows or row_start + row_count > source_rows):
         raise InvalidResearch("native partition outside selected source rows")
     config = {"semantic_profile": manifest["semantic_profile"], "replay_relationship": manifest["replay_relationship"]}
     result = {"schema": SCHEMA, "source": {"sha256": selected["source_sha256"], "bytes": selected["source_bytes"]},
                      "normalization": {"profile": NORMALIZATION, "config_sha256": digest(canonical(config))},
-                     "producer": {"id": "pcap-evidence-native", "version": "evidence-row.v1", "adapter_version": "2",
+                     "producer": {"id": "pcap-evidence-native", "version": "evidence-row.v1", "adapter_version": "3",
                                   "origin": "native_evidence", "command": []},
-                     "observations": observations, "native_evidence": manifest}
+                     "observations": observations, "native_evidence": manifest,
+                     "native_coverage_verification": "complete" if quarantine_available else "legacy_quarantine_unavailable"}
     if narrowed:
         result["native_partition"] = {"schema": "pcap-evidence.bgp.interpretation-partition.v1",
             "source_ordinal": str(source_ordinal), "row_start": str(row_start),

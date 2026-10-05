@@ -257,6 +257,471 @@ fn relationship_source_with_rejections(format: &str, rejection_count: usize) -> 
     }
 }
 
+// Valid UPDATE framing with a Partial Large Communities attribute retains an
+// incomplete announcement, rather than authorizing a replacement candidate.
+fn incomplete_capture_update() -> Vec<u8> {
+    let mut bytes = wire(0, 65001);
+    let attribute_len = u16::from_be_bytes([bytes[21], bytes[22]]) as usize;
+    let partial = [0xe0, 32, 12, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3];
+    bytes.splice(23 + attribute_len..23 + attribute_len, partial);
+    bytes[21..23].copy_from_slice(&((attribute_len + partial.len()) as u16).to_be_bytes());
+    let len = bytes.len() as u16;
+    bytes[16..18].copy_from_slice(&len.to_be_bytes());
+    bytes
+}
+fn captured_update(
+    writer: &mut JournalWriter,
+    namespace: [u8; 32],
+    session: u64,
+    frame: u64,
+    record_id: &str,
+    bytes: Vec<u8>,
+) {
+    let evidence = EvidenceBytes::from_packet(
+        &bytes,
+        PacketId {
+            capture: namespace,
+            frame,
+            record_offset: frame * 100,
+        },
+        0,
+    );
+    writer
+        .message(
+            session,
+            &evidence,
+            &PcapMetadata {
+                source_id: "capture-a".into(),
+                record_id: record_id.into(),
+                observed_at_ns: Some(100),
+                session: Some(session),
+                direction: Some(0),
+                peer: Some(format!("192.0.2.{session}")),
+                local: Some("192.0.2.100".into()),
+            },
+        )
+        .unwrap();
+}
+fn captured_rejection_occurrences(
+    archive: &pcap_evidence_product::deep::bgp_store::ReplayArchive,
+) -> Vec<String> {
+    archive
+        .observations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, observation)| {
+            if !observation
+                .routes()
+                .iter()
+                .any(|route| route.ambiguous_attributes())
+            {
+                return None;
+            }
+            let evidence = &archive.observation_evidence[index];
+            Some(format!(
+                "captured-lifecycle:{}:record:{}:observation:{}",
+                evidence.lifecycle,
+                sha256::hex(&evidence.journal_record_sha256),
+                sha256::hex(&observation.sha256())
+            ))
+        })
+        .collect()
+}
+
+#[test]
+fn captured_native_rejections_reach_fresh_query_policy_and_preserve_accepted_routes() {
+    use pcap_evidence_product::deep::{bgp_rib::RouteStatus, bgp_store};
+    let scratch = Scratch::new();
+    let path = scratch.path("native-rejections.journal");
+    let ns = [61; 32];
+    let mut writer = JournalWriter::create(
+        &path,
+        "capture-a".into(),
+        ns,
+        1024 * 1024,
+        Limits::default(),
+    )
+    .unwrap();
+    open_session(&mut writer, ns, 1);
+    open_session(&mut writer, ns, 2);
+    captured_update(&mut writer, ns, 1, 10, "accepted", wire(0, 65001));
+    captured_update(
+        &mut writer,
+        ns,
+        1,
+        11,
+        "incomplete-a",
+        incomplete_capture_update(),
+    );
+    captured_update(
+        &mut writer,
+        ns,
+        1,
+        12,
+        "incomplete-b",
+        incomplete_capture_update(),
+    );
+    captured_update(&mut writer, ns, 2, 20, "sibling", wire(100, 65001));
+    writer.seal().unwrap();
+    let archive = bgp_store::replay(&path, 1024 * 1024, Limits::default()).unwrap();
+    assert_eq!(archive.rejected_records, 0);
+    assert_eq!(
+        archive
+            .sessions
+            .iter()
+            .map(|s| s.summary.rejected_routes)
+            .sum::<usize>(),
+        2
+    );
+    assert_eq!(archive.route_entries.len(), 2);
+    assert!(archive
+        .route_entries
+        .iter()
+        .all(|entry| entry.status == RouteStatus::Active));
+    assert!(archive
+        .sessions
+        .iter()
+        .all(|session| session.summary.gaps == 0));
+    let accepted = archive
+        .route_entries
+        .iter()
+        .find(|entry| entry.key.scope.session == "1")
+        .unwrap();
+    assert_eq!(accepted.last_witness, "accepted");
+    assert_eq!(accepted.versions.len(), 1);
+    assert_eq!(accepted.versions[0].witnesses, vec!["accepted"]);
+    let occurrences = captured_rejection_occurrences(&archive);
+    assert_eq!(occurrences.len(), 2);
+    assert_ne!(occurrences[0], occurrences[1]);
+    let store = VerifiedStore::load(
+        &path,
+        1024 * 1024,
+        MrtLimits::default(),
+        Limits::default(),
+        MrtReplayOptions::default(),
+    )
+    .unwrap();
+    let query = Query {
+        status: Some("rejected".into()),
+        session: Some("1".into()),
+        prefix: Some("203.0.113.0/24".into()),
+        peer: Some("192.0.2.1".into()),
+        source: Some("capture-a".into()),
+        ..Query::default()
+    };
+    let result = store.query(&query, &Limits::default()).unwrap();
+    assert_eq!(
+        result.matches("\"status\":\"rejected\"").count(),
+        2,
+        "{result}"
+    );
+    assert_eq!(result.matches("\"native_current\":false").count(), 2);
+    assert_eq!(result.matches("\"alternatives\":[]").count(), 2);
+    assert_eq!(result.matches("\"captured_lifecycle\":0").count(), 2);
+    assert_eq!(result.matches("\"checkpoint_id\":null").count(), 2);
+    assert_eq!(
+        result
+            .matches("\"reason\":\"ambiguous_attribute_context\"")
+            .count(),
+        2
+    );
+    for occurrence in &occurrences {
+        assert!(
+            result.contains(&format!("\"occurrence_id\":\"{occurrence}\"")),
+            "{result}"
+        );
+    }
+    for record in ["incomplete-a", "incomplete-b"] {
+        assert!(result.contains(&format!("\"record_id\":\"{record}\"")));
+    }
+    for missing in [
+        Query {
+            peer: Some("192.0.2.2".into()),
+            ..query.clone()
+        },
+        Query {
+            source: Some("other".into()),
+            ..query.clone()
+        },
+        Query {
+            checkpoint: Some("unavailable".into()),
+            ..query.clone()
+        },
+    ] {
+        assert!(store
+            .query(&missing, &Limits::default())
+            .unwrap()
+            .contains("\"routes\":[]"));
+    }
+    let active = store
+        .query(
+            &Query {
+                status: Some("active".into()),
+                ..Query::default()
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(active.matches("\"native_current\":true").count(), 2);
+    let prof = PolicyProfile::parse(
+        profile("compare_all", "skip", true).as_bytes(),
+        &Limits::default(),
+    )
+    .unwrap();
+    let policy = store
+        .policy(&Query::default(), &prof, &Limits::default())
+        .unwrap();
+    assert!(policy.contains("\"selected\":\"rib:0\""), "{policy}");
+    for index in 0..2 {
+        assert!(
+            policy.contains(&format!(
+                "\"id\":\"rejected:{index}\",\"status\":\"rejected\""
+            )),
+            "{policy}"
+        );
+    }
+    for occurrence in &occurrences {
+        assert!(policy.contains(occurrence));
+    }
+    for (rendered, policy_output) in [(&result, false), (&policy, true)] {
+        let render = |limits: &Limits| {
+            if policy_output {
+                store.policy(&Query::default(), &prof, limits)
+            } else {
+                store.query(&query, limits)
+            }
+        };
+        assert_eq!(
+            render(&Limits {
+                output_bytes: rendered.len(),
+                ..Limits::default()
+            })
+            .unwrap(),
+            *rendered
+        );
+        assert!(render(&Limits {
+            output_bytes: rendered.len() - 1,
+            ..Limits::default()
+        })
+        .is_err());
+    }
+    assert!(store
+        .query(
+            &Query::default(),
+            &Limits {
+                elements: 3,
+                ..Limits::default()
+            }
+        )
+        .is_err());
+    // Find the real replay admission threshold, then exercise the last accepted
+    // unit and the adjacent refusal without deriving a debug-string estimate.
+    for retained in [true, false] {
+        let replay = |budget| {
+            let limits = if retained {
+                Limits {
+                    retained_bytes: budget,
+                    ..Limits::default()
+                }
+            } else {
+                Limits {
+                    work: budget,
+                    ..Limits::default()
+                }
+            };
+            bgp_store::replay(&path, 1024 * 1024, limits)
+        };
+        let mut lo = 1;
+        let mut hi = if retained {
+            Limits::default().retained_bytes
+        } else {
+            Limits::default().work
+        };
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if replay(mid).is_ok() {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        assert!(replay(lo).is_ok());
+        assert!(replay(lo - 1).is_err());
+    }
+    let output = scratch.path("rejected.json");
+    let queried = cli(&[
+        "bgp",
+        "query",
+        text(&path),
+        "--status",
+        "rejected",
+        "--session",
+        "1",
+        "--prefix",
+        "203.0.113.0/24",
+        "--peer",
+        "192.0.2.1",
+        "--source",
+        "capture-a",
+        "--output",
+        text(&output),
+    ]);
+    assert!(
+        queried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queried.stderr)
+    );
+    assert_eq!(fs::read_to_string(&output).unwrap().trim_end(), result);
+    let profile_path = scratch.path("policy.profile");
+    fs::write(&profile_path, profile("compare_all", "skip", true)).unwrap();
+    let output = scratch.path("policy.json");
+    let evaluated = cli(&[
+        "bgp",
+        "policy",
+        text(&path),
+        "--policy-profile",
+        text(&profile_path),
+        "--output",
+        text(&output),
+    ]);
+    assert!(
+        evaluated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(fs::read_to_string(output).unwrap().trim_end(), policy);
+}
+
+#[test]
+fn captured_native_rejections_keep_end_clear_and_reused_session_occurrences_historical() {
+    use pcap_evidence_product::deep::bgp_store;
+    let scratch = Scratch::new();
+    let path = scratch.path("rejection-history.journal");
+    let ns = [62; 32];
+    let mut writer = JournalWriter::create(
+        &path,
+        "capture-a".into(),
+        ns,
+        1024 * 1024,
+        Limits::default(),
+    )
+    .unwrap();
+    for lifecycle in 0..3 {
+        open_session(&mut writer, ns, 1);
+        captured_update(
+            &mut writer,
+            ns,
+            1,
+            10 + lifecycle * 10,
+            "accepted",
+            wire(0, 65001),
+        );
+        if lifecycle < 2 {
+            captured_update(
+                &mut writer,
+                ns,
+                1,
+                11 + lifecycle * 10,
+                "reused-a",
+                incomplete_capture_update(),
+            );
+            captured_update(
+                &mut writer,
+                ns,
+                1,
+                12 + lifecycle * 10,
+                "reused-b",
+                incomplete_capture_update(),
+            );
+        }
+        if lifecycle == 0 {
+            writer.end_session(1).unwrap();
+        }
+        if lifecycle == 1 {
+            writer.clear().unwrap();
+        }
+    }
+    writer.seal().unwrap();
+    let archive = bgp_store::replay(&path, 1024 * 1024, Limits::default()).unwrap();
+    assert_eq!(archive.route_entries.len(), 3);
+    assert_eq!(archive.rejected_records, 0);
+    assert_eq!(
+        archive
+            .sessions
+            .iter()
+            .map(|s| s.summary.rejected_routes)
+            .collect::<Vec<_>>(),
+        vec![2, 2, 0]
+    );
+    let occurrences = captured_rejection_occurrences(&archive);
+    assert_eq!(occurrences.len(), 4);
+    let store = VerifiedStore::load(
+        &path,
+        1024 * 1024,
+        MrtLimits::default(),
+        Limits::default(),
+        MrtReplayOptions::default(),
+    )
+    .unwrap();
+    let result = store
+        .query(
+            &Query {
+                status: Some("rejected".into()),
+                ..Query::default()
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        result.matches("\"status\":\"rejected\"").count(),
+        4,
+        "{result}"
+    );
+    assert_eq!(result.matches("\"native_current\":false").count(), 4);
+    assert_eq!(result.matches("\"captured_lifecycle\":0").count(), 2);
+    assert_eq!(result.matches("\"captured_lifecycle\":1").count(), 2);
+    assert!(!result.contains("\"captured_lifecycle\":2"));
+    assert_eq!(result.matches("\"record_id\":\"reused-a\"").count(), 2);
+    assert_eq!(result.matches("\"record_id\":\"reused-b\"").count(), 2);
+    for occurrence in &occurrences {
+        assert!(
+            result.contains(&format!("\"occurrence_id\":\"{occurrence}\"")),
+            "{result}"
+        );
+    }
+    let prof =
+        PolicyProfile::parse(profile("skip", "skip", true).as_bytes(), &Limits::default()).unwrap();
+    let policy = store
+        .policy(&Query::default(), &prof, &Limits::default())
+        .unwrap();
+    assert!(policy.contains("\"selected\":\"rib:2\""), "{policy}");
+    assert!(!policy.contains("\"selected\":\"rib:0\""));
+    assert!(!policy.contains("\"selected\":\"rib:1\""));
+    for index in 0..4 {
+        assert!(
+            policy.contains(&format!(
+                "\"id\":\"rejected:{index}\",\"status\":\"rejected\""
+            )),
+            "{policy}"
+        );
+    }
+    for occurrence in &occurrences {
+        assert!(policy.contains(occurrence));
+    }
+    let active = store
+        .query(
+            &Query {
+                status: Some("active".into()),
+                ..Query::default()
+            },
+            &Limits::default(),
+        )
+        .unwrap();
+    assert_eq!(active.matches("\"native_current\":true").count(), 1);
+    assert_eq!(active.matches("\"native_current\":false").count(), 2);
+    assert!(!active.contains("\"status\":\"withdrawn\""));
+}
+
 #[test]
 fn imported_rejections_reach_rich_query_and_policy_without_replacing_active_routes() {
     use pcap_evidence_product::deep::{bgp_bmp_store, bgp_mrt_store, bgp_rib::RouteStatus};

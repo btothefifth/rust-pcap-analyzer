@@ -67,7 +67,7 @@ def native_export():
                              "sequence_digest": "e" * 64, "ordering": "caller_file_order", "independent_checkpoints": True},
                 "semantic_profile": "pcap-evidence.bgp.semantic-route-identity.v2", "replay_relationship": "unknown", "window": None,
                 "coverage": {"records": "1", "rows": "1", "observations": "1", "route_free": "0", "opaque": "0",
-                             "rejected": "0", "unsupported": "0", "unknown_time": "0", "unknown_mrt_record_time": "0", "unknown_asn": "0", "selected": "1",
+                             "rejected": "0", "quarantined": "0", "unsupported": "0", "unknown_time": "0", "unknown_mrt_record_time": "0", "unknown_asn": "0", "selected": "1",
                              "timestamp_regressions": "0", "witnesses": [], "witnesses_truncated": "0",
                              "count_unit": "rows_except_records_unknown_mrt_record_time_and_timestamp_regressions"},
                 "semantic_identity": "f" * 64, "endpoint_state_claimed": False,
@@ -99,6 +99,8 @@ def seal_fixture_manifest(manifest):
                  "replay_relationship", "window", "coverage", "source_authenticated", "endpoint_state_claimed", "resume_cursor_supported")
     coverage_keys = ("records", "rows", "observations", "route_free", "opaque", "rejected", "unsupported", "unknown_time", "unknown_mrt_record_time",
                      "unknown_asn", "selected", "timestamp_regressions", "witnesses", "witnesses_truncated", "count_unit")
+    if "quarantined" in manifest["coverage"]:
+        coverage_keys = coverage_keys[:6] + ("quarantined",) + coverage_keys[6:]
     payload = {key: manifest[key] for key in root_keys}
     payload["sequence"] = sequence
     payload["coverage"] = {key: manifest["coverage"][key] for key in coverage_keys}
@@ -106,10 +108,45 @@ def seal_fixture_manifest(manifest):
 
 
 def rebind_rows(row, manifest):
+    # Positive fixture edits must preserve summary/row consistency. Adversarial
+    # tests below mutate and reseal the completed manifest afterwards instead.
+    fixture_row_coverage(row, manifest)
     raw = json.dumps(row, separators=(",", ":")).encode() + b"\n"
     manifest.update(rows="1", rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
     seal_fixture_manifest(manifest)
     return raw
+
+
+def fixture_row_coverage(row, manifest):
+    """Independent single-record fixture owner, not the candidate's helpers."""
+    event = row["event"]
+    status = next((event[key] for key in ("parse_status", "status", "kind")
+                   if type(event.get(key)) is str), "unknown")
+    routes = row["observation"].get("routes") if type(row["observation"]) is dict else None
+    coverage = manifest["coverage"]
+    coverage.update(records="1", rows="1", observations=str(int(row["observation"] is not None)),
+                    route_free=str(int(not (type(routes) is list and routes))),
+                    opaque=str(int("opaque" in status)), rejected=str(int("reject" in status)),
+                    unsupported=str(int("unsupported" in status)), selected=str(int(row["selected"])),
+                    unknown_time=str(int(row["window_disposition"] == "unknown_time")),
+                    unknown_asn=str(int(row["asn_disposition"] == "unknown_asn")),
+                    unknown_mrt_record_time=str(int(row["mrt_record_time"]["time_ns"] is None)),
+                    timestamp_regressions="0", witnesses=[], witnesses_truncated="0")
+    if "quarantined" in coverage:
+        coverage["quarantined"] = str(int("quarantin" in status))
+    reasons = []
+    if row["window_disposition"] == "unknown_time":
+        reasons.append("unknown_time")
+    if row["mrt_record_time"]["time_ns"] is None:
+        reasons.append(row["mrt_record_time"]["validity"])
+    if row["asn_disposition"] == "unknown_asn":
+        reasons.append("unknown_asn")
+    if any(token in status for token in ("opaque", "reject", "unsupported")) or ("quarantined" in coverage and "quarantin" in status):
+        reasons.append(status)
+    for reason in reasons:
+        coverage["witnesses"].append({key: row.get(key) for key in
+            ("sequence_ordinal", "source_sha256", "record_ordinal", "record_offset", "record_sha256", "entry_index")}
+            | {"reason": reason})
 
 
 def extended_timestamp_export(microseconds):
@@ -157,6 +194,164 @@ def write_native_rows(path, count, *, corrupt_suffix=False):
 
 
 class BgpComparisonTests(unittest.TestCase):
+    def test_all_whole_export_counters_reconcile_after_resealing(self):
+        # Byte/sequence/manifest commitments all pass. Only the semantic count
+        # is changed, including counts previously omitted by the converter.
+        for key in ("records", "rows", "observations", "route_free", "opaque", "rejected",
+                    "quarantined", "unsupported", "unknown_time", "unknown_mrt_record_time",
+                    "unknown_asn", "selected", "timestamp_regressions"):
+            _, raw, manifest = extended_timestamp_export(None)
+            self.assertEqual(bgp.from_native(raw, manifest)["observations"][0]["disposition"], "rejected")
+            manifest["coverage"][key] = str(int(manifest["coverage"][key]) + 1)
+            seal_fixture_manifest(manifest)
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "coverage.*(contradicts|mismatch)"):
+                bgp.from_native(raw, manifest, row_count=1)
+
+    def test_witness_prefix_anchor_reason_and_exact_truncation_are_verified(self):
+        _, raw, manifest = extended_timestamp_export(None)
+        self.assertEqual([w["reason"] for w in manifest["coverage"]["witnesses"]],
+                         ["missing_microseconds", "rejected"])
+        for cap in (0, 1, 2):
+            limited = copy.deepcopy(manifest)
+            limited["coverage"]["witnesses"] = limited["coverage"]["witnesses"][:cap]
+            limited["coverage"]["witnesses_truncated"] = str(2 - cap)
+            seal_fixture_manifest(limited)
+            self.assertEqual(len(bgp.from_native(raw, limited)["observations"]), 1)
+        for key, value in (("sequence_ordinal", "99"), ("source_sha256", "1" * 64),
+                           ("record_ordinal", "99"), ("record_offset", "999"),
+                           ("record_sha256", "not-a-digest"), ("entry_index", "99"),
+                           ("reason", "unsupported")):
+            bad = copy.deepcopy(manifest)
+            bad["coverage"]["witnesses"][0][key] = value
+            seal_fixture_manifest(bad)
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "witness contradicts"):
+                bgp.from_native(raw, bad, row_count=1)
+        for mutation in ("reorder", "duplicate", "extra", "truncated"):
+            bad = copy.deepcopy(manifest)
+            if mutation == "reorder":
+                bad["coverage"]["witnesses"].reverse()
+            elif mutation == "duplicate":
+                bad["coverage"]["witnesses"][1] = bad["coverage"]["witnesses"][0]
+            elif mutation == "extra":
+                bad["coverage"]["witnesses"].append(copy.deepcopy(bad["coverage"]["witnesses"][-1]))
+            else:
+                bad["coverage"]["witnesses_truncated"] = "1"
+            seal_fixture_manifest(bad)
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(InvalidResearch, "witness.*contradicts"):
+                bgp.from_native(raw, bad)
+
+    def test_quarantine_addition_preserves_sealed_legacy_availability(self):
+        for legacy in (False, True):
+            row, _, manifest = native_export()
+            row["event"]["parse_status"] = "quarantined"
+            if legacy:
+                del manifest["coverage"]["quarantined"]
+            raw = rebind_rows(row, manifest)
+            original = copy.deepcopy(manifest)
+            output = bgp.from_native(raw, manifest, row_count=1)
+            expected = "legacy_quarantine_unavailable" if legacy else "complete"
+            self.assertEqual(output["native_coverage_verification"], expected)
+            self.assertEqual(output["native_evidence"], original)
+            self.assertEqual(output["observations"][0]["disposition"], "unknown")
+            self.assertEqual(output["observations"][0]["coverage"]["disposition"], "partial")
+            self.assertEqual(bgp.compare(output, output)["native_coverage_verifications"], [expected, expected])
+            if not legacy:
+                self.assertEqual(manifest["coverage"]["quarantined"], "1")
+                self.assertEqual(manifest["coverage"]["rejected"], "0")
+                self.assertEqual(manifest["coverage"]["witnesses"][0]["reason"], "quarantined")
+            bad = copy.deepcopy(output)
+            bad["native_coverage_verification"] = "complete" if legacy else "legacy_quarantine_unavailable"
+            with self.assertRaisesRegex(InvalidResearch, "availability mismatch"):
+                bgp.validate(bad)
+
+    def test_unretained_rows_own_status_counts_and_witnesses(self):
+        with tempfile.TemporaryDirectory(prefix="bgp-compare-summary-") as temp:
+            path = Path(temp) / "rows.ndjson"
+            manifest = write_native_rows(path, 2)
+            lines = path.read_bytes().splitlines()
+            rows = [json.loads(part) for part in lines[:-1]]
+            rows[1]["event"] = {"parse_status": "quarantined", "issues": []}
+            raw = b"".join(json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows)
+            manifest.update(rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
+            manifest["coverage"].update(quarantined="1", witnesses=[{
+                key: rows[1].get(key) for key in ("sequence_ordinal", "source_sha256", "record_ordinal",
+                "record_offset", "record_sha256", "entry_index")} | {"reason": "quarantined"}])
+            seal_fixture_manifest(manifest)
+            self.assertEqual(bgp.from_native(raw, manifest, row_count=1)["observations"][0]["disposition"], "accepted")
+            for key in ("quarantined", "route_free", "timestamp_regressions"):
+                bad = copy.deepcopy(manifest)
+                bad["coverage"][key] = str(int(bad["coverage"][key]) + 1)
+                seal_fixture_manifest(bad)
+                with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "coverage contradicts"):
+                    bgp.from_native(raw, bad, row_count=1)
+            bad = copy.deepcopy(manifest)
+            bad["coverage"]["witnesses"][0]["record_offset"] = "0"
+            seal_fixture_manifest(bad)
+            with self.assertRaisesRegex(InvalidResearch, "witness contradicts"):
+                bgp.from_native(raw, bad, row_count=1)
+
+    def test_record_units_unknown_time_break_and_independent_source_clocks(self):
+        row, _, manifest = native_export()
+        first = manifest["sequence"]["entries"][0]
+        first.update(source_bytes="64", record_count="4")
+        second = copy.deepcopy(first)
+        second.update(ordinal="1", source_id="other", source_bytes="16", record_count="1", source_sha256="1" * 64)
+        manifest["sequence"]["entries"].append(second)
+        rows = []
+        for index, seconds in enumerate((30, None, 20, 10)):
+            current = copy.deepcopy(row)
+            current.update(full_source_bytes="64", record_ordinal=str(index), record_offset=str(index * 16))
+            current["mrt_record_time"].update(seconds=str(25 if seconds is None else seconds),
+                                            time_ns=None if seconds is None else str(seconds * 1_000_000_000))
+            if seconds is None:
+                current.update(record_type=17, observation=None, entry_index=None)
+                current["mrt_record_time"].update(validity="missing_microseconds", precision="unknown")
+            rows.append(current)
+            if index == 0:
+                extra = copy.deepcopy(current)
+                extra["entry_index"] = "1"
+                rows.append(extra)
+        neighbor = copy.deepcopy(row)
+        neighbor.update(sequence_ordinal="1", source_id="other", source_sha256="1" * 64)
+        neighbor["mrt_record_time"].update(seconds="1", time_ns="1000000000")
+        rows.append(neighbor)
+        raw = b"".join(json.dumps(item, separators=(",", ":")).encode() + b"\n" for item in rows)
+        manifest.update(rows="6", rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
+        manifest["coverage"].update(records="5", rows="6", observations="5", selected="6", route_free="1",
+            unknown_mrt_record_time="1", timestamp_regressions="1", witnesses=[{
+                key: rows[2].get(key) for key in ("sequence_ordinal", "source_sha256", "record_ordinal",
+                "record_offset", "record_sha256", "entry_index")} | {"reason": "missing_microseconds"}])
+        seal_fixture_manifest(manifest)
+        output = bgp.from_native(raw, manifest, source_ordinal=1, row_count=1)
+        self.assertEqual(len(output["observations"]), 1)
+        for key, wrong in (("records", "6"), ("unknown_mrt_record_time", "2"), ("timestamp_regressions", "3")):
+            bad = copy.deepcopy(manifest)
+            bad["coverage"][key] = wrong
+            seal_fixture_manifest(bad)
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "coverage contradicts"):
+                bgp.from_native(raw, bad, source_ordinal=1, row_count=1)
+
+    def test_status_summary_priority_preserves_unknown_interpretation(self):
+        for event, counter, reason in (({"parse_status": "quarantined_ambiguous_session"}, "quarantined", "quarantined_ambiguous_session"),
+                                       ({"parse_status": None, "status": "unsupported", "kind": "opaque_record"}, "unsupported", "unsupported"),
+                                       ({"kind": "opaque_record"}, "opaque", "opaque_record"),
+                                       ({"parse_status": "future_status", "status": "rejected"}, None, None)):
+            row, _, manifest = native_export()
+            row["event"] = event
+            raw = rebind_rows(row, manifest)
+            document = bgp.from_native(raw, manifest)
+            converted = document["observations"][0]
+            self.assertEqual(converted["disposition"], "unknown")
+            self.assertEqual(converted["coverage"]["disposition"], "partial")
+            self.assertEqual(converted["evidence"]["event"], event)
+            if counter is not None:
+                self.assertEqual(manifest["coverage"][counter], "1")
+                self.assertEqual([w["reason"] for w in manifest["coverage"]["witnesses"]], [reason])
+            else:
+                self.assertTrue(all(manifest["coverage"][key] == "0" for key in
+                                    ("opaque", "rejected", "quarantined", "unsupported")))
+                self.assertEqual(manifest["coverage"]["witnesses"], [])
+
     def test_same_anchor_different_source_range_blocks_all_semantic_votes(self):
         for differing_disposition in (False, True):
             left, right = independent_external(), independent_external()

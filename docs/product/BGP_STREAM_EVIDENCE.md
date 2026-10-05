@@ -72,6 +72,27 @@ are navigation hints. Operational read-buffer sizes do not alter semantic
 identity. Row anchors use whole-source identity, absolute record offset/digest
 and entry coordinates, never replay-local observation indexes alone.
 
+Coverage counts use rows except `records`, `unknown_mrt_record_time` and
+`timestamp_regressions`, which use distinct source records. Regressions compare
+adjacent known MRT labels within one sequence entry; an unknown label interrupts
+the comparison and an independent source starts a new comparison. Route-free
+counts include rows without a nonempty normalized route array. Diagnostic
+classes use the first text-valued event `parse_status`, `status` or `kind`, falling
+back to `unknown`; `opaque`, `reject`, `quarantin` and `unsupported` substrings
+produce overlapping opaque, rejected, quarantined and unsupported row counts.
+These summary classes never establish reducer admission. Quarantine retains
+unknown interpretation disposition and partial disposition coverage.
+
+New v1 manifests always include additive `coverage.quarantined`, immediately
+after `rejected` in the canonical digest payload. A missing legacy field remains
+absent when reconstructing the original commitment and cannot prove zero
+quarantine. Status witnesses retain the original status; their bounded list is
+the source-order prefix of per-row reasons: unknown selector time, unknown MRT
+time validity, unknown ASN, then an abnormal diagnostic status. There is one
+status witness per abnormal row even when several diagnostic classes match.
+`witnesses_truncated` counts every reason omitted after that prefix, including
+when the witness limit is zero. Legacy payloads omit quarantine-only witnesses.
+
 ASN selectors use validated effective paths with explicit `path_member` or
 `origin` roles. Origin requires a unique supported terminal origin; AS_SET and
 unresolved transitions remain unknown. Time selectors require an explicit
@@ -204,3 +225,18 @@ for that source, source ordinal and whole-export verification, alongside the
 complete bound native manifest. Corrupt or incomplete rows outside the selected
 interval still prevent conversion. All partitions remain offline attributed
 interpretations; their verification does not authenticate the collector.
+
+The converter reconciles all available coverage counts with the complete
+export before publishing any partition. Selector unknown counts derive from
+the reported row dispositions; conversion does not re-execute the native ASN
+validator. It also verifies witness anchors, reasons and ordering against the
+bounded expected prefix, and reconciles exact witness truncation. This is
+row/summary consistency evidence, without raw-source authentication or broader
+protocol qualification. Adapter version 3 carries the additive interpretation
+field `native_coverage_verification`: `complete` when quarantine coverage is
+present and verified, or `legacy_quarantine_unavailable` for a correctly sealed
+older payload. A legacy export still verifies every available counter and
+its original witness contract; `whole_export_verified` does not fill the missing
+quarantine coverage. Differential output preserves both availability labels in
+`native_coverage_verifications` when supplied. Unrecognized parser statuses
+retain their original event and unknown/partial disposition interpretation.

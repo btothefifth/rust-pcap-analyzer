@@ -504,6 +504,7 @@ impl VerifiedStore {
         let mut magic = [0u8; 8];
         f.read_exact(&mut magic)?;
         drop(f);
+        let mut captured_rejections = Vec::new();
         let mut captured_entry_evidence = Vec::new();
         let mut captured_observation_evidence = Vec::new();
         let (receipt, digest, namespace, entries, rejections, observations, collector) =
@@ -516,6 +517,7 @@ impl VerifiedStore {
                     ));
                 }
                 let a = bgp_store::replay(path, maximum, limits.clone())?;
+                captured_rejections = a.route_rejections;
                 captured_entry_evidence = a.route_entry_evidence;
                 captured_observation_evidence = a.observation_evidence;
                 let digest = sha256::hex(&a.receipt.terminal_sha256);
@@ -763,7 +765,12 @@ impl VerifiedStore {
         }
         // A rejection is an occurrence, separate from accepted route versions.
         // It cannot replace or become a current native route with the same key.
-        for (index, rejection) in rejections.iter().enumerate() {
+        for (index, (rejection, captured)) in rejections
+            .iter()
+            .map(|rejection| (rejection, None))
+            .chain(captured_rejections.iter().map(|r| (&r.rejection, Some(r))))
+            .enumerate()
+        {
             if rows.len() >= limits.elements {
                 return Err(Error::limit("bgp_persisted_routes"));
             }
@@ -773,49 +780,107 @@ impl VerifiedStore {
             if materialized_bytes > limits.retained_bytes || materialized_bytes > limits.work {
                 return Err(Error::limit("bgp_persisted_rows"));
             }
-            let observation = observations
-                .iter()
-                .find(|o| {
-                    o.source().source_id == rejection.key.scope.source.source_id
-                        && o.source().session.as_deref() == Some(&rejection.key.scope.session)
-                        && o.source().generation == Some(rejection.key.scope.generation)
-                        && o.source().direction == rejection.key.scope.direction
-                        && o.source().peer == rejection.key.scope.peer
-                        && o.source().record_id == rejection.record_id
-                })
-                .ok_or_else(|| bad("bgp_persisted_rejection", 0, "source observation missing"))?;
-            let context = observation
-                .import_context()
-                .ok_or_else(|| bad("bgp_persisted_rejection", 0, "import context missing"))?;
-            if super::bgp_session::SourcePartition::from_import_context(context, &limits)?
-                != rejection.key.scope.source
-            {
-                return Err(bad(
-                    "bgp_persisted_rejection",
-                    0,
-                    "source partition mismatch",
-                ));
+            let (observation, capture_evidence) = if let Some(captured) = captured {
+                let observation =
+                    observations
+                        .get(captured.observation_index)
+                        .ok_or_else(|| {
+                            bad("bgp_persisted_rejection", 0, "source observation missing")
+                        })?;
+                let evidence = captured_observation_evidence
+                    .get(captured.observation_index)
+                    .ok_or_else(|| {
+                        bad("bgp_persisted_rejection", 0, "captured occurrence missing")
+                    })?;
+                if rejection.key.scope.source.kind != PartitionKind::Captured
+                    || rejection.key.scope.source.partition_id != namespace
+                    || observation.source().source_id != rejection.key.scope.source.source_id
+                    || observation.source().session.as_deref() != Some(&rejection.key.scope.session)
+                    || observation.source().generation != Some(rejection.key.scope.generation)
+                    || observation.source().direction != rejection.key.scope.direction
+                    || observation.source().peer != rejection.key.scope.peer
+                    || observation.source().record_id != rejection.record_id
+                    || !observation.routes().iter().any(|route| {
+                        route.ambiguous_attributes()
+                            && route.prefix() == &rejection.key.prefix
+                            && route.prefix().afi == rejection.key.family.afi
+                            && route.prefix().safi == rejection.key.family.safi
+                            && match (route.path_id(), rejection.key.path_id) {
+                                (super::bgp_state::RoutePathId::Absent, PathId::Absent) => true,
+                                (super::bgp_state::RoutePathId::Present(a), PathId::Present(b)) => {
+                                    a == b
+                                }
+                                _ => false,
+                            }
+                    })
+                {
+                    return Err(bad(
+                        "bgp_persisted_rejection",
+                        0,
+                        "captured source scope mismatch",
+                    ));
+                }
+                (observation, Some(evidence))
+            } else {
+                let observation = observations
+                    .iter()
+                    .find(|o| {
+                        o.source().source_id == rejection.key.scope.source.source_id
+                            && o.source().session.as_deref() == Some(&rejection.key.scope.session)
+                            && o.source().generation == Some(rejection.key.scope.generation)
+                            && o.source().direction == rejection.key.scope.direction
+                            && o.source().peer == rejection.key.scope.peer
+                            && o.source().record_id == rejection.record_id
+                    })
+                    .ok_or_else(|| {
+                        bad("bgp_persisted_rejection", 0, "source observation missing")
+                    })?;
+                let context = observation
+                    .import_context()
+                    .ok_or_else(|| bad("bgp_persisted_rejection", 0, "import context missing"))?;
+                if super::bgp_session::SourcePartition::from_import_context(context, &limits)?
+                    != rejection.key.scope.source
+                {
+                    return Err(bad(
+                        "bgp_persisted_rejection",
+                        0,
+                        "source partition mismatch",
+                    ));
+                }
+                (observation, None)
+            };
+            let context = observation.import_context();
+            let mut key = rejection.key.clone();
+            if let Some(evidence) = capture_evidence {
+                key.scope.source.partition_id = format!(
+                    "{}:captured-lifecycle:{}",
+                    key.scope.source.partition_id, evidence.lifecycle
+                );
             }
             let digest = sha256::hex(&observation.sha256());
             rows.push(RouteRow {
                 id: format!("rejected:{index}"),
-                key: rejection.key.clone(),
+                key,
                 status: RouteStatus::Rejected,
                 collector: false,
                 current: false,
-                lifecycle: None,
-                original_partition: None,
+                lifecycle: capture_evidence.map(|e| e.lifecycle),
+                original_partition: capture_evidence
+                    .map(|_| rejection.key.scope.source.partition_id.clone()),
                 alternatives: Json::array([]),
                 attributes: None,
                 witnesses: vec![digest.clone()],
-                checkpoint: Some(context.checkpoint_id.clone()),
-                clock: context.clock.clone(),
+                checkpoint: context.map(|c| c.checkpoint_id.clone()),
+                clock: context.map(|c| c.clock.clone()).unwrap_or_default(),
                 observed_at_ns: observation.source().observed_at_ns,
                 rejection: Some(Json::object([
                     ("reason", rejection.reason.clone().into()),
                     ("record_id", rejection.record_id.clone().into()),
                     ("observation_sha256", digest.clone().into()),
-                    ("occurrence_id", format!("observation:{digest}").into()),
+                    (
+                        "occurrence_id",
+                        observation_occurrence_id(observation, capture_evidence).into(),
+                    ),
                 ])),
             });
         }
@@ -866,16 +931,9 @@ impl VerifiedStore {
             .iter()
             .position(|candidate| std::ptr::eq(candidate, o))
             .and_then(|i| self.captured_observation_evidence.get(i));
-        match life {
-            Some(e) => format!(
-                "captured-lifecycle:{}:record:{}:observation:{}",
-                e.lifecycle,
-                sha256::hex(&e.journal_record_sha256),
-                sha256::hex(&o.sha256())
-            ),
-            None => format!("observation:{}", sha256::hex(&o.sha256())),
-        }
+        observation_occurrence_id(o, life)
     }
+
     pub fn reference(&self) -> Json {
         Json::object([
             ("sealed_store", self.receipt.clone()),
@@ -1537,6 +1595,21 @@ fn entry_charge(entry: &super::bgp_rib::RouteEntry, limits: &Limits) -> Result<u
     }
     Ok(size)
 }
+fn observation_occurrence_id(
+    observation: &Observation,
+    captured: Option<&bgp_store::CapturedObservationEvidence>,
+) -> String {
+    match captured {
+        Some(e) => format!(
+            "captured-lifecycle:{}:record:{}:observation:{}",
+            e.lifecycle,
+            sha256::hex(&e.journal_record_sha256),
+            sha256::hex(&observation.sha256())
+        ),
+        None => format!("observation:{}", sha256::hex(&observation.sha256())),
+    }
+}
+
 fn preflight_native_clone(
     rib: &super::bgp_rib::AdjRibIn,
     observations: &[Observation],

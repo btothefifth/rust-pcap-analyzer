@@ -49,6 +49,14 @@ boundary-admission errors before sealing and publishing its journal. Replay
 also stops on resource-limit errors. A caller must stop after an EventSink
 error rather than ignore it and request publication.
 
+Native rejected announcement actions remain separate typed occurrences in the
+replay archive. Each is bound when the reducer emits it to the exact normalized
+observation and its verified journal record/lifecycle witness. END and CLEAR
+retain those occurrences before dropping the session; a reused session label
+cannot rebind them. Rejection retention and clone admission are charged before
+copying under the caller's element, retained-byte and work limits. These actions
+neither overwrite an accepted candidate nor imply a continuity gap or withdrawal.
+
 Flow-end snapshots retain terminal history. Persisted rich route rows from an
 ended lifecycle expose `native_current=false`, even when their last observed
 route status is Active, and remain excluded from current policy selection.
