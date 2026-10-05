@@ -295,7 +295,7 @@ fn imported_rejections_reach_rich_query_and_policy_without_replacing_active_rout
                 1024 * 1024,
                 MrtLimits::default(),
                 Limits::default(),
-                options.clone(),
+                options,
             )
             .unwrap();
             (

@@ -178,9 +178,11 @@ fn cotp_gap_cuts_only_its_named_scope() {
 
 #[test]
 fn cotp_rejected_push_does_not_advance_or_retain_a_scope_counter() {
-    let mut limits = Limits::default();
-    limits.active = 1;
-    limits.retained_bytes = 2;
+    let limits = Limits {
+        active: 1,
+        retained_bytes: 2,
+        ..Limits::default()
+    };
     let mut session = CotpSession::new(limits).unwrap();
     session.push("A", &dt(b"A", false, 1), 1).unwrap();
     assert!(session.push("B", &dt(b"B", true, 2), 2).is_err());
