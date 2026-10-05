@@ -16,10 +16,13 @@ pub use io_support::read_source;
 
 use super::{
     bgp::{self, RouteAction, SourceKind},
-    bgp_import::{self, GenerationBoundary, ImportContext, ImportPartition, SourceRange},
+    bgp_import::{
+        self, GenerationBoundary, ImportContext, ImportContinuityCut, ImportPartition,
+        ImportedSourceEvent, ImportedSourceEventKind, SourceRange,
+    },
     bgp_mrt::{Bgp4mpPayload, MrtBatch, MrtBody, MrtLimits, MrtRecord, MrtSource, Rib},
     bgp_rib::AdjRibIn,
-    bgp_state::{CandidateState, Observation, PrefixIdentity, RoutePathId},
+    bgp_state::{CandidateState, Observation, ObservationKind, PrefixIdentity, RoutePathId},
     model::{bad, Limits},
 };
 use pcap_evidence::{json::Json, sha256, Error, ErrorCode, Result};
@@ -224,6 +227,8 @@ pub struct MrtReplayArchive {
     pub candidates: Vec<CollectorCandidate>,
     pub bgp4mp_candidates: Vec<Bgp4mpCandidate>,
     pub bgp4mp_events: Vec<Json>,
+    /// Producer-owned source occurrences, including route-free and rejected rows.
+    pub source_events: Vec<ImportedSourceEvent>,
     pub opaque_records: u64,
     pub unsupported_rib_entries: u64,
     unsupported_rib_entry_evidence: Vec<Json>,
@@ -773,12 +778,18 @@ fn build_archive(
         return Err(Error::limit("bgp_mrt_source_bytes"));
     }
     let mut state = CandidateState::new(limits.clone())?;
-    let mut bgp4mp_rib = AdjRibIn::new(limits.clone())?;
+    // The archive's borrowed projection owns the actual output-byte cap.
+    // Native typed retention and work remain independently bounded.
+    let mut bgp4mp_rib = AdjRibIn::for_embedded_projection(limits.clone())?;
     let mut bgp4mp_rib_work = 0usize;
     let mut candidates = Vec::new();
     let mut bgp4mp_candidates = Vec::new();
     let mut bgp4mp_events = Vec::new();
     let mut bgp4mp_event_bytes = 0usize;
+    let mut source_events = Vec::new();
+    let mut source_event_bytes = 0usize;
+    let mut source_event_work = 0usize;
+    let mut source_observation_bytes = 0usize;
     let mut imported_sessions =
         bgp::mrt::ReplayState::with_peer_relationship(options.peer_relationship);
     let mut observations = Vec::new();
@@ -791,6 +802,9 @@ fn build_archive(
     for (record_index, record) in batch.records.iter().enumerate() {
         let observations_before = observations.len();
         let events_before = bgp4mp_events.len();
+        let mut opaque_gap = None;
+        let native_before = bgp4mp_rib.events().len();
+        let mut record_cuts = Vec::new();
         match &record.body {
             MrtBody::Rib(rib) => {
                 for entry_index in 0..rib.entries.len() {
@@ -905,6 +919,7 @@ fn build_archive(
                         &limits,
                         &mut imported_sessions,
                     )?;
+                    opaque_gap = replay.continuity_gap;
                     append_bgp4mp_generation_boundaries(Bgp4mpGenerationBoundaryInput {
                         observations: &mut observations,
                         observations_work: &mut observations_work,
@@ -1055,11 +1070,68 @@ fn build_archive(
                     ..
                 }
         ) {
+            let mut cuts = Vec::new();
+            for event in &bgp4mp_events[events_before..] {
+                let (record_cuts, work) = imported_sessions.continuity_cuts(
+                    &batch,
+                    record_index,
+                    record,
+                    event,
+                    opaque_gap.as_ref(),
+                    &limits,
+                )?;
+                bgp4mp_rib_work = bgp4mp_rib_work
+                    .checked_add(work)
+                    .filter(|n| *n <= limits.work)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+                cuts.extend(record_cuts);
+                bgp4mp_rib_work = bgp4mp_rib_work
+                    .checked_add(rib_support::reset_native_scopes(
+                        &mut bgp4mp_rib,
+                        event,
+                        record_index,
+                        record,
+                        &limits,
+                    )?)
+                    .filter(|work| *work <= limits.work)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+            }
+            bgp4mp_rib_work = bgp4mp_rib_work
+                .checked_add(rib_support::apply_continuity_cuts(
+                    &mut bgp4mp_rib,
+                    &cuts,
+                    &limits,
+                )?)
+                .filter(|n| *n <= limits.work)
+                .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
             for observation in &observations[observations_before..] {
                 if let Some(event) = rib_support::observation_event(observation, &limits)? {
-                    bgp4mp_rib.apply(event)?;
+                    let before = bgp4mp_rib.accounted_work();
+                    if let super::bgp_rib::RibEventKind::Update(actions) = &event.kind {
+                        if actions.len() != observation.routes().len() {
+                            return Err(bad(
+                                "bgp_mrt_native_origin",
+                                record_index,
+                                "native actions differ from checked observation route ordinals",
+                            ));
+                        }
+                        // The checked envelope's immutable digest and exact
+                        // route/action order are the producer's version origin.
+                        bgp4mp_rib_work = bgp4mp_rib_work
+                            .checked_add(observation.batch_work()?)
+                            .filter(|n| *n <= limits.work)
+                            .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+                        bgp4mp_rib.apply_with_origin(event, observation.sha256())?;
+                    } else {
+                        bgp4mp_rib.apply(event)?;
+                    }
                     bgp4mp_rib_work = bgp4mp_rib_work
-                        .checked_add(bgp4mp_rib.accounted_work())
+                        .checked_add(
+                            bgp4mp_rib
+                                .accounted_work()
+                                .checked_sub(before)
+                                .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+                        )
                         .filter(|work| *work <= limits.work)
                         .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
                 }
@@ -1075,13 +1147,158 @@ fn build_archive(
                     .filter(|work| *work <= limits.work)
                     .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
             }
+            record_cuts = cuts;
+        }
+        for observation in &observations[observations_before..] {
+            let mut bytes = super::bgp_mrt_stream_store::json_memory(observation.normalized())
+                .checked_add(std::mem::size_of::<Observation>())
+                .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+            if let Some(context) = observation.import_context() {
+                bytes = bytes
+                    .checked_add(context.retained_charge()?)
+                    .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+            }
+            source_observation_bytes = source_observation_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+            source_event_work = source_event_work
+                .checked_add(bytes)
+                .filter(|n| *n <= limits.work)
+                .ok_or_else(|| Error::limit("bgp_mrt_source_event_work"))?;
+        }
+        let source_event_base = batch
+            .retained_bytes
+            .checked_add(bgp4mp_rib.retained_bytes())
+            .and_then(|n| n.checked_add(bgp4mp_event_bytes))
+            .and_then(|n| n.checked_add(source_observation_bytes))
+            .and_then(|n| n.checked_add(imported_sessions.retained_bytes(&limits).ok()?))
+            .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+        // Checked source metadata is retained before copying opaque references.
+        // Container rows and observation rows remain distinct source occurrences.
+        if let Some(gap) = opaque_gap.as_ref() {
+            let bytes = gap
+                .context
+                .retained_charge()?
+                .checked_add(gap.record_id.len())
+                .and_then(|n| n.checked_add(gap.reason.len()))
+                .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+            admit_source_event_bytes(
+                source_event_base
+                    .checked_add(source_event_bytes)
+                    .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?,
+                bytes,
+                &limits,
+            )?;
+            record_cuts
+                .try_reserve(1)
+                .map_err(|_| Error::limit("bgp_mrt_source_events"))?;
+            record_cuts.push(gap.clone());
+        }
+        let boundary = bgp4mp_rib.events()[native_before..]
+            .iter()
+            .any(|event| matches!(event.kind, super::bgp_rib::RibEventKind::Reset { .. }));
+        let fallback = (events_before == bgp4mp_events.len()).then(|| record_json(record));
+        let references: &[Json] = fallback
+            .as_ref()
+            .map_or(&bgp4mp_events[events_before..], std::slice::from_ref);
+        for reference in references {
+            let context = if fallback.is_none() {
+                imported_sessions.source_context(
+                    &batch,
+                    record_index,
+                    record,
+                    reference,
+                    &limits,
+                )?
+            } else {
+                None
+            };
+            let kind = if fallback.is_none() {
+                imported_sessions.source_event_kind(record, reference, boundary, context.is_some())
+            } else {
+                match &record.body {
+                    MrtBody::PeerIndex(_) => ImportedSourceEventKind::SessionMetadata,
+                    MrtBody::Rib(_) => ImportedSourceEventKind::Update,
+                    _ => ImportedSourceEventKind::Opaque,
+                }
+            };
+            retain_source_event(
+                &mut source_events,
+                &mut source_event_bytes,
+                &mut source_event_work,
+                source_event_base,
+                record_index,
+                None,
+                kind,
+                context.as_ref(),
+                &record_cuts,
+                reference,
+                &limits,
+            )?;
+            for (offset, observation) in observations[observations_before..].iter().enumerate() {
+                let kind = match observation.kind() {
+                    ObservationKind::Reset => ImportedSourceEventKind::GenerationBoundary,
+                    ObservationKind::Routes => {
+                        if rib_support::route_projection_incomplete(observation) {
+                            ImportedSourceEventKind::ContinuityGap
+                        } else {
+                            ImportedSourceEventKind::Update
+                        }
+                    }
+                    ObservationKind::Open => ImportedSourceEventKind::Open,
+                    ObservationKind::Notification => ImportedSourceEventKind::Notification,
+                    ObservationKind::Keepalive => ImportedSourceEventKind::Keepalive,
+                    ObservationKind::RouteRefresh => ImportedSourceEventKind::RouteRefresh,
+                };
+                retain_source_event(
+                    &mut source_events,
+                    &mut source_event_bytes,
+                    &mut source_event_work,
+                    source_event_base,
+                    record_index,
+                    Some(observations_before + offset),
+                    kind,
+                    observation.import_context(),
+                    &[],
+                    reference,
+                    &limits,
+                )?;
+            }
         }
     }
     observations_work = observations_work
         .checked_add(bgp4mp_rib_work)
+        .and_then(|n| n.checked_add(source_event_work))
         .filter(|work| *work <= limits.work)
         .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
     let outcomes = state.apply_batch(observations)?;
+    for event in &mut source_events {
+        if let Some(index) = event.observation_index {
+            event.observation_index = Some(
+                outcomes
+                    .get(index)
+                    .ok_or_else(|| bad("bgp_mrt_source_event_ref", index, "missing batch receipt"))?
+                    .observation,
+            );
+            let observation = state
+                .observations()
+                .get(event.observation_index.unwrap())
+                .ok_or_else(|| {
+                    bad(
+                        "bgp_mrt_source_event_ref",
+                        index,
+                        "missing retained observation",
+                    )
+                })?;
+            if event.context.as_ref() != observation.import_context() {
+                return Err(bad(
+                    "bgp_mrt_source_event_ref",
+                    index,
+                    "context changed during reduction",
+                ));
+            }
+        }
+    }
     for candidate in &mut candidates {
         let outcome = outcomes.get(candidate.observation_index).ok_or_else(|| {
             bad(
@@ -1171,6 +1388,7 @@ fn build_archive(
         candidates,
         bgp4mp_candidates,
         bgp4mp_events,
+        source_events,
         opaque_records,
         unsupported_rib_entries,
         unsupported_rib_entry_evidence: Vec::new(),
@@ -1212,6 +1430,7 @@ fn build_archive(
     }
     retained = retained
         .checked_add(bgp4mp_event_bytes)
+        .and_then(|n| n.checked_add(source_event_bytes))
         .ok_or_else(|| Error::limit("bgp_mrt_retained"))?;
     if retained > limits.retained_bytes {
         return Err(Error::limit("bgp_mrt_retained"));
@@ -1862,6 +2081,77 @@ fn increment(value: u64, field: &'static str) -> Result<u64> {
     value.checked_add(1).ok_or_else(|| Error::limit(field))
 }
 
+fn admit_source_event_bytes(current: usize, additional: usize, limits: &Limits) -> Result<()> {
+    current
+        .checked_add(additional)
+        .filter(|n| *n <= limits.retained_bytes)
+        .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retain_source_event(
+    events: &mut Vec<ImportedSourceEvent>,
+    retained: &mut usize,
+    work: &mut usize,
+    base_retained: usize,
+    source_record_index: usize,
+    observation_index: Option<usize>,
+    kind: ImportedSourceEventKind,
+    context: Option<&ImportContext>,
+    cuts: &[ImportContinuityCut],
+    reference: &Json,
+    limits: &Limits,
+) -> Result<()> {
+    if events.len() >= limits.elements {
+        return Err(Error::limit("bgp_mrt_source_events"));
+    }
+    let mut bytes = std::mem::size_of::<ImportedSourceEvent>()
+        .checked_add(super::bgp_mrt_stream_store::json_memory(reference))
+        .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+    if let Some(context) = context {
+        bytes = bytes
+            .checked_add(context.retained_charge()?)
+            .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+    }
+    for cut in cuts {
+        bytes = bytes
+            .checked_add(cut.context.retained_charge()?)
+            .and_then(|n| n.checked_add(cut.record_id.len()))
+            .and_then(|n| n.checked_add(cut.reason.len()))
+            .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?;
+    }
+    admit_source_event_bytes(
+        base_retained
+            .checked_add(*retained)
+            .ok_or_else(|| Error::limit("bgp_mrt_source_events"))?,
+        bytes,
+        limits,
+    )?;
+    let next_work = work
+        .checked_add(
+            bytes
+                .checked_mul(8)
+                .ok_or_else(|| Error::limit("bgp_mrt_source_event_work"))?,
+        )
+        .filter(|n| *n <= limits.work)
+        .ok_or_else(|| Error::limit("bgp_mrt_source_event_work"))?;
+    events
+        .try_reserve(1)
+        .map_err(|_| Error::limit("bgp_mrt_source_events"))?;
+    events.push(ImportedSourceEvent {
+        source_record_index,
+        observation_index,
+        kind,
+        context: context.cloned(),
+        continuity_cuts: cuts.to_vec(),
+        reference: reference.clone(),
+    });
+    *retained += bytes;
+    *work = next_work;
+    Ok(())
+}
+
 fn retain_bgp4mp_event(
     events: &mut Vec<Json>,
     total_bytes: &mut usize,
@@ -2394,5 +2684,97 @@ mod tests {
         assert!(replay(&probe, 1024 * 1024, MrtLimits::default(), Limits::default()).is_err());
         std::fs::remove_file(complete).unwrap();
         std::fs::remove_file(probe).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod source_event_budget_tests {
+    use super::*;
+
+    #[test]
+    fn source_event_precopy_exact_retained_and_work_peak_reject_one_below() {
+        let context = ImportContext {
+            source_id: "finite-source".into(),
+            source_schema: "finite-schema".into(),
+            source_version: None,
+            clock: bgp_import::ObservationClock::default(),
+            batch: bgp_import::SourceBatch {
+                batch_id: Some("finite-batch".into()),
+                sha256: None,
+                byte_length: Some(10),
+            },
+            checkpoint_id: "finite-checkpoint".into(),
+            session: "finite-session".into(),
+            generation: 0,
+            direction: Some(0),
+            peer: None,
+            local: None,
+            provenance: vec![SourceRange {
+                start: 0,
+                end: 10,
+                sha256: None,
+            }],
+        };
+        let cuts = vec![ImportContinuityCut {
+            context: context.clone(),
+            record_id: "original-gap".into(),
+            reason: "original-reason".into(),
+        }];
+        let reference = Json::object([("original", "source-event".into())]);
+        let mut events = Vec::new();
+        let mut retained = 0;
+        let mut work = 0;
+        retain_source_event(
+            &mut events,
+            &mut retained,
+            &mut work,
+            0,
+            0,
+            None,
+            ImportedSourceEventKind::ContinuityGap,
+            Some(&context),
+            &cuts,
+            &reference,
+            &Limits::default(),
+        )
+        .unwrap();
+        for below in [false, true] {
+            for work_cap in [false, true] {
+                let limits = if work_cap {
+                    Limits {
+                        work: work - usize::from(below),
+                        ..Limits::default()
+                    }
+                } else {
+                    Limits {
+                        retained_bytes: retained - usize::from(below),
+                        ..Limits::default()
+                    }
+                };
+                let mut events = Vec::new();
+                let mut bytes = 0;
+                let mut units = 0;
+                let result = retain_source_event(
+                    &mut events,
+                    &mut bytes,
+                    &mut units,
+                    0,
+                    0,
+                    None,
+                    ImportedSourceEventKind::ContinuityGap,
+                    Some(&context),
+                    &cuts,
+                    &reference,
+                    &limits,
+                );
+                assert_eq!(result.is_ok(), !below);
+                if below {
+                    assert!(events.is_empty());
+                    assert_eq!((bytes, units), (0, 0));
+                } else {
+                    assert_eq!((bytes, units), (retained, work));
+                }
+            }
+        }
     }
 }

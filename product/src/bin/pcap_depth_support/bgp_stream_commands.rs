@@ -119,7 +119,7 @@ pub(super) fn import(v: &[String]) -> Result<()> {
 
 pub(super) fn export(v: &[String]) -> Result<()> {
     use deep::bgp_evidence::{
-        AsnRole, AsnSelector, ClockScope, EvidenceLimits, TimeBasis, WindowQuery,
+        AsnRole, AsnSelector, ClockScope, ComparisonFields, EvidenceLimits, TimeBasis, WindowQuery,
     };
     let mut paths = vec![PathBuf::from(v.get(2).ok_or_else(usage)?)];
     let mut workspace = None;
@@ -156,6 +156,13 @@ pub(super) fn export(v: &[String]) -> Result<()> {
                 paths.push(PathBuf::from(value));
             }
             "--peer-relationship" => relationship = Some(parse_peer_relationship(value)?),
+            "--comparison-fields" => {
+                evidence.comparison_fields = match value.as_str() {
+                    "legacy-v1" => ComparisonFields::Legacy,
+                    "per-field-v2" => ComparisonFields::PerFieldV2,
+                    _ => return Err(usage()),
+                }
+            }
             "--max-source-bytes" => stream.source_bytes = value.parse().map_err(|_| usage())?,
             "--max-store-bytes" => stream.store_bytes = value.parse().map_err(|_| usage())?,
             "--max-record-bytes" => stream.record_bytes = value.parse().map_err(|_| usage())?,

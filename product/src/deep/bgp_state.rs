@@ -5,6 +5,7 @@
 //! not authenticated or re-derived from packet bytes by this consumer.
 use super::bgp::{RouteAction, SourceKind, SCHEMA as ROUTE_SCHEMA};
 use super::bgp_import::{GenerationBoundary, ImportContext, ImportPartition};
+use super::bgp_session::Family;
 use super::model::{bad, Limits};
 use pcap_evidence::{json::Json, sha256, Error, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -338,6 +339,29 @@ impl Observation {
                 }
             }
         }
+        if kind == SourceKind::Captured {
+            // Aggregate repeated route inventories before any raw-value allocation.
+            let mut bytes = 0usize;
+            let mut work = 0usize;
+            for route in raw_routes {
+                for range in array(member(route, "attribute_ranges")?)? {
+                    if let Some(raw) = optional_member(range, "value_hex")? {
+                        let length = text(raw)?.len();
+                        bytes = add(bytes, length / 2, "bgp_state_raw_extended")?;
+                        work = add(
+                            work,
+                            length
+                                .checked_mul(6)
+                                .ok_or_else(|| Error::limit("bgp_state_raw_extended"))?,
+                            "bgp_state_raw_extended",
+                        )?;
+                    }
+                }
+            }
+            if bytes > limits.retained_bytes || work > limits.work {
+                return Err(Error::limit("bgp_state_raw_extended"));
+            }
+        }
         let mut routes = Vec::new();
         for raw in raw_routes {
             routes.push(parse_route(
@@ -486,6 +510,46 @@ impl Observation {
     }
     pub fn kind(&self) -> ObservationKind {
         self.kind
+    }
+    /// Explicit captured EOR projection, not an inference from empty routes.
+    /// `None` means this observation representation has no EOR metadata owner;
+    /// `Some([])` is an explicit non-EOR projection. Imported boundaries retain
+    /// their source-specific typed event owners instead of borrowing wire claims.
+    pub fn end_of_rib_families(&self) -> Result<Option<Vec<Family>>> {
+        if self.kind != ObservationKind::Routes {
+            return Ok(Some(Vec::new()));
+        }
+        if self.source.kind != SourceKind::Captured {
+            return Ok(None);
+        }
+        let Some(detail) = optional_member(&self.normalized, "message_detail")? else {
+            return Ok(None);
+        };
+        let Some(families) = optional_member(detail, "end_of_rib")? else {
+            return Ok(None);
+        };
+        let families = array(families)?;
+        if families.len() > 1 {
+            return Err(bad(
+                "bgp_state_eor",
+                0,
+                "one captured UPDATE cannot establish multiple EOR markers",
+            ));
+        }
+        let families = families
+            .iter()
+            .map(|family| {
+                let afi = u16::try_from(number(member(family, "afi")?)?)
+                    .map_err(|_| bad("bgp_state_eor", 0, "AFI out of range"))?;
+                let safi = u8::try_from(number(member(family, "safi")?)?)
+                    .map_err(|_| bad("bgp_state_eor", 0, "SAFI out of range"))?;
+                if afi == 0 || safi == 0 {
+                    return Err(bad("bgp_state_eor", 0, "nonzero AFI and SAFI required"));
+                }
+                Ok(Family { afi, safi })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(families))
     }
     pub fn routes(&self) -> &[RouteObservation] {
         &self.routes
@@ -1597,6 +1661,9 @@ fn parse_route(
             "imported attributes cannot assert wire ranges",
         ));
     }
+    if kind == SourceKind::Captured {
+        validate_captured_raw_extended_values(ranges, limits)?;
+    }
     let imported_inventory = optional_member(raw, "imported_attribute_occurrences")?;
     if kind == SourceKind::Imported
         && import_context.is_some_and(|context| context.direction.is_some())
@@ -2009,6 +2076,53 @@ fn boolean(value: &Json) -> Result<bool> {
 
 fn raw_occurrence_value(range: &Json, limits: &Limits) -> Result<Vec<u8>> {
     raw_hex_value(text(member(range, "value_hex")?)?, limits)
+}
+
+/// Optional captured raw type-16 values bind literally to their existing value
+/// digest and source ranges. Older hash-only observations remain representable.
+fn validate_captured_raw_extended_values(ranges: &[Json], limits: &Limits) -> Result<()> {
+    let mut raw_bytes = 0usize;
+    let mut work = 0usize;
+    for range in ranges {
+        let Some(hex) = optional_member(range, "value_hex")? else {
+            continue;
+        };
+        if byte(member(range, "type")?)? != 16 {
+            return Err(identity_attribute_mismatch(
+                "captured raw value is restricted to type 16",
+            ));
+        }
+        let hex = text(hex)?;
+        raw_bytes = add(raw_bytes, hex.len() / 2, "bgp_state_raw_extended")?;
+        work = add(
+            work,
+            hex.len()
+                .checked_mul(6)
+                .ok_or_else(|| Error::limit("bgp_state_raw_extended"))?,
+            "bgp_state_raw_extended",
+        )?;
+    }
+    if raw_bytes > limits.retained_bytes || work > limits.work {
+        return Err(Error::limit("bgp_state_raw_extended"));
+    }
+    for range in ranges {
+        if optional_member(range, "value_hex")?.is_none() {
+            continue;
+        }
+        let value = raw_occurrence_value(range, limits)?;
+        let start = position(member(range, "value_start")?)?;
+        let end = position(member(range, "value_end")?)?;
+        let digest = text(member(range, "sha256")?)?;
+        validate_hash(digest)?;
+        if start.checked_add(value.len()) != Some(end)
+            || sha256::hex(&sha256::digest(&value)) != digest
+        {
+            return Err(identity_attribute_mismatch(
+                "captured raw extended-community value binding",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn raw_hex_value(hex: &str, limits: &Limits) -> Result<Vec<u8>> {

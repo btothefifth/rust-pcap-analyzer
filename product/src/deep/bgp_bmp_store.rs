@@ -50,6 +50,7 @@ pub struct BmpReplayArchive {
     pub state: CandidateState,
     pub bmp_rib: AdjRibIn,
     pub bmp_events: Vec<Json>,
+    pub source_events: Vec<super::bgp_import::ImportedSourceEvent>,
     pub peer_relationship: Option<PeerRelationship>,
     batch: BmpBatch,
 }
@@ -59,6 +60,10 @@ impl BmpReplayArchive {
     }
     /// Deterministic logical charge for the complete final archive, not allocator RSS.
     pub fn retained_charge(&self) -> Result<usize> {
+        let typed_bytes = self.source_events.iter().try_fold(0usize, |used, event| {
+            used.checked_add(imported_event_charge(event)?)
+                .ok_or_else(|| Error::limit("bmp_source_event_retained"))
+        })?;
         let event_bytes = self.bmp_events.iter().try_fold(0usize, |used, event| {
             used.checked_add(event.encoded_len_bounded(usize::MAX)?)
                 .ok_or_else(|| Error::limit("bmp_replay_retained"))
@@ -68,6 +73,7 @@ impl BmpReplayArchive {
             .checked_add(self.bmp_rib.retained_bytes())
             .and_then(|n| n.checked_add(self.batch.retained_charge))
             .and_then(|n| n.checked_add(event_bytes))
+            .and_then(|n| n.checked_add(typed_bytes))
             .and_then(|n| n.checked_add(self.receipt.json().encoded_len_bounded(usize::MAX).ok()?))
             .ok_or_else(|| Error::limit("bmp_replay_retained"))
     }
@@ -357,13 +363,16 @@ fn build_archive(
     options: BmpReplayOptions,
 ) -> Result<BmpReplayArchive> {
     let mut state = CandidateState::new(limits.clone())?;
-    let mut rib = AdjRibIn::new(limits.clone())?;
+    let mut rib = AdjRibIn::for_embedded_projection(limits.clone())?;
     let mut decoder = bgp::bmp::ReplayState::new(options.peer_relationship);
     let mut events = Vec::new();
+    let mut source_events = Vec::new();
+    let mut source_event_spans = 0usize;
     let mut observations = Vec::new();
     let mut work = batch.work_charge;
     let mut retained = batch.retained_charge;
     for index in 0..batch.records.len() {
+        let rib_work_before = rib.accounted_work();
         let replay =
             bgp::bmp::replay_record(&batch, index, &limits, bmp_limits.peers, &mut decoder)?;
         let event_bytes = replay.event.encoded_len_bounded(limits.output_bytes)?;
@@ -381,7 +390,81 @@ fn build_archive(
         events
             .try_reserve(1)
             .map_err(|_| Error::limit("bmp_replay_events"))?;
-        events.push(replay.event);
+        use super::bgp_import::{
+            ImportContinuityCut, ImportedSourceEvent, ImportedSourceEventKind as K,
+        };
+        // Preserve typed source scope before any JSON projection can reinterpret it.
+        let cut_charge = replay
+            .gaps
+            .iter()
+            .enumerate()
+            .try_fold(0usize, |sum, (ordinal, c)| {
+                let label_bytes = "bmp-gap:".len()
+                    + decimal_digits(index)
+                    + 1
+                    + decimal_digits(ordinal)
+                    + 1
+                    + batch.records[index].sha256.len();
+                let size = c
+                    .retained_charge()?
+                    .checked_add(label_bytes)
+                    .and_then(|n| n.checked_add("quarantined_bmp_context_continuity".len()))
+                    .and_then(|n| n.checked_add(128))
+                    .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+                sum.checked_add(size)
+                    .ok_or_else(|| Error::limit("bmp_source_event_retained"))
+            })?;
+        let prospective = imported_event_parts_charge(event_bytes, 0, cut_charge)?;
+        let references = replay.gaps.iter().try_fold(0usize, |n, c| {
+            n.checked_add(c.provenance.len())
+                .ok_or_else(|| Error::limit("bmp_source_event_spans"))
+        })?;
+        admit_imported_event(
+            prospective,
+            source_events.len(),
+            source_event_spans,
+            references,
+            retained,
+            work,
+            &limits,
+        )?;
+        let cuts = replay
+            .gaps
+            .iter()
+            .enumerate()
+            .map(|(ordinal, context)| ImportContinuityCut {
+                context: context.clone(),
+                record_id: format!("bmp-gap:{index}:{ordinal}:{}", batch.records[index].sha256),
+                reason: "quarantined_bmp_context_continuity".into(),
+            })
+            .collect::<Vec<_>>();
+        let container_kind = if !cuts.is_empty() {
+            K::ContinuityGap
+        } else {
+            match &batch.records[index].body {
+                super::bgp_bmp::BmpBody::RouteMonitoring { .. } => K::SessionMetadata,
+                super::bgp_bmp::BmpBody::Termination { .. } => K::GenerationBoundary,
+                super::bgp_bmp::BmpBody::Opaque { .. } => K::Opaque,
+                _ => K::SessionMetadata,
+            }
+        };
+        let container = ImportedSourceEvent {
+            source_record_index: index,
+            observation_index: None,
+            kind: container_kind,
+            context: None,
+            continuity_cuts: cuts,
+            reference: replay.event.clone(),
+        };
+        retain_imported_event(
+            container,
+            &mut source_events,
+            &mut source_event_spans,
+            &mut retained,
+            &mut work,
+            &limits,
+        )?;
+        events.push(replay.event.clone());
         for normalized in replay.observations {
             let observation = Observation::from_normalized(&normalized, None, &limits)?;
             let bytes = normalized.encoded_len_bounded(limits.input_bytes)?;
@@ -393,6 +476,54 @@ fn build_archive(
                 .checked_add(observation.batch_work()?)
                 .filter(|n| *n <= limits.work)
                 .ok_or_else(|| Error::limit("bmp_replay_work"))?;
+            let context = observation
+                .import_context()
+                .ok_or_else(|| bad("bmp_source_event_context", index, "exact context required"))?;
+            let source_kind = match observation.kind() {
+                super::bgp_state::ObservationKind::Open => K::Open,
+                super::bgp_state::ObservationKind::Notification => K::Notification,
+                super::bgp_state::ObservationKind::Keepalive => K::Keepalive,
+                super::bgp_state::ObservationKind::RouteRefresh => K::RouteRefresh,
+                super::bgp_state::ObservationKind::Reset => K::GenerationBoundary,
+                super::bgp_state::ObservationKind::Routes => {
+                    if super::bgp_mrt_store::rib_support::route_projection_incomplete(&observation)
+                    {
+                        K::ContinuityGap
+                    } else {
+                        K::Update
+                    }
+                }
+            };
+            let clone_charge = imported_event_parts_charge(
+                replay.event.encoded_len_bounded(limits.input_bytes)?,
+                context.retained_charge()?,
+                0,
+            )?;
+            admit_imported_event(
+                clone_charge,
+                source_events.len(),
+                source_event_spans,
+                context.provenance.len(),
+                retained,
+                work,
+                &limits,
+            )?;
+            let source_event = ImportedSourceEvent {
+                source_record_index: index,
+                observation_index: Some(observations.len()),
+                kind: source_kind,
+                context: Some(context.clone()),
+                continuity_cuts: Vec::new(),
+                reference: replay.event.clone(),
+            };
+            retain_imported_event(
+                source_event,
+                &mut source_events,
+                &mut source_event_spans,
+                &mut retained,
+                &mut work,
+                &limits,
+            )?;
             if let Some(event) =
                 super::bgp_mrt_store::rib_support::observation_event(&observation, &limits)?
             {
@@ -404,7 +535,7 @@ fn build_archive(
                 if !matches!(event.kind, RibEventKind::Reset { .. })
                     || native_scope_initialized(&rib, &event, &mut work, &limits)?
                 {
-                    rib.apply(event)?;
+                    rib.apply_with_origin(event, observation.sha256())?;
                 }
             }
             if observations.len() >= limits.elements {
@@ -433,7 +564,11 @@ fn build_archive(
             return Err(Error::limit("bmp_replay_retained"));
         }
         work = work
-            .checked_add(rib.accounted_work())
+            .checked_add(
+                rib.accounted_work()
+                    .checked_sub(rib_work_before)
+                    .ok_or_else(|| Error::limit("bmp_replay_work"))?,
+            )
             .filter(|n| *n <= limits.work)
             .ok_or_else(|| Error::limit("bmp_replay_work"))?;
     }
@@ -459,6 +594,7 @@ fn build_archive(
         state,
         bmp_rib: rib,
         bmp_events: events,
+        source_events,
         peer_relationship: options.peer_relationship,
         batch,
     };
@@ -470,6 +606,98 @@ fn build_archive(
         return Err(Error::limit("bmp_replay_retained"));
     }
     Ok(archive)
+}
+fn decimal_digits(value: usize) -> usize {
+    value.max(1).ilog10() as usize + 1
+}
+fn imported_event_parts_charge(
+    reference_bytes: usize,
+    context_bytes: usize,
+    cut_bytes: usize,
+) -> Result<usize> {
+    reference_bytes
+        .checked_add(512)
+        .and_then(|n| n.checked_add(context_bytes))
+        .and_then(|n| n.checked_add(cut_bytes))
+        .and_then(|n| n.checked_mul(6))
+        .ok_or_else(|| Error::limit("bmp_source_event_retained"))
+}
+fn imported_event_charge(event: &super::bgp_import::ImportedSourceEvent) -> Result<usize> {
+    let context_bytes = event
+        .context
+        .as_ref()
+        .map(|c| c.retained_charge())
+        .transpose()?
+        .unwrap_or(0);
+    let cut_bytes = event.continuity_cuts.iter().try_fold(0usize, |n, c| {
+        c.context
+            .retained_charge()?
+            .checked_add(c.record_id.len())
+            .and_then(|v| v.checked_add(c.reason.len()))
+            .and_then(|v| v.checked_add(128))
+            .and_then(|v| n.checked_add(v))
+            .ok_or_else(|| Error::limit("bmp_source_event_retained"))
+    })?;
+    imported_event_parts_charge(
+        event.reference.encoded_len_bounded(usize::MAX)?,
+        context_bytes,
+        cut_bytes,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn admit_imported_event(
+    size: usize,
+    events: usize,
+    spans: usize,
+    references: usize,
+    retained: usize,
+    work: usize,
+    limits: &Limits,
+) -> Result<(usize, usize, usize)> {
+    let next_spans = spans
+        .checked_add(references)
+        .filter(|v| *v <= limits.spans)
+        .ok_or_else(|| Error::limit("bmp_source_event_spans"))?;
+    let next_retained = retained
+        .checked_add(size)
+        .filter(|v| *v <= limits.retained_bytes)
+        .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+    let next_work = work
+        .checked_add(size)
+        .filter(|v| *v <= limits.work)
+        .ok_or_else(|| Error::limit("bmp_source_event_work"))?;
+    if events >= limits.elements {
+        return Err(Error::limit("bmp_source_events"));
+    }
+    Ok((next_retained, next_work, next_spans))
+}
+fn retain_imported_event(
+    event: super::bgp_import::ImportedSourceEvent,
+    events: &mut Vec<super::bgp_import::ImportedSourceEvent>,
+    spans: &mut usize,
+    retained: &mut usize,
+    work: &mut usize,
+    limits: &Limits,
+) -> Result<()> {
+    let size = imported_event_charge(&event)?;
+    let mut references = event.context.as_ref().map_or(0, |c| c.provenance.len());
+    for cut in &event.continuity_cuts {
+        references = references.saturating_add(cut.context.provenance.len());
+    }
+    let (next_retained, next_work, next_spans) = admit_imported_event(
+        size,
+        events.len(),
+        *spans,
+        references,
+        *retained,
+        *work,
+        limits,
+    )?;
+    *retained = next_retained;
+    *work = next_work;
+    *spans = next_spans;
+    events.push(event);
+    Ok(())
 }
 fn native_scope_initialized(
     rib: &AdjRibIn,
@@ -591,4 +819,119 @@ pub fn read_source(path: &Path, maximum: u64) -> Result<Vec<u8>> {
         &mut file,
         usize::try_from(metadata.len()).map_err(|_| Error::limit("bmp_input"))?,
     )
+}
+
+#[cfg(test)]
+mod typed_source_charge_tests {
+    use super::super::bgp_import::{
+        ClockPolicy, ImportContext, ImportContinuityCut, ImportedSourceEvent,
+        ImportedSourceEventKind, ObservationClock, SourceBatch, SourceRange,
+    };
+    use super::*;
+    #[test]
+    fn borrowed_carrier_preflight_matches_independent_context_cut_floor() {
+        let context = ImportContext {
+            source_id: "s".into(),
+            source_schema: "schema".into(),
+            source_version: Some("v".into()),
+            clock: ObservationClock {
+                policy: ClockPolicy::SourceLabel,
+                clock_id: Some("clock".into()),
+                reported_uncertainty_ns: None,
+            },
+            batch: SourceBatch {
+                batch_id: Some("batch".into()),
+                sha256: Some("a".repeat(64)),
+                byte_length: Some(20),
+            },
+            checkpoint_id: "cp".into(),
+            session: "session".into(),
+            generation: 0,
+            direction: Some(0),
+            peer: Some("peer".into()),
+            local: Some("local".into()),
+            provenance: vec![SourceRange {
+                start: 0,
+                end: 20,
+                sha256: Some("b".repeat(64)),
+            }],
+        };
+        let reference = Json::object([("source_record", "record-1".into())]);
+        let cut = ImportContinuityCut {
+            context: context.clone(),
+            record_id: "gap-source".into(),
+            reason: "lost-context".into(),
+        };
+        // 1024 + all ten independent label lengths + one 128/range and SHA64.
+        let context_floor = 1024 + 1 + 6 + 1 + 5 + 5 + 64 + 2 + 7 + 4 + 5 + 128 + 64;
+        let cut_floor = context_floor + 10 + 12 + 128;
+        let exact = 6 * (reference.encode().len() + 512 + context_floor + cut_floor);
+        let borrowed = imported_event_parts_charge(
+            reference.encode().len(),
+            context.retained_charge().unwrap(),
+            cut.context.retained_charge().unwrap() + cut.record_id.len() + cut.reason.len() + 128,
+        )
+        .unwrap();
+        assert_eq!(borrowed, exact);
+        let event = ImportedSourceEvent {
+            source_record_index: 0,
+            observation_index: None,
+            kind: ImportedSourceEventKind::ContinuityGap,
+            context: Some(context),
+            continuity_cuts: vec![cut],
+            reference,
+        };
+        assert_eq!(imported_event_charge(&event).unwrap(), exact);
+        let limits = Limits {
+            retained_bytes: 17 + exact,
+            work: 19 + exact,
+            spans: 3,
+            elements: 1,
+            ..Limits::default()
+        };
+        assert_eq!(
+            admit_imported_event(borrowed, 0, 1, 2, 17, 19, &limits).unwrap(),
+            (17 + exact, 19 + exact, 3)
+        );
+        for l in [
+            Limits {
+                retained_bytes: 16 + exact,
+                ..limits.clone()
+            },
+            Limits {
+                work: 18 + exact,
+                ..limits.clone()
+            },
+            Limits {
+                spans: 2,
+                ..limits.clone()
+            },
+        ] {
+            assert_eq!(
+                admit_imported_event(borrowed, 0, 1, 2, 17, 19, &l)
+                    .unwrap_err()
+                    .code,
+                pcap_evidence::ErrorCode::LimitExceeded
+            );
+        }
+        assert!(admit_imported_event(borrowed, 1, 1, 2, 17, 19, &limits).is_err());
+    }
+    #[test]
+    fn prospective_cut_label_length_matches_literal_source_ordinals() {
+        for index in [0usize, 9, 10, 99, 100] {
+            for ordinal in [0usize, 9, 10] {
+                let sha = "a".repeat(64);
+                let actual = format!("bmp-gap:{index}:{ordinal}:{sha}");
+                assert_eq!(
+                    "bmp-gap:".len()
+                        + decimal_digits(index)
+                        + 1
+                        + decimal_digits(ordinal)
+                        + 1
+                        + sha.len(),
+                    actual.len()
+                );
+            }
+        }
+    }
 }

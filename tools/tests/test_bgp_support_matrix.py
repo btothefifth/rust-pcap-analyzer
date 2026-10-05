@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 import unittest
@@ -17,6 +18,7 @@ REQUIRED_AREAS = {
     "policy",
     "external_input",
     "product_integration",
+    "stream_evidence",
     "qualification",
 }
 
@@ -67,6 +69,32 @@ class BgpSupportMatrixTests(unittest.TestCase):
                             (ROOT / relative).is_file(),
                             f"missing {field} path for {entry['id']}: {relative}",
                         )
+
+    def test_cli_help_matches_the_reviewed_source_snapshot(self):
+        # pcap-depth prints usage().detail for --help. Pin that exact public
+        # string without executing the native binary in this static contract check.
+        source = (ROOT / "product" / "src" / "bin" / "pcap-depth.rs").read_text(
+            encoding="utf-8"
+        )
+        marker = 'Error::new(ErrorCode::Usage,0,"arguments","'
+        self.assertEqual(source.count(marker), 1)
+        start = source.index(marker) + len(marker)
+        end = source.index('")', start)
+        help_detail = source[start:end]
+        self.assertEqual(
+            hashlib.sha256(help_detail.encode("utf-8")).hexdigest(),
+            "9ab96b19f7ee46025860c58d23c056b713150938a1469178ba4be48407f0cda1",
+        )
+        for selector in (
+            "bgp query STORE",
+            "--prefix-mode exact|contains|contained-by",
+            "--attribute-scope current-effective|any-retained-version|observation-event",
+            "--reported-start-ns I --reported-end-ns I",
+            "bgp changes STORE",
+            "bgp expectations STORE",
+            "--comparison-fields legacy-v1|per-field-v2",
+        ):
+            self.assertIn(selector, help_detail)
 
     def test_no_row_claims_full_qualification_before_all_gates_exist(self):
         qualified = [

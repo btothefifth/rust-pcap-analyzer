@@ -34,8 +34,8 @@ class ValidationFrontier(unittest.TestCase):
 
     def test_independent_python_populations_are_nonempty_and_reachable(self):
         vectors = sorted((ROOT / 'product/tests').glob('*vectors.py'))
-        self.assertEqual(len(vectors), 10)
-        self.assertEqual(sum(count_tests(path) for path in vectors), 68)
+        self.assertEqual(len(vectors), 11)
+        self.assertEqual(sum(count_tests(path) for path in vectors), 73)
         self.assertEqual(count_tests(ROOT / 'scripts/test_semantic_tools.py'), 15)
         self.assertEqual(count_tests(ROOT / 'tools/depth/test_opcua_crypto.py'), 3)
         rows = dict(frontier.portable_commands(sys.executable))

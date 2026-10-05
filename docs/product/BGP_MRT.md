@@ -94,3 +94,36 @@ Authored selectors are distinct from executed receipts in the current validation
 record. A future Phase 4 exit still requires a real
 capture/MRT semantic equivalence and non-collapse join through the accepted
 import/replay consumer. Phase 5 owns CLI import and persistence.
+
+
+A rejected or quarantined BGP4MP record retains a decoder-owned continuity
+cut for each affected exact source partition and generation, even before its
+first native route. A pending cut follows the same decoder session and
+generation when an unknown ASN/header scope is later enriched into another
+exact partition, retaining the original rejected record witness. Later route
+evidence in that generation remains unresolved;
+a valid explicit generation reset can retire the cut. Native reset forwarding
+requires an admitted native predecessor, while the shared candidate journal
+requires its own actual observation predecessor. Valid route-free messages and
+EORs do not create cuts, and unrelated opaque record types do not acquire
+BGP4MP-wide scope. The incremental visitor carries the same typed, provisional
+source contexts in `StreamEvent.continuity_cuts`; event JSON, original record
+and message ranges, and bytes retain their original evidence identities.
+
+
+Imported replay archives retain a typed `source_events` sequence alongside the
+original BGP4MP event references. Each source record has a container occurrence;
+checked normalized observations add rows bound to their actual retained
+observation index. Route-free OPEN, KEEPALIVE, EOR, generation boundaries,
+rejected containers, and scoped continuity cuts retain their original source
+ordinal and witness. Later metadata enrichment can carry an earlier cut in a
+new record while preserving that earlier cut's direction, identity, and range.
+Opaque event JSON is reference evidence; source classifications and import
+contexts are supplied by the verified replay producer.
+
+`GenerationBoundary` classifies the original source occurrence that caused a
+decoder boundary. Its context retains that occurrence's reported generation,
+including the previous generation on a NOTIFICATION. This metadata supplies
+evidence to consumers; it does not itself command a native reset. Native reset
+admission still requires the owning decoder transition and the actual matching
+native predecessor.

@@ -1652,7 +1652,7 @@ fn multi_store_association_preserves_partitions_clock_unknown_and_occurrences() 
         String::from_utf8_lossy(&result.stderr)
     );
     let out = fs::read_to_string(&a).unwrap();
-    assert!(out.contains("unknown_clock"));
+    assert_association_clock_report(&a, 11, 12, "incompatible", "incompatible_clock");
     assert!(out.contains("pcap-evidence.bgp.association.v2"));
     assert!(out.contains("pcap-evidence.association-input.v2"));
     assert!(out.contains("\"side\":\"route_evidence\""));
@@ -1715,6 +1715,97 @@ fn multi_store_association_preserves_partitions_clock_unknown_and_occurrences() 
     assert_eq!(store.query(&Query::default(), &l).unwrap(), base);
     l.output_bytes -= 1;
     assert!(store.query(&Query::default(), &l).is_err());
+}
+
+fn assert_association_clock_report(
+    path: &Path,
+    left_namespace: u8,
+    right_namespace: u8,
+    status: &str,
+    reason: &str,
+) {
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let checked = Command::new(python)
+        .args([
+            "-c",
+            r#"import json,sys
+with open(sys.argv[1], encoding='utf-8') as source:
+    report=json.load(source)['association_report']
+left,right,status,reason=sys.argv[2:]
+routes=report['route_evidence']
+internal=report['internal_evidence']
+assert len(routes)==len(internal)==2, report
+for entries,expected,is_route in ((routes,left,True),(internal,right,False)):
+    for entry in entries:
+        evidence=entry['evidence']
+        record=evidence['record'] if is_route else evidence
+        assert record['coverage']=='unknown', record
+        assert record['time']['observed_at_ns']=='100', record
+        clock=record['time']['clock']
+        assert clock['policy']=='source_label' and clock['clock_id']==expected, clock
+        assert clock['reported_uncertainty_ns'] is None, clock
+        assert clock['accuracy_verified'] is False, clock
+pairs=report['associations']
+assert len(pairs)==4, pairs
+for pair in pairs:
+    assert pair['status']==status, pair
+    assert reason in pair['reasons'] and 'insufficient_coverage' in pair['reasons'], pair
+    assert 'unknown_clock' not in pair['reasons'], pair
+    assert pair['time']['label_distance_ns']==(None if status=='incompatible' else '0'), pair
+    assert pair['time']['minimum_distance_ns'] is None, pair
+    assert pair['time']['maximum_distance_ns'] is None, pair
+    assert pair['time']['uncertainty_used'] is False, pair
+    if status=='unresolved':
+        assert 'incompatible_clock' not in pair['reasons'], pair
+"#,
+            text(path),
+            &format!("capture:{}", sha256::hex(&[left_namespace; 32])),
+            &format!("capture:{}", sha256::hex(&[right_namespace; 32])),
+            status,
+            reason,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[test]
+fn multi_store_association_same_capture_clock_keeps_unknown_uncertainty() {
+    let scratch = Scratch::new();
+    let left = scratch.path("left.journal");
+    let right = scratch.path("right.journal");
+    capture(&left, 11, [0, 0], [65001, 65001]);
+    capture(&right, 11, [0, 0], [65001, 65001]);
+    let output = scratch.path("same-clock.json");
+    let result = cli(&[
+        "bgp",
+        "associate",
+        text(&left),
+        "--with-store",
+        text(&right),
+        "--comparison-namespace",
+        "explicit-shared-analysis",
+        "--clock-policy",
+        "same-clock",
+        "--output",
+        text(&output),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_association_clock_report(&output, 11, 11, "unresolved", "unknown_uncertainty");
 }
 
 #[test]

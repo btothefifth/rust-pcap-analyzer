@@ -133,16 +133,17 @@ and advertised-ASN fields, AS zero and invalid base hold-time labels remain
 explicit ambiguous evidence. Different ASNs advertised by opposite directions
 are ordinary independent advertisements, not a conflict.
 
-A different OPEN observation in a previously populated direction no longer
-silently advances the generation or deletes the opposite side. Both observations
-remain retained and the context becomes ambiguous. Only the existing explicit
-reset or a scoped NOTIFICATION retires that generation. Re-presenting the exact
-same immutable OPEN witness does not append state. Identical wire content in a
-different captured record remains a separate observation; it is not assumed to
-be a retransmission epoch. Historical outputs are immutable snapshots, not promises
-that later contradictory evidence cannot change the current interpretation.
+A different accepted OPEN byte sequence in a previously populated direction does
+not advance the generation or delete the opposite side. Both observations remain
+retained and the context becomes ambiguous, even when their capability summaries
+match. Only the existing explicit reset or a scoped NOTIFICATION retires that
+generation. Re-presenting the exact same immutable OPEN witness does not append
+state. Identical complete OPEN bytes in a different captured record retain a
+separate source witness and the same grammar content identity; they do not infer a
+new epoch. Historical outputs are immutable snapshots, not promises that later
+contradictory evidence cannot change the current interpretation.
 
-When exactly one unambiguous OPEN is retained for each direction, both advertising
+When each direction retains one unambiguous complete OPEN content identity, both advertising
 four-octet-ASN support supply a four-byte **layout context**; otherwise a complete
 bilateral base advertisement supplies a two-byte layout context. The additive
 `capability_layout` also records bilateral multiprotocol families, directional

@@ -1,19 +1,24 @@
 # Incremental MRT and source-bound evidence contract
 
-Generation G2 begins at `f083765dccd59c7a71d91d3277feed243328ce3f`.
-Implementation and qualification are pending until their owning receipts are
-recorded. This contract extends the offline profile in
-[BGP completion](BGP_COMPLETION.md); it preserves existing MRT, BMP and captured
-store consumers.
-The [owning validation receipt](../../evidence/bgp-stream-validation.json)
-records the tested generation and finite outcomes. Generated root receipts are
-excluded from validation source identity; nested source modules such as
-`tools/evidence` remain included.
+This document defines the incremental MRT source-evidence surface in the
+[BGP completion contract](BGP_COMPLETION.md) and preserves the MRT, BMP, and
+captured-store contracts. The support matrix declares it as
+[BGP-S013](bgp-support-matrix.json). Optional per-field comparison has a native
+producer, CLI field, and Python conversion path. Its owning sources are
+`product/src/deep/bgp_evidence.rs`,
+`product/src/bin/pcap_depth_support/bgp_stream_commands.rs`, and
+`tools/research/bgp_compare.py`; owner tests are
+`product/tests/bgp_comparison_fields.rs` and
+`tools/tests/test_bgp_compare_fields.py`. The finite comparison owner runs
+returned 66 Python checks and one native bridge check. The planned root-owned receipt will record executed outcomes and exact source
+inventory; local, hosted, and
+qualification scopes remain separate. Per-field agreement is not full
+route-semantic equality.
 
 ## Controlling change contract
 
-CHANGE01 follows one ordinary path: regular MRT input -> bounded canonical
-record decoder -> sealed incremental raw-source store -> verified replay ->
+The incremental stream path follows one ordinary path: regular MRT input ->
+bounded canonical record decoder -> sealed incremental raw-source store -> verified replay ->
 ordered checkpoint evidence -> manifest/window export -> attributed external
 comparison. Every consequential consumer must retain original source identity,
 offsets, dispositions and uncertainty.
@@ -134,6 +139,61 @@ enter the core admission path.
 The exact source range must also match for a joined record/entry anchor. A
 framing disagreement about its extent prevents disposition and semantic fields
 from voting agreement or disagreement for that observation.
+
+### Optional per-field BGP comparison
+
+`--comparison-fields per-field-v2` on chronology/window export selects
+`pcap-evidence.bgp.evidence-row.v2` and
+`pcap-evidence.bgp.evidence-manifest.v2`. The default `legacy-v1` mode preserves
+the original v1 schemas and conservative semantic completeness rules. Both
+modes retain the source-neutral semantic identity profile v2.
+
+The v2 producer constructs `pcap-evidence.bgp.route-field-availability.v1`
+from validated native `Observation`/`RouteObservation` values. It binds each
+declaration to its sequence/source/store/record/entry reference, ordered route
+indexes, exact action, canonical prefix and explicit optional ADD-PATH ID.
+Its manifest declares the supported mode and availability schema; the exact
+row digest and manifest identity commit these declarations. These hashes
+establish carrier integrity, not collector or producer authentication.
+
+The converter requires the matching explicit mode:
+
+```sh
+pcap-depth bgp chronology imported/bgp.mrt-stream --workspace chronology \
+  --comparison-fields per-field-v2
+python3 -B -m tools.research.bgp_compare native chronology/evidence.ndjson \
+  chronology/manifest.json --comparison-fields per-field-v2
+```
+
+This conversion emits `pcap-evidence.bgp.interpretation.v2` under normalization
+`bgp-source-fields-v2`. Its exact `field_coverage.nlri` map names
+`route_actions` and `route_prefixes`. The differential uses
+`pcap-evidence.bgp.differential.v2`; it compares those fields using their
+explicit per-field coverage even when the legacy NLRI group is partial.
+A withdrawal or a route with incomplete unrelated attributes can therefore
+retain comparable action/prefix evidence. Missing attributes, unknown next-hop
+semantics, legacy route aggregates and semantic identities keep their existing
+uncertainty. Per-field action/prefix agreement establishes no full route
+semantic equality.
+
+A hidden or unresolved NLRI projection prevents complete aggregate
+route-action/prefix coverage. A validated family-header-only EOR can retain the
+producer's explicit complete empty projection. Unsupported prefix families
+remain incomplete. Exact keys, route cardinality/order, source references,
+action/prefix/path-ID consistency and projection completeness are checked
+before conversion, including rows outside an explicitly selected partition.
+Mixed v1/v2 mode, row, manifest, normalization or interpretation combinations
+reject. Legacy interpretation comparison remains unchanged.
+
+A saved normalized interpretation is attributed research data; it is not a
+replacement for the original NDJSON/source closure. Conversion verifies the
+complete original export commitments. Reloaded v2 native interpretations check
+the retained declaration/projection/manifest references, but do not replay
+omitted original NDJSON bytes. Coordinated replacement of an export and its
+self-generated commitments cannot establish source authenticity. Comparison
+uses no consensus, admits no canonical state, and establishes no endpoint
+negotiation, route installation, reachability, causality, or other operational
+conclusions.
 
 ## Finite acceptance and remaining qualification
 

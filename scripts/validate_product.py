@@ -30,6 +30,11 @@ except ImportError:
     from owned_process import run as run_owned
 
 
+# A cold thin-LTO build of the complete product test set needs a larger
+# bounded deadline than the small workspaces. Preserve every test and profile.
+PRODUCT_RELEASE_TIMEOUT_SECONDS = 1200
+
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -69,7 +74,7 @@ def main(argv=None):
         rows.append(dict(name=name,category=category,status='BLOCKED',reason=reason,command=command))
     def run(name,category,command,timeout=600,expected=0):
         started=time.monotonic();log=out/(name+'.log')
-        row=dict(name=name,category=category,command=command,expected_returncode=expected)
+        row=dict(name=name,category=category,command=command,expected_returncode=expected,timeout_seconds=timeout)
         try:
             with log.open('xb') as output:
                 result=run_owned(command,cwd=root,stdout=output,stderr=output,
@@ -106,7 +111,9 @@ def main(argv=None):
             cargo=shutil.which('cargo')
             for name,tail in native:
                 command=[cargo or 'cargo',*tail]
-                if cargo and (root/'Cargo.toml').is_file():run(name,'native_rust',command)
+                if cargo and (root/'Cargo.toml').is_file():
+                    timeout = PRODUCT_RELEASE_TIMEOUT_SECONDS if name in {'product-release-tests', 'product-build'} else 600
+                    run(name,'native_rust',command,timeout=timeout)
                 else:blocked(name,'native_rust','Cargo unavailable or source not integrated into the parent repo',command)
             cases=semantic_case_command(root,sys.executable,out)
             if any(r['name']=='root-build' and r['status']=='PASS' for r in rows):

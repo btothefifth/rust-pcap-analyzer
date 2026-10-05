@@ -363,7 +363,7 @@ pub struct SessionState {
     peer_relationship: PeerRelationship,
     peer_relationship_configured: bool,
 }
-/// A grammar hypothesis supported by one unambiguous OPEN from each direction.
+/// A grammar hypothesis supported by one unambiguous OPEN content per direction.
 /// It is not a claim that an endpoint accepted or used the capabilities.
 #[derive(Clone, Debug, Default)]
 pub(super) struct LayoutContext {
@@ -373,6 +373,8 @@ pub(super) struct LayoutContext {
     pub add_path: BTreeSet<(u8, u16, u8)>,
     pub unresolved_add_path: BTreeSet<(u8, u16, u8)>,
     pub mp: BTreeSet<(u16, u8)>,
+    /// An unsupported advertisement can change IPv6 next-hop layout.
+    pub unsupported_ipv6_next_hop_layout: bool,
     /// Directions whose opposite-side receiver advertised capability 6.
     pub extended_message_senders: BTreeSet<u8>,
     /// Convenience bilateral summary for existing output consumers.
@@ -383,6 +385,8 @@ pub(super) struct LayoutContext {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct OpenState {
+    /// Identity of the complete bounded OPEN bytes, independent of source evidence.
+    message_sha256: [u8; 32],
     pub(super) autonomous_system: u16,
     four_octet_asn: Option<u32>,
     capabilities: producer::CapabilitySet,
@@ -420,11 +424,20 @@ impl SessionState {
     /// Compatibility helper for the advertised width, NOT negotiated width.
     /// Production parsing uses producer::width_evidence instead.
     fn asn_width(&self, direction: u8) -> usize {
-        self.opens
-            .get(&direction)
-            .filter(|opens| opens.len() == 1)
-            .and_then(|opens| opens[0].four_octet_asn)
+        self.unambiguous_open(direction)
+            .and_then(|open| open.four_octet_asn)
             .map_or(2, |_| 4)
+    }
+
+    /// Distinct source witnesses may repeat identical accepted wire content.
+    /// Different complete OPEN bytes remain alternatives within this generation.
+    fn unambiguous_open(&self, direction: u8) -> Option<&OpenState> {
+        let opens = self.opens.get(&direction)?;
+        let first = opens.first()?;
+        opens
+            .iter()
+            .all(|open| !open.ambiguous && open.message_sha256 == first.message_sha256)
+            .then_some(first)
     }
 }
 
@@ -444,6 +457,7 @@ struct AttributeRange {
     end: usize,
     sha256: String,
     value_start: usize,
+    value_hex: Option<String>,
     value: Json,
     interpretation: &'static str,
     repetition: &'static str,
@@ -798,7 +812,7 @@ fn canonical_semantic_json(value: &Json) -> Json {
 }
 
 fn attribute_range_json(a: &AttributeRange) -> Json {
-    Json::object([
+    let Json::Object(mut fields) = Json::object([
         ("type", a.code.into()),
         ("flags", a.flags.into()),
         ("start", a.start.into()),
@@ -825,7 +839,13 @@ fn attribute_range_json(a: &AttributeRange) -> Json {
             a.peer_relationship_basis
                 .map_or(Json::Null, |basis| basis.into()),
         ),
-    ])
+    ]) else {
+        unreachable!()
+    };
+    if let Some(value) = &a.value_hex {
+        fields.push(("value_hex", value.clone().into()));
+    }
+    Json::Object(fields)
 }
 
 fn attributes_json(a: &PathAttributes) -> Json {
@@ -1684,15 +1704,14 @@ fn parse_attributes(
                     if length != 4 {
                         return Err(bad("bgp_next_hop", value_start, "NEXT_HOP must be IPv4"));
                     }
-                    item.next_hop = Some(
-                        Ipv4Addr::new(
-                            b[value_start],
-                            b[value_start + 1],
-                            b[value_start + 2],
-                            b[value_start + 3],
-                        )
-                        .to_string(),
+                    let address = Ipv4Addr::new(
+                        b[value_start],
+                        b[value_start + 1],
+                        b[value_start + 2],
+                        b[value_start + 3],
                     );
+                    validate_ipv4_next_hop(address, value_start)?;
+                    item.next_hop = Some(address.to_string());
                 }
                 4 => {
                     if length != 4 {
@@ -1798,8 +1817,11 @@ fn parse_attributes(
                         return Err(bad("bgp_mp_reach", value_start, "family header truncated"));
                     }
                     let family = (be16(b, value_start)?, b[value_start + 2]);
+                    let next_hop_layout_unresolved =
+                        family.0 == 2 && context.unsupported_ipv6_next_hop_layout;
                     if !matches!(family, (1 | 2, 1 | 2))
                         || !context.mp.contains(&family)
+                        || next_hop_layout_unresolved
                         || context
                             .unresolved_add_path
                             .contains(&(sender, family.0, family.1))
@@ -1810,7 +1832,9 @@ fn parse_attributes(
                             ("safi", family.1.into()),
                             ("sha256", digest.clone().into()),
                         ]));
-                        issues.push(if !context.mp.contains(&family) {
+                        issues.push(if next_hop_layout_unresolved {
+                            "mp_reach_next_hop_layout_unresolved"
+                        } else if !context.mp.contains(&family) {
                             "mp_reach_capability_unresolved"
                         } else {
                             "mp_reach_opaque_nlri"
@@ -2116,6 +2140,24 @@ fn parse_attributes(
         } else {
             Json::Null
         };
+        // Raw type-16 values are occurrence evidence, never interpreted policy.
+        // Admit aggregate retained hex and scan work before allocating a copy.
+        let value_hex = if code == 16 {
+            let retained = ranges
+                .iter()
+                .try_fold(0usize, |n, range: &AttributeRange| {
+                    n.checked_add(range.value_hex.as_ref().map_or(0, String::len))
+                })
+                .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?;
+            Some(retained_raw_value_hex(
+                &b[value_start..value_end],
+                retained,
+                limits,
+                budget,
+            )?)
+        } else {
+            None
+        };
         ranges.push(AttributeRange {
             code,
             flags,
@@ -2123,6 +2165,7 @@ fn parse_attributes(
             end: value_end,
             sha256: digest,
             value_start,
+            value_hex,
             value,
             interpretation,
             repetition,
@@ -2152,6 +2195,80 @@ fn parse_attributes(
         issues,
         malformed_attribute_envelope,
     ))
+}
+
+// Type-16 occurrence bytes remain uninterpreted. This owner admits the exact
+// hexadecimal allocation plus accumulated raw carriers before copying bytes.
+fn retained_raw_value_hex(
+    value: &[u8],
+    previous: usize,
+    limits: &Limits,
+    budget: &mut producer::Budget<'_>,
+) -> Result<String> {
+    let hex_bytes = value
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?;
+    let retained = previous
+        .checked_add(hex_bytes)
+        .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?;
+    if hex_bytes > limits.input_bytes || retained > limits.retained_bytes {
+        return Err(Error::limit("bgp_extended_community_raw"));
+    }
+    budget.charge(
+        retained
+            .checked_add(
+                hex_bytes
+                    .checked_mul(4)
+                    .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?,
+            )
+            .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?,
+    )?;
+    Ok(sha256::hex(value))
+}
+
+#[cfg(test)]
+mod raw_extended_admission_tests {
+    use super::*;
+    #[test]
+    fn raw_carrier_admits_exact_prospective_work_and_retention() {
+        let value = [0x80, 0x99, 0, 1, 2, 3, 4, 5];
+        let limits = Limits {
+            work: 80,
+            retained_bytes: 16,
+            ..Limits::default()
+        };
+        assert_eq!(
+            retained_raw_value_hex(&value, 0, &limits, &mut producer::Budget::new(&limits))
+                .unwrap(),
+            "8099000102030405"
+        );
+        for low in [
+            Limits { work: 79, ..limits },
+            Limits {
+                retained_bytes: 15,
+                ..limits
+            },
+            Limits {
+                input_bytes: 15,
+                ..limits
+            },
+        ] {
+            assert!(
+                retained_raw_value_hex(&value, 0, &low, &mut producer::Budget::new(&low)).is_err()
+            );
+        }
+        // Two retained values need 32 hexadecimal bytes; the second copy is
+        // refused against a 31-byte aggregate even though each value is small.
+        let low = Limits {
+            work: 1000,
+            retained_bytes: 31,
+            ..Limits::default()
+        };
+        assert!(
+            retained_raw_value_hex(&value, 16, &low, &mut producer::Budget::new(&low)).is_err()
+        );
+    }
 }
 
 // A truncated final attribute is not a complete AttributeRange. Retain its
@@ -2243,6 +2360,39 @@ pub(crate) fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<V
     Ok(out)
 }
 
+// RFC 4271 requires valid host-address syntax. These classes are invalid
+// without knowing the receiver's interfaces or subnet; those local semantic
+// checks cannot be inferred from offline evidence. RFC 7606 retains TAW for
+// ordinary NEXT_HOP syntax errors through the owning attribute disposition.
+fn validate_ipv4_next_hop(address: Ipv4Addr, offset: usize) -> Result<()> {
+    if address.is_unspecified() || address.is_multicast() || address.is_broadcast() {
+        return Err(bad(
+            "bgp_next_hop",
+            offset,
+            "invalid IPv4 next-hop host address",
+        ));
+    }
+    Ok(())
+}
+
+// The declared RFC 2545 layout starts with a non-link-local unicast
+// address, optionally followed by a link-local address. Do not use is_global:
+// that would reject address scopes RFC 2545 deliberately treats together.
+fn validate_ipv6_global_next_hop(address: Ipv6Addr, offset: usize) -> Result<()> {
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || address.is_unicast_link_local()
+    {
+        return Err(bad(
+            "bgp_mp_reach",
+            offset,
+            "invalid non-link-local IPv6 next hop",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_mp_reach(
     b: &[u8],
     start: usize,
@@ -2287,17 +2437,31 @@ fn parse_mp_reach(
         return Err(bad("bgp_mp_reach", start + 3, "invalid next-hop length"));
     }
     let next_hop = if afi == 1 && next_hop_len >= 4 {
-        Ipv4Addr::new(b[start + 4], b[start + 5], b[start + 6], b[start + 7]).to_string()
+        let address = Ipv4Addr::new(b[start + 4], b[start + 5], b[start + 6], b[start + 7]);
+        validate_ipv4_next_hop(address, start + 4)?;
+        address.to_string()
     } else if afi == 2 && next_hop_len == 16 {
         let mut octets = [0u8; 16];
         octets.copy_from_slice(&b[start + 4..start + 20]);
-        Ipv6Addr::from(octets).to_string()
+        let global = Ipv6Addr::from(octets);
+        validate_ipv6_global_next_hop(global, start + 4)?;
+        global.to_string()
     } else if afi == 2 && next_hop_len == 32 {
         let mut global = [0u8; 16];
         let mut link_local = [0u8; 16];
         global.copy_from_slice(&b[start + 4..start + 20]);
         link_local.copy_from_slice(&b[start + 20..start + 36]);
-        format!("{},{}", Ipv6Addr::from(global), Ipv6Addr::from(link_local))
+        let global = Ipv6Addr::from(global);
+        let link_local = Ipv6Addr::from(link_local);
+        validate_ipv6_global_next_hop(global, start + 4)?;
+        if !link_local.is_unicast_link_local() {
+            return Err(bad(
+                "bgp_mp_reach",
+                start + 20,
+                "second IPv6 next hop must be link-local",
+            ));
+        }
+        format!("{global},{link_local}")
     } else {
         payload_sha256(&b[start + 4..next_hop_end])
     };
@@ -2409,6 +2573,7 @@ mod tests {
             end: 3,
             sha256: "00".repeat(32),
             value_start: 2,
+            value_hex: None,
             value: Json::Null,
             interpretation: "decoded",
             repetition: "first",
@@ -2490,14 +2655,44 @@ mod tests {
     #[test]
     fn open_capability_selects_four_octet_asn_width_for_the_direction() {
         let mut b = vec![0xff; 16];
-        b.extend_from_slice(&[0, 37, 1, 4, 0xfd, 0xe8, 0, 90]);
+        // RFC 6793: non-mappable ASN65636 uses AS_TRANS23456 in My AS.
+        b.extend_from_slice(&[0, 37, 1, 4, 0x5b, 0xa0, 0, 90]);
         b.extend_from_slice(&[192, 0, 2, 2, 8, 2, 6, 65, 4, 0, 1, 0, 100]);
         let mut state = SessionState::default();
         let output = decode_pcap(&evidence(&b), meta(), &mut state, &Limits::default())
             .unwrap()
             .encode();
         assert_eq!(state.asn_width(0), 4);
+        let open = state.unambiguous_open(0).unwrap();
+        assert_eq!(open.autonomous_system, 23456);
+        assert_eq!(open.four_octet_asn, Some(65636));
+        assert!(!open.ambiguous);
+        assert!(!output.contains("open_asn_fields_inconsistent"));
         assert_eq!(state.generation, 0);
+        assert!(output.contains("\"four_octet_asn\":65636"));
+    }
+
+    #[test]
+    fn inconsistent_open_asn_fields_retain_advertisement_without_selecting_grammar() {
+        // Preserve the original adverse fixture as a bounded ambiguity control.
+        let mut b = vec![0xff; 16];
+        b.extend_from_slice(&[0, 37, 1, 4, 0xfd, 0xe8, 0, 90]);
+        b.extend_from_slice(&[192, 0, 2, 2, 8, 2, 6, 65, 4, 0, 1, 0, 100]);
+        let mut state = SessionState::default();
+        let output = decode_pcap(&evidence(&b), meta(), &mut state, &Limits::default())
+            .unwrap()
+            .encode();
+        let open = &state.opens[&0][0];
+        assert_eq!(open.autonomous_system, 65000);
+        assert_eq!(open.four_octet_asn, Some(65636));
+        assert_eq!(open.message_sha256, sha256::digest(&b));
+        assert!(open.ambiguous);
+        assert!(state.unambiguous_open(0).is_none());
+        let (layout, basis) = producer::layout_evidence(&state, true);
+        assert_eq!(layout.asn_width, 0);
+        assert_eq!(basis, "ambiguous_open_evidence");
+        assert_eq!(state.generation, 0);
+        assert!(output.contains("open_asn_fields_inconsistent"));
         assert!(output.contains("\"four_octet_asn\":65636"));
     }
 

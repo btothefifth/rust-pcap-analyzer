@@ -10,6 +10,7 @@ import argparse
 import copy
 import hashlib
 import io
+import ipaddress
 import json
 import re
 from pathlib import Path
@@ -17,6 +18,14 @@ from pathlib import Path
 from .contract import MAX_DOCUMENT, MAX_ROWS, InvalidResearch, canonical, decode_json, digest, read_json
 
 SCHEMA = "pcap-evidence.bgp.interpretation.v1"
+SCHEMA_V2 = "pcap-evidence.bgp.interpretation.v2"
+NORMALIZATION_V2 = "bgp-source-fields-v2"
+DIFFERENTIAL_SCHEMA_V2 = "pcap-evidence.bgp.differential.v2"
+NATIVE_ROW_V2 = "pcap-evidence.bgp.evidence-row.v2"
+NATIVE_MANIFEST_V2 = "pcap-evidence.bgp.evidence-manifest.v2"
+AVAILABILITY_SCHEMA = "pcap-evidence.bgp.route-field-availability.v1"
+COMPARISON_FIELDS = {"legacy-v1", "per-field-v2"}
+PER_FIELD_NAMES = ("route_actions", "route_prefixes")
 DIFFERENTIAL_SCHEMA = "pcap-evidence.bgp.differential.v1"
 NORMALIZATION = "bgp-source-fields-v1"
 GROUPS = ("disposition", "framing", "message", "attributes", "nlri", "raw_evidence", "validation")
@@ -76,7 +85,8 @@ def _ordered(value, keys, label):
 
 def _native_manifest_payload(manifest):
     """Reconstruct every ordered native DTO, including canonical sidecars."""
-    payload = {key: manifest[key] for key in MANIFEST_KEYS}
+    keys = MANIFEST_KEYS + (("comparison_fields", "field_availability_schema") if manifest.get("schema") == NATIVE_MANIFEST_V2 else ())
+    payload = {key: manifest[key] for key in keys}
     sequence = manifest["sequence"]
     payload["sequence"] = {key: sequence[key] for key in ("schema", "ordering", "independent_checkpoints", "entries", "sequence_digest")}
     payload["sequence"]["entries"] = [{**{key: entry[key] for key in ENTRY_KEYS}, "entry_digest": entry["entry_digest"]}
@@ -146,6 +156,155 @@ def _text(value, label, maximum=128):
     return value
 
 
+def fields_at(row, name):
+    return row["fields"].get("nlri", {}).get(name)
+
+
+def _native_sequence(sequence):
+    """One exact schema/order/hash owner for native sequence compatibility."""
+    _keys(sequence, ("schema", "entries", "sequence_digest", "ordering", "independent_checkpoints"), label="native sequence")
+    if sequence["ordering"] != "caller_file_order" or sequence["independent_checkpoints"] is not True:
+        raise InvalidResearch("native sequence ordering contract")
+    if sequence["schema"] != "pcap-evidence.bgp.source-sequence.v1":
+        raise InvalidResearch("unsupported native sequence schema")
+    _hash(sequence["sequence_digest"], "native sequence digest")
+    entries = sequence["entries"]
+    if type(entries) is not list or not 1 <= len(entries) <= 256:
+        raise InvalidResearch("native source count budget")
+    by_ordinal = {}
+    predecessor = _domain_hash("pcap-evidence/bgp-source-sequence/v1", b"genesis")
+    for entry in entries:
+        _keys(entry, ENTRY_KEYS + ("entry_digest",), label="native sequence entry")
+        ordinal = _uint(entry["ordinal"], "source ordinal")
+        if ordinal != len(by_ordinal):
+            raise InvalidResearch("native source ordinals must be contiguous")
+        for key in ("source_sha256", "final_chain", "store_seal", "predecessor_digest", "entry_digest"):
+            _hash(entry[key], key)
+        for key in ("source_id", "checkpoint_id"):
+            _text(entry[key], key, 1024)
+        source_bytes = _uint(entry["source_bytes"], "native source length")
+        record_count = _uint(entry["record_count"], "native source record count")
+        if not 0 < record_count <= source_bytes // 12:
+            raise InvalidResearch("native record count/source size contract")
+        if entry["predecessor_digest"] != predecessor:
+            raise InvalidResearch("native sequence predecessor mismatch")
+        expected = _domain_hash("pcap-evidence/bgp-source-sequence/v1", _compact({key: entry[key] for key in ENTRY_KEYS}))
+        if entry["entry_digest"] != expected:
+            raise InvalidResearch("native sequence entry digest mismatch")
+        predecessor = expected
+        by_ordinal[ordinal] = entry
+    if sequence["sequence_digest"] != predecessor:
+        raise InvalidResearch("native sequence terminal digest mismatch")
+    return entries, by_ordinal
+
+
+def _availability_manifest(manifest):
+    _keys(manifest, MANIFEST_KEYS + ("semantic_identity", "comparison_fields", "field_availability_schema"), label="per-field native manifest")
+    if (manifest["schema"] != NATIVE_MANIFEST_V2 or manifest["complete"] is not True
+            or manifest["comparison_fields"] != "per-field-v2"
+            or manifest["field_availability_schema"] != AVAILABILITY_SCHEMA):
+        raise InvalidResearch("unsupported native field availability manifest")
+    if (manifest["semantic_profile"] != NATIVE_PROFILE
+            or manifest["rows_digest_scope"] != "exact_ndjson_rows_including_newlines_excluding_manifest"
+            or any(manifest[key] is not False for key in ("source_authenticated", "endpoint_state_claimed", "resume_cursor_supported"))):
+        raise InvalidResearch("native availability manifest authority/profile mismatch")
+    entries, by_ordinal = _native_sequence(manifest["sequence"])
+    expected = _domain_hash("pcap-evidence/bgp-evidence-manifest/v2", _compact(_native_manifest_payload(manifest)))
+    if _hash(manifest["semantic_identity"], "native semantic identity") != expected:
+        raise InvalidResearch("native manifest semantic identity mismatch")
+    return entries, by_ordinal
+
+
+def _availability_prefix(value):
+    _keys(value, ("afi", "safi", "length", "address"), label="available prefix")
+    for name, cap in (("afi", 65536), ("safi", 256), ("length", 256)):
+        if type(value[name]) is not int or not 0 <= value[name] < cap:
+            raise InvalidResearch("invalid available prefix integer")
+    if type(value["address"]) is not str or len(value["address"]) > 128 or "%" in value["address"]:
+        raise InvalidResearch("invalid available prefix address")
+    if value["afi"] not in (1, 2):
+        return dict(value), False
+    try:
+        address = ipaddress.ip_address(value["address"])
+        if address.version != (4 if value["afi"] == 1 else 6):
+            raise ValueError("family mismatch")
+        network = ipaddress.ip_network((address, value["length"]), strict=True)
+    except ValueError as error:
+        raise InvalidResearch("noncanonical available prefix") from error
+    return {**value, "address": str(network.network_address)}, value["safi"] in (1, 2)
+
+
+def _availability(declaration, expected_ref, observation):
+    """Validate producer declaration closure; raw nested routes only corroborate it.
+
+    Exact export commitments are checked by from_native before this projection.
+    A self-consistent export does not authenticate its producer or source.
+    """
+    _keys(declaration, ("schema", "source_reference", "route_projection_complete", "status", "routes"), label="field availability")
+    if declaration["schema"] != AVAILABILITY_SCHEMA:
+        raise InvalidResearch("unsupported native field availability schema")
+    reference = declaration["source_reference"]
+    _keys(reference, ("sequence_ordinal", "source_sha256", "store_seal", "record_ordinal", "record_offset", "record_sha256", "entry_index"), label="availability source reference")
+    for key in ("sequence_ordinal", "record_ordinal", "record_offset"):
+        if type(reference[key]) is not str or reference[key] != str(_uint(reference[key], key)):
+            raise InvalidResearch("noncanonical availability reference")
+    for key in ("source_sha256", "store_seal", "record_sha256"):
+        _hash(reference[key], key)
+    if reference["entry_index"] is not None:
+        if type(reference["entry_index"]) is not str or reference["entry_index"] != str(_uint(reference["entry_index"], "entry index")):
+            raise InvalidResearch("noncanonical availability entry index")
+    if reference != expected_ref:
+        raise InvalidResearch("availability source reference mismatch")
+    status = declaration["status"]
+    if type(status) is not str or status not in ("complete", "incomplete", "unavailable"):
+        raise InvalidResearch("invalid field availability status")
+    projection = declaration["route_projection_complete"]
+    routes = declaration["routes"]
+    if type(projection) is not bool or type(routes) is not list or len(routes) > MAX_ROWS:
+        raise InvalidResearch("field availability route budget/type")
+    if status == "unavailable":
+        if projection or routes:
+            raise InvalidResearch("unavailable field declaration contains routes")
+        if type(observation) is dict and observation.get("routes"):
+            raise InvalidResearch("unavailable declaration drops route evidence")
+        return [], [], "not_collected"
+    if type(observation) is not dict or type(observation.get("routes")) is not list:
+        raise InvalidResearch("available declaration requires observation routes")
+    raw_routes = observation["routes"]
+    if len(routes) != len(raw_routes):
+        raise InvalidResearch("availability route cardinality mismatch")
+    detail = observation.get("message_detail")
+    if projection:
+        certain_projection = (type(detail) is dict and detail.get("route_projection_incomplete") is False
+            or detail is None and reference["entry_index"] is not None and observation.get("message_type") == 0)
+        if not certain_projection:
+            raise InvalidResearch("availability contradicts opaque route projection")
+    if status == "complete" and not projection:
+        raise InvalidResearch("complete fields require complete route projection")
+    actions, prefixes = [], []
+    for index, (route, raw_route) in enumerate(zip(routes, raw_routes)):
+        _keys(route, ("route_index", "action", "prefix", "path_id"), label="available route")
+        if route["route_index"] != str(index) or type(route["action"]) is not str or route["action"] not in ("announce", "withdraw"):
+            raise InvalidResearch("available route index/action mismatch")
+        if type(raw_route) is not dict or raw_route.get("action") != route["action"]:
+            raise InvalidResearch("availability action contradicts observation")
+        prefix, supported = _availability_prefix(route["prefix"])
+        raw_prefix, _ = _availability_prefix(raw_route.get("prefix"))
+        if prefix != raw_prefix or status == "complete" and not supported:
+            raise InvalidResearch("availability prefix contradicts observation/profile")
+        path_id = route["path_id"]
+        if path_id is not None and (type(path_id) is not int or not 0 <= path_id < 1 << 32):
+            raise InvalidResearch("invalid available path id")
+        raw_path_id = raw_route.get("path_id")
+        if raw_path_id is not None and (type(raw_path_id) is not int or not 0 <= raw_path_id < 1 << 32):
+            raise InvalidResearch("invalid raw observation path id")
+        if raw_path_id != path_id:
+            raise InvalidResearch("availability path id contradicts observation")
+        actions.append({"route_index": str(index), "action": route["action"]})
+        prefixes.append({"route_index": str(index), "prefix": prefix, "path_id": path_id})
+    return actions, prefixes, "complete" if status == "complete" else "partial"
+
+
 def validate(value):
     """Return a detached normalized document; integer anchors become decimals.
 
@@ -157,9 +316,18 @@ def validate(value):
         raise InvalidResearch("BGP interpretation byte budget")
     _keys(value, ("schema", "source", "normalization", "producer", "observations"),
           ("native_evidence", "native_partition", "native_coverage_verification"), "interpretation")
-    if value["schema"] != SCHEMA:
+    if value["schema"] not in (SCHEMA, SCHEMA_V2):
         raise InvalidResearch("unsupported BGP interpretation schema")
     out = copy.deepcopy(value)
+    if "native_evidence" in out:
+        native_manifest = out["native_evidence"]
+        expected_manifest_schema = NATIVE_MANIFEST_V2 if out["schema"] == SCHEMA_V2 else "pcap-evidence.bgp.evidence-manifest.v1"
+        if type(native_manifest) is not dict or native_manifest.get("schema") != expected_manifest_schema:
+            raise InvalidResearch("interpretation/native manifest schema mismatch")
+        if out["schema"] == SCHEMA_V2:
+            _availability_manifest(native_manifest)
+        else:
+            _keys(native_manifest, MANIFEST_KEYS + ("semantic_identity",), label="retained legacy native manifest")
     if "native_coverage_verification" in out:
         verification = out["native_coverage_verification"]
         manifest = out.get("native_evidence")
@@ -174,7 +342,8 @@ def validate(value):
     source["bytes"] = str(length)
     normalization = out["normalization"]
     _keys(normalization, ("profile", "config_sha256"), label="normalization")
-    if normalization["profile"] != NORMALIZATION:
+    v2 = out["schema"] == SCHEMA_V2
+    if normalization["profile"] != (NORMALIZATION_V2 if v2 else NORMALIZATION):
         raise InvalidResearch("unsupported BGP normalization profile")
     _hash(normalization["config_sha256"], "normalization config")
     producer = out["producer"]
@@ -216,7 +385,8 @@ def validate(value):
             raise InvalidResearch("native partition source/manifest mismatch")
     seen = set()
     for row in rows:
-        _keys(row, ("record_offset", "source_range", "disposition", "coverage", "fields"), ("entry_index", "evidence"), "observation")
+        required = ("record_offset", "source_range", "disposition", "coverage", "fields") + (("field_coverage",) if v2 else ())
+        _keys(row, required, ("entry_index", "evidence"), "observation")
         offset = _uint(row["record_offset"], "record offset")
         row["record_offset"] = str(offset)
         entry = row.get("entry_index")
@@ -255,8 +425,17 @@ def validate(value):
                 _keys(field, ("status", "value"), label="field")
                 if type(field["status"]) is not str or field["status"] not in FIELD_STATES:
                     raise InvalidResearch("invalid field uncertainty")
+        if v2:
+            _keys(row["field_coverage"], ("nlri",), label="per-field coverage")
+            availability = row["field_coverage"]["nlri"]
+            _keys(availability, PER_FIELD_NAMES, label="NLRI field coverage")
+            for name in PER_FIELD_NAMES:
+                if availability[name] not in ("complete", "partial", "not_collected"):
+                    raise InvalidResearch("invalid per-field coverage")
+                if name not in fields.get("nlri", {}):
+                    raise InvalidResearch("per-field coverage without its field")
         if "evidence" in row:
-            _keys(row["evidence"], ("record_sha256", "record_ordinal", "sequence_ordinal", "source_id", "checkpoint_id", "store_seal", "event", "observation"), label="native row evidence")
+            _keys(row["evidence"], ("record_sha256", "record_ordinal", "sequence_ordinal", "source_id", "checkpoint_id", "store_seal", "event", "observation") + (("field_availability",) if v2 else ()), label="native row evidence")
             evidence = row["evidence"]
             for key in ("record_sha256", "store_seal"):
                 _hash(evidence[key], key)
@@ -264,6 +443,37 @@ def validate(value):
                 evidence[key] = str(_uint(evidence[key], key))
             for key in ("source_id", "checkpoint_id"):
                 _text(evidence[key], key, 1024)
+    if v2 and producer["origin"] == "native_evidence":
+        manifest = out.get("native_evidence")
+        if type(manifest) is not dict:
+            raise InvalidResearch("native per-field manifest required")
+        for row in rows:
+            evidence = row.get("evidence")
+            if type(evidence) is not dict:
+                raise InvalidResearch("native per-field evidence required")
+            declaration = evidence["field_availability"]
+            expected_ref = {"source_sha256": source["sha256"], "record_offset": row["record_offset"],
+                **{key: evidence[key] for key in ("sequence_ordinal", "store_seal", "record_ordinal", "record_sha256")},
+                "entry_index": row.get("entry_index")}
+            entries = manifest["sequence"]["entries"]
+            ordinal = _uint(evidence["sequence_ordinal"], "availability source ordinal")
+            if ordinal >= len(entries):
+                raise InvalidResearch("availability source ordinal absent")
+            entry = entries[ordinal]
+            if (str(_uint(entry["ordinal"], "source ordinal")) != str(ordinal)
+                    or entry["source_sha256"] != source["sha256"]
+                    or _uint(entry["source_bytes"], "source bytes") != length
+                    or entry["store_seal"] != evidence["store_seal"]
+                    or entry["source_id"] != evidence["source_id"]
+                    or entry["checkpoint_id"] != evidence["checkpoint_id"]
+                    or _uint(evidence["record_ordinal"], "record ordinal") >= _uint(entry["record_count"], "record count")):
+                raise InvalidResearch("availability manifest source reference mismatch")
+            actions, prefixes, coverage = _availability(declaration, expected_ref, evidence["observation"])
+            for name, values in zip(PER_FIELD_NAMES, (actions, prefixes)):
+                status = "observed" if coverage == "complete" else "incomplete" if coverage == "partial" else "unknown"
+                if (row["field_coverage"]["nlri"][name] != coverage
+                        or fields_at(row, name) != _field(values, status)):
+                    raise InvalidResearch("native per-field projection contradicts declaration")
     if len(canonical(out)) > MAX_DOCUMENT:
         raise InvalidResearch("normalized BGP interpretation byte budget")
     return out
@@ -284,6 +494,9 @@ def compare(left, right, *, maximum=MAX_ROWS, output_limit=MAX_DOCUMENT):
     if type(output_limit) is not int or not 1 <= output_limit <= MAX_DOCUMENT:
         raise InvalidResearch("comparison output byte budget")
     left, right = validate(left), validate(right)
+    if left["schema"] != right["schema"]:
+        raise InvalidResearch("comparison interpretation schema mismatch")
+    v2 = left["schema"] == SCHEMA_V2
     if left["source"] != right["source"]:
         raise InvalidResearch("comparison source identity mismatch")
     if left["normalization"] != right["normalization"]:
@@ -341,7 +554,10 @@ def compare(left, right, *, maximum=MAX_ROWS, output_limit=MAX_DOCUMENT):
                 reason = None
                 if group not in GROUPS:
                     reason = "unknown_field_group"
-                elif not complete:
+                elif v2 and group == "nlri" and name in PER_FIELD_NAMES and not (
+                        l["field_coverage"]["nlri"][name] == r["field_coverage"]["nlri"][name] == "complete"):
+                    reason = "per_field_coverage_gap"
+                elif not complete and not (v2 and group == "nlri" and name in PER_FIELD_NAMES):
                     reason = "field_group_coverage_gap"
                 elif lv is None or rv is None:
                     reason = "field_not_normalized_by_both_adapters"
@@ -353,7 +569,7 @@ def compare(left, right, *, maximum=MAX_ROWS, output_limit=MAX_DOCUMENT):
                     same = canonical(lv["value"]) == canonical(rv["value"])
                     add(anchor, group, name, "agreement" if same else "disagreement",
                         "agreement_is_not_correctness" if same else "normalized_value_differs", lv, rv, l, r)
-    result = {"schema": DIFFERENTIAL_SCHEMA, "source": left["source"],
+    result = {"schema": DIFFERENTIAL_SCHEMA_V2 if v2 else DIFFERENTIAL_SCHEMA, "source": left["source"],
               "normalization": left["normalization"], "producers": [left["producer"], right["producer"]],
               "counts": counts, "rows": rows, "first_observed_disagreement": first,
               "consensus_used": False, "state_admission": False,
@@ -374,7 +590,7 @@ def _field(value, status=None):
     return {"status": status or ("unknown" if value is None else "observed"), "value": value}
 
 
-def _native_observation(row):
+def _native_observation(row, *, per_field=False):
     """Conservative projection; keep the original event/observation alongside it.
 
     The accepted tag means a decoded candidate interpretation, not reducer
@@ -440,12 +656,20 @@ def _native_observation(row):
             coverage["nlri"] = "complete" if complete else "partial"
             coverage["attributes"] = "complete" if attributes_complete else "partial"
         fields["validation"]["normalized_issues"] = _field(observation.get("issues"))
-    return {"record_offset": row["record_offset"], "entry_index": row.get("entry_index"),
+    projected = {"record_offset": row["record_offset"], "entry_index": row.get("entry_index"),
             "source_range": {"kind": "source_range", "start": row["record_offset"],
                              "end": str(_uint(row["record_offset"]) + _uint(row["record_bytes"]))},
             "disposition": disposition, "coverage": coverage, "fields": fields,
             "evidence": {key: row[key] for key in ("record_sha256", "record_ordinal", "sequence_ordinal",
                                                     "source_id", "checkpoint_id", "store_seal", "event", "observation")}}
+    if per_field:
+        expected_ref = {key: row.get(key) for key in ("sequence_ordinal", "source_sha256", "store_seal", "record_ordinal", "record_offset", "record_sha256", "entry_index")}
+        actions, prefixes, available = _availability(row["field_availability"], expected_ref, row["observation"])
+        status = "observed" if available == "complete" else "incomplete" if available == "partial" else "unknown"
+        fields.setdefault("nlri", {}).update({name: _field(values, status) for name, values in zip(PER_FIELD_NAMES, (actions, prefixes))})
+        projected["field_coverage"] = {"nlri": {name: available for name in PER_FIELD_NAMES}}
+        projected["evidence"]["field_availability"] = row["field_availability"]
+    return projected
 
 
 def _native_lines(stream):
@@ -463,15 +687,15 @@ def _native_lines(stream):
         yield part, decode_json(part)
 
 
-def from_native(raw, manifest=None, *, source_ordinal=None, row_start=None, row_count=None):
+def from_native(raw, manifest=None, *, source_ordinal=None, row_start=None, row_count=None, comparison_fields="legacy-v1"):
     """Convert bounded native bytes; file callers use the streaming entrypoint."""
     if type(raw) is not bytes or len(raw) > MAX_NATIVE_DOCUMENT:
         raise InvalidResearch("native evidence byte budget")
     return _from_native_stream(io.BytesIO(raw), manifest, source_ordinal=source_ordinal,
-                               row_start=row_start, row_count=row_count)
+                               row_start=row_start, row_count=row_count, comparison_fields=comparison_fields)
 
 
-def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start=None, row_count=None):
+def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start=None, row_count=None, comparison_fields="legacy-v1"):
     """Verify the entire seekable export before publishing a bounded partition.
 
     A first pass verifies exact NDJSON commitments and the terminal manifest.
@@ -479,6 +703,10 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     source-local rows. Each pass has its own digest, so changed backing bytes
     cannot pass through a previously checked commitment.
     """
+    if comparison_fields not in COMPARISON_FIELDS:
+        raise InvalidResearch("unsupported comparison fields mode")
+    per_field = comparison_fields == "per-field-v2"
+    manifest_schema = NATIVE_MANIFEST_V2 if per_field else "pcap-evidence.bgp.evidence-manifest.v1"
     narrowed = row_start is not None or row_count is not None
     if narrowed:
         row_start = 0 if row_start is None else _uint(row_start, "partition row start")
@@ -489,7 +717,7 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     rows_count, rows_bytes, row_hash = 0, 0, hashlib.sha256()
     terminal = None
     for part, value in _native_lines(stream):
-        if type(value) is dict and value.get("schema") == "pcap-evidence.bgp.evidence-manifest.v1":
+        if type(value) is dict and value.get("schema") in ("pcap-evidence.bgp.evidence-manifest.v1", NATIVE_MANIFEST_V2):
             if terminal is not None:
                 raise InvalidResearch("multiple native manifests")
             terminal = value
@@ -505,10 +733,10 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
         manifest = terminal
     elif terminal is not None and canonical(manifest) != canonical(terminal):
         raise InvalidResearch("sidecar/terminal manifest mismatch")
-    _keys(manifest, MANIFEST_KEYS + ("semantic_identity",), label="native manifest")
+    _keys(manifest, MANIFEST_KEYS + ("semantic_identity",) + (("comparison_fields", "field_availability_schema") if per_field else ()), label="native manifest")
     if terminal is None and rows_bytes + len(_compact(manifest)) + 1 > MAX_NATIVE_DOCUMENT:
         raise InvalidResearch("native evidence byte budget including manifest")
-    if manifest["schema"] != "pcap-evidence.bgp.evidence-manifest.v1" or manifest["complete"] is not True:
+    if manifest["schema"] != manifest_schema or manifest["complete"] is not True:
         raise InvalidResearch("incomplete native evidence manifest")
     for flag in ("endpoint_state_claimed", "source_authenticated", "resume_cursor_supported"):
         if manifest[flag] is not False:
@@ -523,44 +751,14 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     if (_uint(manifest["rows"]) != rows_count or _uint(manifest["rows_bytes"]) != rows_bytes
             or _hash(manifest["rows_sha256"], "native rows hash") != row_hash.hexdigest()):
         raise InvalidResearch("native row count/bytes/digest mismatch")
-    sequence = manifest["sequence"]
-    _keys(sequence, ("schema", "entries", "sequence_digest", "ordering", "independent_checkpoints"), label="native sequence")
-    if sequence["ordering"] != "caller_file_order" or sequence["independent_checkpoints"] is not True:
-        raise InvalidResearch("native sequence ordering contract")
-    if sequence["schema"] != "pcap-evidence.bgp.source-sequence.v1":
-        raise InvalidResearch("unsupported native sequence schema")
-    _hash(sequence["sequence_digest"], "native sequence digest")
-    entries = sequence["entries"]
-    if type(entries) is not list or not 1 <= len(entries) <= 256:
-        raise InvalidResearch("native source count budget")
-    by_ordinal = {}
-    predecessor = _domain_hash("pcap-evidence/bgp-source-sequence/v1", b"genesis")
-    for entry in entries:
-        _keys(entry, ENTRY_KEYS + ("entry_digest",), label="native sequence entry")
-        ordinal = _uint(entry["ordinal"], "source ordinal")
-        if ordinal != len(by_ordinal):
-            raise InvalidResearch("native source ordinals must be contiguous")
-        for key in ("source_sha256", "final_chain", "store_seal", "predecessor_digest", "entry_digest"):
-            _hash(entry[key], key)
-        for key in ("source_id", "checkpoint_id"):
-            _text(entry[key], key, 1024)
-        source_bytes = _uint(entry["source_bytes"], "native source length")
-        record_count = _uint(entry["record_count"], "native source record count")
-        if not 0 < record_count <= source_bytes // 12:
-            raise InvalidResearch("native record count/source size contract")
-        if entry["predecessor_digest"] != predecessor:
-            raise InvalidResearch("native sequence predecessor mismatch")
-        expected = _domain_hash("pcap-evidence/bgp-source-sequence/v1", _compact({key: entry[key] for key in ENTRY_KEYS}))
-        if entry["entry_digest"] != expected:
-            raise InvalidResearch("native sequence entry digest mismatch")
-        predecessor = expected
-        by_ordinal[ordinal] = entry
-    if sequence["sequence_digest"] != predecessor:
-        raise InvalidResearch("native sequence terminal digest mismatch")
-    payload = _native_manifest_payload(manifest)
-    expected = _domain_hash("pcap-evidence/bgp-evidence-manifest/v1", _compact(payload))
-    if manifest["semantic_identity"] != expected:
-        raise InvalidResearch("native manifest semantic identity mismatch")
+    if per_field:
+        entries, by_ordinal = _availability_manifest(manifest)
+    else:
+        entries, by_ordinal = _native_sequence(manifest["sequence"])
+        payload = _native_manifest_payload(manifest)
+        expected = _domain_hash("pcap-evidence/bgp-evidence-manifest/v1", _compact(payload))
+        if manifest["semantic_identity"] != expected:
+            raise InvalidResearch("native manifest semantic identity mismatch")
     coverage_keys = _coverage_keys(manifest["coverage"])
     quarantine_available = "quarantined" in coverage_keys
     for key in coverage_keys:
@@ -590,7 +788,7 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     replay_terminal = False
     stream.seek(0)
     for part, row in _native_lines(stream):
-        if type(row) is dict and row.get("schema") == "pcap-evidence.bgp.evidence-manifest.v1":
+        if type(row) is dict and row.get("schema") in ("pcap-evidence.bgp.evidence-manifest.v1", NATIVE_MANIFEST_V2):
             if replay_terminal or terminal is None or canonical(row) != canonical(terminal):
                 raise InvalidResearch("native manifest changed between verification passes")
             replay_terminal = True
@@ -600,8 +798,8 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
         replay_hash.update(part)
         replay_bytes += len(part)
         replay_count += 1
-        _keys(row, row_required, ("entry_index",), "native evidence row")
-        if row["schema"] != "pcap-evidence.bgp.evidence-row.v1" or row["provisional"] is not True:
+        _keys(row, row_required + (("field_availability",) if per_field else ()), ("entry_index",), "native evidence row")
+        if row["schema"] != (NATIVE_ROW_V2 if per_field else "pcap-evidence.bgp.evidence-row.v1") or row["provisional"] is not True:
             raise InvalidResearch("invalid native evidence row schema")
         ordinal = _uint(row["sequence_ordinal"], "native source ordinal")
         entry = by_ordinal.get(ordinal)
@@ -702,11 +900,14 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
                 if witnesses[witness_count] != expected_witness:
                     raise InvalidResearch("native coverage witness contradicts row evidence")
             witness_count += 1
+        if per_field:
+            reference = {key: row.get(key) for key in ("sequence_ordinal", "source_sha256", "store_seal", "record_ordinal", "record_offset", "record_sha256", "entry_index")}
+            _availability(row["field_availability"], reference, row["observation"])
         if ordinal == source_ordinal:
             retain = source_rows >= row_start and (row_count is None or source_rows < row_start + row_count)
             source_rows += 1
             if retain:
-                projected = _native_observation(row)
+                projected = _native_observation(row, per_field=per_field)
                 retained_bytes += len(canonical(projected)) + 1
                 if len(observations) >= MAX_ROWS or retained_bytes > MAX_DOCUMENT:
                     raise InvalidResearch("native interpretation output budget exceeded; use explicit row partition")
@@ -727,9 +928,9 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     if narrowed and (row_start >= source_rows or row_start + row_count > source_rows):
         raise InvalidResearch("native partition outside selected source rows")
     config = {"semantic_profile": manifest["semantic_profile"], "replay_relationship": manifest["replay_relationship"]}
-    result = {"schema": SCHEMA, "source": {"sha256": selected["source_sha256"], "bytes": selected["source_bytes"]},
-                     "normalization": {"profile": NORMALIZATION, "config_sha256": digest(canonical(config))},
-                     "producer": {"id": "pcap-evidence-native", "version": "evidence-row.v1", "adapter_version": "3",
+    result = {"schema": SCHEMA_V2 if per_field else SCHEMA, "source": {"sha256": selected["source_sha256"], "bytes": selected["source_bytes"]},
+                     "normalization": {"profile": NORMALIZATION_V2 if per_field else NORMALIZATION, "config_sha256": digest(canonical(config))},
+                     "producer": {"id": "pcap-evidence-native", "version": "evidence-row.v2" if per_field else "evidence-row.v1", "adapter_version": "4" if per_field else "3",
                                   "origin": "native_evidence", "command": []},
                      "observations": observations, "native_evidence": manifest,
                      "native_coverage_verification": "complete" if quarantine_available else "legacy_quarantine_unavailable"}
@@ -740,11 +941,11 @@ def _from_native_stream(stream, manifest=None, *, source_ordinal=None, row_start
     return validate(result)
 
 
-def convert_native_file(rows_path, manifest_path=None, *, source_ordinal=None, row_start=None, row_count=None):
+def convert_native_file(rows_path, manifest_path=None, *, source_ordinal=None, row_start=None, row_count=None, comparison_fields="legacy-v1"):
     manifest = None if manifest_path is None else read_json(manifest_path)
     with Path(rows_path).open("rb") as stream:
         return _from_native_stream(stream, manifest, source_ordinal=source_ordinal,
-                                   row_start=row_start, row_count=row_count)
+                                   row_start=row_start, row_count=row_count, comparison_fields=comparison_fields)
 
 
 def main(argv=None):
@@ -754,6 +955,7 @@ def main(argv=None):
     native.add_argument("rows", type=Path)
     native.add_argument("manifest", type=Path, nargs="?")
     native.add_argument("--source-ordinal", type=int)
+    native.add_argument("--comparison-fields", choices=sorted(COMPARISON_FIELDS), default="legacy-v1")
     native.add_argument("--row-start", type=int, help="source-local zero-based row start; requires --row-count")
     native.add_argument("--row-count", type=int, help="explicit bounded partition size (1..10000)")
     compare_parser = commands.add_parser("compare", help="compare attributed interpretations")
@@ -764,7 +966,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "native":
         result = convert_native_file(args.rows, args.manifest, source_ordinal=args.source_ordinal,
-                                     row_start=args.row_start, row_count=args.row_count)
+                                     row_start=args.row_start, row_count=args.row_count, comparison_fields=args.comparison_fields)
     else:
         result = compare(read_interpretation(args.left), read_interpretation(args.right),
                          maximum=args.max_rows, output_limit=args.output_bytes)

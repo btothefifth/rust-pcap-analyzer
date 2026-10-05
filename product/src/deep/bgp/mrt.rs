@@ -4,16 +4,22 @@
 //! OPEN and UPDATE parsers as packet-derived evidence and never manufactures
 //! packet IDs or captured-evidence carriers.
 use super::super::bgp_import::{
-    ClockPolicy, ImportContext, ObservationClock, SourceBatch, SourceRange,
+    ClockPolicy, ImportContext, ImportContinuityCut, ImportPartition, ImportedSourceEventKind,
+    ObservationClock, SourceBatch, SourceRange,
 };
 use super::super::bgp_mrt::{Bgp4mp, Bgp4mpPayload, MrtBatch, MrtBody, MrtRecord};
 use super::*;
 use pcap_evidence::{json::Json, Error, ErrorCode, Result};
+use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(crate) struct ReplayState {
     sessions: Vec<ImportedSession>,
     peer_relationship: Option<PeerRelationship>,
+    // Exact source scopes observed by the decoder, independent of route admission.
+    continuity_contexts: BTreeMap<(String, ImportPartition), (ImportContext, usize)>,
+    pending_cuts: BTreeMap<(String, Option<u8>), PendingContinuityCut>,
+    continuity_retained: usize,
 }
 
 impl ReplayState {
@@ -24,6 +30,9 @@ impl ReplayState {
             .sessions
             .capacity()
             .checked_mul(std::mem::size_of::<ImportedSession>())
+            .ok_or_else(|| Error::limit("bgp_mrt_sessions_retained"))?;
+        bytes = bytes
+            .checked_add(self.continuity_retained)
             .ok_or_else(|| Error::limit("bgp_mrt_sessions_retained"))?;
         for session in &self.sessions {
             let identity = &session.identity;
@@ -60,7 +69,554 @@ impl ReplayState {
         Self {
             sessions: Vec::new(),
             peer_relationship,
+            continuity_contexts: BTreeMap::new(),
+            pending_cuts: BTreeMap::new(),
+            continuity_retained: 0,
         }
+    }
+
+    /// Carry negative continuity across later exact header enrichment, while
+    /// retaining the original source witness and the decoder's real generation.
+    pub(crate) fn continuity_cuts(
+        &mut self,
+        batch: &MrtBatch,
+        record_index: usize,
+        record: &MrtRecord,
+        event: &Json,
+        opaque_gap: Option<&ImportContinuityCut>,
+        limits: &Limits,
+    ) -> Result<(Vec<ImportContinuityCut>, usize)> {
+        self.retained_bytes(limits)?;
+        // Retention walks JSON nodes and reads string/capacity lengths; it does
+        // not scan or serialize every retained OPEN byte on every record.
+        let mut work = self
+            .retention_scan_work()?
+            .checked_mul(2)
+            .filter(|n| *n <= limits.work)
+            .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+        let session = event_text(event, "session");
+        let generation = event_number(event, "generation");
+        let mut discovered = None;
+        if let (Some(session), Some(generation)) = (session, generation) {
+            let recovered;
+            let outer = match &record.body {
+                MrtBody::Bgp4mp(outer) => Some(outer),
+                MrtBody::Opaque {
+                    reason: "malformed_bgp4mp_record",
+                    ..
+                } => {
+                    recovered = super::super::bgp_mrt::malformed_bgp4mp_scope(record)?;
+                    recovered.as_ref()
+                }
+                _ => None,
+            };
+            if let (Some(outer), Some(index)) = (
+                outer,
+                self.sessions.iter().position(|known| known.id == session),
+            ) {
+                let next = self.sessions[index].decoder.generation();
+                let mut context = import_context(
+                    RecordContext::new(batch, record_index, record, outer).event(
+                        session,
+                        Some(u8::from(outer.locally_generated)),
+                        generation,
+                    ),
+                    record_source_range(record)?,
+                    limits,
+                )?;
+                context.generation = next;
+                context.direction = None;
+                let key = (context.session.clone(), context.partition());
+                let old_bytes = self.continuity_contexts.get(&key).map_or(0, |(_, n)| *n);
+                if old_bytes == 0 && self.continuity_contexts.len() >= limits.elements {
+                    return Err(Error::limit("bgp_mrt_continuity_contexts"));
+                }
+                let bytes = super::super::bgp_mrt_stream_store::json_memory(&context.json())
+                    .checked_add(super::super::bgp_mrt_stream_store::json_memory(
+                        &context.partition().json(),
+                    ))
+                    .and_then(|n| n.checked_add(context.session.len()))
+                    .ok_or_else(|| Error::limit("bgp_mrt_continuity_retained"))?;
+                self.admit_continuity_retained(old_bytes, bytes, limits, &mut work)?;
+                charge_cut_work(&mut work, bytes, limits)?;
+                if old_bytes == 0 {
+                    discovered = Some(key.clone());
+                }
+                self.continuity_retained = self.continuity_retained - old_bytes + bytes;
+                self.continuity_contexts.insert(key, (context, bytes));
+                // Only an actual generation advance retires pending negative
+                // evidence. ASN/interface enrichment is not a fresh generation.
+                if self.sessions[index]
+                    .continuity_generation
+                    .is_some_and(|old| old != next)
+                {
+                    for ((known, _), (context, _)) in &mut self.continuity_contexts {
+                        charge_cut_work(&mut work, known.len() + 1, limits)?;
+                        if known == session {
+                            context.generation = next;
+                        }
+                    }
+                    for direction in [None, Some(0), Some(1)] {
+                        if let Some(old) =
+                            self.pending_cuts.remove(&(session.to_owned(), direction))
+                        {
+                            self.continuity_retained -= old.retained_bytes(session);
+                        }
+                    }
+                }
+                self.sessions[index].continuity_generation = Some(next);
+            }
+        }
+        let status = event_text(event, "parse_status").unwrap_or("");
+        let rejected = status != "quarantined_session_reset"
+            && (status == "rejected" || status.starts_with("quarantined"));
+        let affected = if rejected
+            && matches!(
+                status,
+                "quarantined_ambiguous_session" | "quarantined_coverage_unknown"
+            ) {
+            match event_value(event, "detail")
+                .and_then(|detail| event_value(detail, "affected_scopes"))
+            {
+                Some(Json::Array(scopes)) if scopes.len() <= limits.elements => Some(scopes),
+                _ => {
+                    return Err(bad(
+                        "bgp_mrt_gap_scope",
+                        record_index,
+                        "affected scopes invalid",
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        let original = PendingContinuityCut {
+            generation: generation.unwrap_or(0),
+            direction: None,
+            record_id: format!("mrt-bgp4mp-quarantine:{record_index}:{}", record.sha256),
+            reason: format!("source_message_{status}"),
+            provenance: record_source_range(record)?,
+        };
+        let opaque_original = if let Some(gap) = opaque_gap {
+            let provenance = gap.context.provenance.first().ok_or_else(|| {
+                bad(
+                    "bgp_mrt_gap_scope",
+                    record_index,
+                    "opaque gap witness absent",
+                )
+            })?;
+            let bytes = gap
+                .record_id
+                .len()
+                .checked_add(gap.reason.len())
+                .and_then(|n| n.checked_add(provenance.sha256.as_ref().map_or(0, String::len)))
+                .and_then(|n| n.checked_add(std::mem::size_of::<PendingContinuityCut>()))
+                .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?;
+            self.admit_continuity_retained(0, bytes, limits, &mut work)?;
+            charge_cut_work(&mut work, bytes, limits)?;
+            Some(PendingContinuityCut {
+                generation: gap.context.generation,
+                direction: gap.context.direction,
+                record_id: gap.record_id.clone(),
+                reason: gap.reason.clone(),
+                provenance: provenance.clone(),
+            })
+        } else {
+            None
+        };
+        let mut cuts = Vec::new();
+        let mut cut_bytes = 0usize;
+        let mut pending = Vec::new();
+        let mut pending_bytes = 0usize;
+        for (key @ (known, _), (context, bytes)) in &self.continuity_contexts {
+            charge_cut_work(&mut work, known.len() + 1, limits)?;
+            let selected = rejected
+                && if let Some(scopes) = affected {
+                    charge_cut_work(&mut work, scopes.len(), limits)?;
+                    scopes.iter().any(|scope| {
+                        event_text(scope, "session") == Some(known.as_str())
+                            && event_number(scope, "generation") == Some(context.generation)
+                    })
+                } else {
+                    session == Some(known.as_str()) && generation == Some(context.generation)
+                };
+            let inherit_scope = discovered.as_ref() == Some(key) && !self.pending_cuts.is_empty();
+            if inherit_scope {
+                // Only three directions can be admitted. Account the temporary
+                // lookup key and each probe/copy before cloning session bytes.
+                let key_bytes = known
+                    .len()
+                    .checked_add(std::mem::size_of::<(String, Option<u8>)>())
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?;
+                self.admit_continuity_retained(
+                    0,
+                    cut_bytes
+                        .checked_add(pending_bytes)
+                        .and_then(|n| n.checked_add(key_bytes))
+                        .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?,
+                    limits,
+                    &mut work,
+                )?;
+                let probe_bytes = known
+                    .len()
+                    .checked_add(1)
+                    .and_then(|n| n.checked_mul(3))
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+                charge_cut_work(&mut work, probe_bytes, limits)?;
+            }
+            let inherited = [None, Some(0), Some(1)]
+                .into_iter()
+                .filter_map(|direction| {
+                    if !inherit_scope {
+                        return None;
+                    }
+                    self.pending_cuts
+                        .get(&(known.clone(), direction))
+                        .filter(|cut| cut.generation == context.generation)
+                });
+            // The observation owns the original partition's initial Gap.
+            // Every other already known metadata partition must receive the
+            // same cut now, including partitions seen only by route-free rows.
+            let opaque_selected = opaque_gap.is_some_and(|gap| {
+                context.session == gap.context.session
+                    && context.generation == gap.context.generation
+                    && context.partition() != gap.context.partition()
+            });
+            for origin in selected
+                .then_some(&original)
+                .into_iter()
+                .chain(inherited)
+                .chain(
+                    opaque_selected
+                        .then_some(opaque_original.as_ref())
+                        .flatten(),
+                )
+            {
+                let new_bytes = bytes
+                    .checked_add(origin.record_id.len())
+                    .and_then(|n| n.checked_add(origin.reason.len()))
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?;
+                cut_bytes = cut_bytes
+                    .checked_add(new_bytes)
+                    .filter(|n| *n <= limits.retained_bytes)
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?;
+                self.admit_continuity_retained(
+                    0,
+                    cut_bytes
+                        .checked_add(pending_bytes)
+                        .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?,
+                    limits,
+                    &mut work,
+                )?;
+                if cuts.len() >= limits.elements {
+                    return Err(Error::limit("bgp_mrt_gap_scope"));
+                }
+                charge_cut_work(&mut work, new_bytes, limits)?;
+                let mut cut = context.clone();
+                cut.direction = origin.direction;
+                cut.provenance = vec![origin.provenance.clone()];
+                cuts.try_reserve(1)
+                    .map_err(|_| Error::limit("bgp_mrt_gap_scope"))?;
+                cuts.push(ImportContinuityCut {
+                    context: cut,
+                    record_id: origin.record_id.clone(),
+                    reason: origin.reason.clone(),
+                });
+            }
+            let pending_key = (known.clone(), None);
+            if selected
+                && !self.pending_cuts.contains_key(&pending_key)
+                && !pending.iter().any(|(key, _)| key == &pending_key)
+            {
+                let mut origin = original.clone();
+                origin.generation = context.generation;
+                pending_bytes = pending_bytes
+                    .checked_add(origin.retained_bytes(known))
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?;
+                self.admit_continuity_retained(
+                    0,
+                    pending_bytes
+                        .checked_add(cut_bytes)
+                        .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?,
+                    limits,
+                    &mut work,
+                )?;
+                pending
+                    .try_reserve(1)
+                    .map_err(|_| Error::limit("bgp_mrt_gap_scope"))?;
+                pending.push((pending_key, origin));
+            }
+        }
+        // The checked normalized observation remains the initial Gap owner.
+        // Retain its exact directional cut only for later exact partitions.
+        if let Some(gap) = opaque_gap {
+            let context = &gap.context;
+            let key = (context.session.clone(), context.direction);
+            if !self.pending_cuts.contains_key(&key) {
+                let provenance = context.provenance.first().ok_or_else(|| {
+                    bad(
+                        "bgp_mrt_gap_scope",
+                        record_index,
+                        "opaque gap witness absent",
+                    )
+                })?;
+                let bytes = context.session.len()
+                    + gap.record_id.len()
+                    + gap.reason.len()
+                    + provenance.sha256.as_ref().map_or(0, String::len)
+                    + std::mem::size_of::<PendingContinuityCut>();
+                pending_bytes = pending_bytes
+                    .checked_add(bytes)
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?;
+                self.admit_continuity_retained(
+                    0,
+                    pending_bytes
+                        .checked_add(cut_bytes)
+                        .ok_or_else(|| Error::limit("bgp_mrt_gap_retained"))?,
+                    limits,
+                    &mut work,
+                )?;
+                pending
+                    .try_reserve(1)
+                    .map_err(|_| Error::limit("bgp_mrt_gap_scope"))?;
+                pending.push((
+                    key,
+                    PendingContinuityCut {
+                        generation: context.generation,
+                        direction: context.direction,
+                        record_id: gap.record_id.clone(),
+                        reason: gap.reason.clone(),
+                        provenance: provenance.clone(),
+                    },
+                ));
+            }
+        }
+        for (session, origin) in pending {
+            let bytes = origin.retained_bytes(&session.0);
+            if self.pending_cuts.len() >= limits.elements {
+                return Err(Error::limit("bgp_mrt_gap_scope"));
+            }
+            self.admit_continuity_retained(0, bytes + cut_bytes, limits, &mut work)?;
+            charge_cut_work(&mut work, bytes, limits)?;
+            self.continuity_retained += bytes;
+            self.pending_cuts.insert(session, origin);
+        }
+        Ok((cuts, work))
+    }
+
+    /// Project only an event just produced by this decoder, using its admitted
+    /// session identity and the parsed outer record. No external event JSON is
+    /// accepted by this internal replay seam.
+    pub(crate) fn source_context(
+        &self,
+        batch: &MrtBatch,
+        record_index: usize,
+        record: &MrtRecord,
+        event: &Json,
+        limits: &Limits,
+    ) -> Result<Option<ImportContext>> {
+        let (Some(session), Some(generation)) = (
+            event_text(event, "session"),
+            event_number(event, "generation"),
+        ) else {
+            return Ok(None);
+        };
+        if matches!(
+            event_text(event, "parse_status"),
+            Some("quarantined_ambiguous_session" | "quarantined_coverage_unknown")
+        ) {
+            return Ok(None);
+        }
+        let recovered;
+        let outer = match &record.body {
+            MrtBody::Bgp4mp(outer) => Some(outer),
+            MrtBody::Opaque {
+                reason: "malformed_bgp4mp_record",
+                ..
+            } => {
+                recovered = super::super::bgp_mrt::malformed_bgp4mp_scope(record)?;
+                recovered.as_ref()
+            }
+            _ => None,
+        };
+        let Some(outer) = outer else {
+            return Ok(None);
+        };
+        let direction = event_number(event, "direction").and_then(|n| u8::try_from(n).ok());
+        let mut context = import_context(
+            RecordContext::new(batch, record_index, record, outer).event(
+                session,
+                Some(u8::from(outer.locally_generated)),
+                generation,
+            ),
+            record_source_range(record)?,
+            limits,
+        )?;
+        context.direction = direction;
+        context.validate(limits)?;
+        Ok(Some(context))
+    }
+
+    pub(crate) fn source_event_kind(
+        &self,
+        record: &MrtRecord,
+        event: &Json,
+        boundary: bool,
+        selected: bool,
+    ) -> ImportedSourceEventKind {
+        use ImportedSourceEventKind as Kind;
+        let state_advanced = selected
+            && matches!(&record.body, MrtBody::Bgp4mp(outer)
+            if matches!(&outer.payload, Bgp4mpPayload::State { old, new }
+                if *new == 1 || (*old == 4 && *new == 3)
+                    || matches!(event_text(event, "parse_status"), Some("rejected" | "quarantined"))));
+        if boundary
+            || state_advanced
+            || matches!(
+                event_text(event, "parse_status"),
+                Some("decoded_notification_reset" | "quarantined_session_reset")
+            )
+        {
+            return Kind::GenerationBoundary;
+        }
+        if event_text(event, "parse_status").is_some_and(|status| {
+            status == "rejected"
+                || status.starts_with("quarantined")
+                || status == "opaque_update_continuity_gap"
+        }) {
+            return Kind::ContinuityGap;
+        }
+        match &record.body {
+            MrtBody::Bgp4mp(outer) => match &outer.payload {
+                Bgp4mpPayload::State { .. } => Kind::SessionMetadata,
+                Bgp4mpPayload::Message(bytes) => match bytes.get(18) {
+                    Some(1) => Kind::Open,
+                    Some(2) => Kind::Update,
+                    Some(3) => Kind::Notification,
+                    Some(4) => Kind::Keepalive,
+                    Some(5) => Kind::RouteRefresh,
+                    _ => Kind::Opaque,
+                },
+            },
+            _ => Kind::Opaque,
+        }
+    }
+
+    fn retention_scan_work(&self) -> Result<usize> {
+        fn nodes(value: &Json) -> Result<usize> {
+            let mut total = 1usize;
+            match value {
+                Json::Array(values) => {
+                    for value in values {
+                        total = total
+                            .checked_add(nodes(value)?)
+                            .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+                    }
+                }
+                Json::Object(values) => {
+                    for (_, value) in values {
+                        total = total
+                            .checked_add(nodes(value)?)
+                            .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(total)
+        }
+        let mut work = self
+            .sessions
+            .len()
+            .checked_mul(16)
+            .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+        for session in &self.sessions {
+            work = work
+                .checked_add(session.decoder.opens.len())
+                .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+            for open in session.decoder.opens.values().flatten() {
+                work = work
+                    .checked_add(nodes(&open.witness.value)?)
+                    .and_then(|n| n.checked_add(8))
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+            }
+        }
+        Ok(work)
+    }
+
+    fn admit_continuity_retained(
+        &self,
+        old: usize,
+        new: usize,
+        limits: &Limits,
+        work: &mut usize,
+    ) -> Result<()> {
+        *work = work
+            .checked_add(
+                self.retention_scan_work()?
+                    .checked_mul(2)
+                    .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?,
+            )
+            .filter(|n| *n <= limits.work)
+            .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+        self.retained_bytes(limits)?
+            .checked_sub(old)
+            .and_then(|n| n.checked_add(new))
+            .filter(|n| *n <= limits.retained_bytes)
+            .ok_or_else(|| Error::limit("bgp_mrt_continuity_retained"))?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct PendingContinuityCut {
+    generation: u64,
+    direction: Option<u8>,
+    record_id: String,
+    reason: String,
+    provenance: SourceRange,
+}
+impl PendingContinuityCut {
+    fn retained_bytes(&self, session: &str) -> usize {
+        session.len()
+            + self.record_id.len()
+            + self.reason.len()
+            + self.provenance.sha256.as_ref().map_or(0, String::len)
+            + std::mem::size_of::<Self>()
+    }
+}
+fn charge_cut_work(work: &mut usize, bytes: usize, limits: &Limits) -> Result<()> {
+    *work = work
+        .checked_add(
+            bytes
+                .checked_mul(8)
+                .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?,
+        )
+        .filter(|n| *n <= limits.work)
+        .ok_or_else(|| Error::limit("bgp_mrt_gap_work"))?;
+    Ok(())
+}
+fn event_value<'a>(event: &'a Json, name: &str) -> Option<&'a Json> {
+    if let Json::Object(fields) = event {
+        fields
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value)
+    } else {
+        None
+    }
+}
+fn event_text<'a>(event: &'a Json, name: &str) -> Option<&'a str> {
+    if let Some(Json::String(value)) = event_value(event, name) {
+        Some(value)
+    } else {
+        None
+    }
+}
+fn event_number(event: &Json, name: &str) -> Option<u64> {
+    if let Some(Json::Number(value)) = event_value(event, name) {
+        Some(*value)
+    } else {
+        None
     }
 }
 
@@ -71,6 +627,7 @@ struct ImportedSession {
     decoder: SessionState,
     fsm: Option<u16>,
     state_conflict: bool,
+    continuity_generation: Option<u64>,
 }
 
 impl ImportedSession {
@@ -217,6 +774,7 @@ fn compatible_value<T: Copy + Eq>(left: Option<T>, right: Option<T>) -> bool {
 pub(crate) struct ReplayRecord {
     pub event: Json,
     pub observation: Option<Json>,
+    pub continuity_gap: Option<ImportContinuityCut>,
 }
 
 #[derive(Clone, Copy)]
@@ -381,6 +939,7 @@ pub(crate) fn replay_message_record(
                     Some(message_range),
                 ),
                 observation: None,
+                continuity_gap: None,
             })
         }
     };
@@ -406,6 +965,7 @@ pub(crate) fn replay_message_record(
                     &error,
                 ),
                 observation: None,
+                continuity_gap: None,
             });
         }
     };
@@ -430,6 +990,7 @@ pub(crate) fn replay_message_record(
                                 &error,
                             ),
                             observation: None,
+                            continuity_gap: None,
                         });
                     }
                 };
@@ -489,6 +1050,7 @@ pub(crate) fn replay_message_record(
             Ok(ReplayRecord {
                 event,
                 observation: None,
+                continuity_gap: None,
             })
         }
         2 => {
@@ -507,6 +1069,7 @@ pub(crate) fn replay_message_record(
                         Some(message_range),
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
             if !matches!(
@@ -527,6 +1090,7 @@ pub(crate) fn replay_message_record(
                         Some(message_range),
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
             if negotiated
@@ -548,6 +1112,7 @@ pub(crate) fn replay_message_record(
                         Some(message_range),
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
 
@@ -581,6 +1146,7 @@ pub(crate) fn replay_message_record(
                                 &error,
                             ),
                             observation: None,
+                            continuity_gap: None,
                         });
                     }
                 };
@@ -625,6 +1191,7 @@ pub(crate) fn replay_message_record(
                         Some(message_range),
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
             if parsed.known_disposition == "session_reset" {
@@ -646,6 +1213,7 @@ pub(crate) fn replay_message_record(
                         Some(message_range),
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
 
@@ -727,9 +1295,14 @@ pub(crate) fn replay_message_record(
                         ),
                         ("route_count", parsed_route_count(&normalized).into()),
                     ])),
-                    Some(message_range),
+                    Some(message_range.clone()),
                 ),
                 observation: Some(normalized),
+                continuity_gap: route_projection_incomplete(&parsed).then(|| ImportContinuityCut {
+                    context,
+                    record_id: record_id(record_index, record, &message_range),
+                    reason: "decoded_update_opaque_route_evidence".to_owned(),
+                }),
             })
         }
         3 => {
@@ -748,6 +1321,7 @@ pub(crate) fn replay_message_record(
                         &error,
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
             session.decoder.reset()?;
@@ -770,6 +1344,7 @@ pub(crate) fn replay_message_record(
                     Some(message_range),
                 ),
                 observation: None,
+                continuity_gap: None,
             })
         }
         4 => {
@@ -784,6 +1359,7 @@ pub(crate) fn replay_message_record(
                         &error,
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
             let accepted_state = !session.state_conflict && matches!(session.fsm, Some(5 | 6));
@@ -805,6 +1381,7 @@ pub(crate) fn replay_message_record(
                     Some(message_range),
                 ),
                 observation: None,
+                continuity_gap: None,
             })
         }
         5 => {
@@ -819,6 +1396,7 @@ pub(crate) fn replay_message_record(
                         &error,
                     ),
                     observation: None,
+                    continuity_gap: None,
                 });
             }
             let accepted_state = !session.state_conflict && session.fsm == Some(6);
@@ -866,6 +1444,7 @@ pub(crate) fn replay_message_record(
                     Some(message_range),
                 ),
                 observation: None,
+                continuity_gap: None,
             })
         }
         _ => Ok(ReplayRecord {
@@ -878,6 +1457,7 @@ pub(crate) fn replay_message_record(
                 Some(message_range),
             ),
             observation: None,
+            continuity_gap: None,
         }),
     }
 }
@@ -888,10 +1468,12 @@ fn refresh_sender_layout(state: &SessionState, direction: u8) -> (bool, &'static
     let Some(opens) = state.opens.get(&(1 - direction)) else {
         return (false, "missing_receiver_open");
     };
-    if opens.len() != 1 {
-        return (false, "ambiguous_receiver_open");
+    if opens.is_empty() {
+        return (false, "missing_receiver_open");
     }
-    let open = &opens[0];
+    let Some(open) = state.unambiguous_open(1 - direction) else {
+        return (false, "ambiguous_receiver_open");
+    };
     if open.ambiguous || !open.capabilities.valid {
         return (false, "invalid_receiver_open");
     }
@@ -1342,6 +1924,9 @@ pub(super) fn imported_attribute_inventory(
         let Json::Object(fields) = &mut occurrence else {
             unreachable!()
         };
+        // The captured type-16 carrier already includes raw bytes. This owner
+        // reconstructs imported values for every code; retain exactly one key.
+        fields.retain(|(key, _)| *key != "value_hex");
         fields.push(("value_hex", value_hex.into()));
         occurrences.push(occurrence);
     }
@@ -1874,6 +2459,105 @@ mod observation_time_tests {
                 record.time.microseconds, raw,
                 "classification must preserve raw evidence"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuity_budget_tests {
+    use super::super::super::bgp_mrt::{MrtLimits, MrtSource};
+    use super::*;
+
+    fn fixture() -> (MrtBatch, ReplayState, Json) {
+        let mut body = vec![0; 8];
+        body.extend(7u16.to_be_bytes());
+        body.extend(1u16.to_be_bytes());
+        body.extend([198, 51, 100, 1, 198, 51, 100, 2]);
+        body.extend([0xff; 16]);
+        body.extend(20u16.to_be_bytes());
+        body.extend([4, 0]);
+        let mut raw = 1u32.to_be_bytes().to_vec();
+        raw.extend(16u16.to_be_bytes());
+        raw.extend(4u16.to_be_bytes());
+        raw.extend((body.len() as u32).to_be_bytes());
+        raw.extend(body);
+        let limits = Limits::default();
+        let batch = MrtBatch::parse(
+            &raw,
+            MrtSource {
+                source_id: "budget-source".into(),
+                checkpoint_id: "budget-checkpoint".into(),
+            },
+            &MrtLimits::default(),
+        )
+        .unwrap();
+        let mut state = ReplayState::default();
+        let range = batch.bgp4mp_message_source_range(0).unwrap().unwrap();
+        let replay =
+            replay_message_record(&batch, 0, &batch.records[0], range, &limits, &mut state)
+                .unwrap();
+        assert_eq!(event_text(&replay.event, "parse_status"), Some("rejected"));
+        (batch, state, replay.event)
+    }
+
+    #[test]
+    fn exact_continuity_inventory_peak_and_work_reject_one_below() {
+        let (batch, mut state, event) = fixture();
+        let (cuts, work) = state
+            .continuity_cuts(
+                &batch,
+                0,
+                &batch.records[0],
+                &event,
+                None,
+                &Limits::default(),
+            )
+            .unwrap();
+        assert_eq!(cuts.len(), 1);
+        let cut_bytes = state.continuity_contexts.values().next().unwrap().1
+            + cuts[0].record_id.len()
+            + cuts[0].reason.len();
+        let peak = state.retained_bytes(&Limits::default()).unwrap() + cut_bytes;
+        for cap in [peak, peak - 1] {
+            let (batch, mut state, event) = fixture();
+            let result = state.continuity_cuts(
+                &batch,
+                0,
+                &batch.records[0],
+                &event,
+                None,
+                &Limits {
+                    retained_bytes: cap,
+                    ..Limits::default()
+                },
+            );
+            assert_eq!(result.is_ok(), cap == peak, "cap={cap} peak={peak}");
+            if let Err(error) = result {
+                assert_eq!(error.field, "bgp_mrt_continuity_retained");
+                assert!(
+                    state.pending_cuts.is_empty(),
+                    "pending negative preflight precedes insertion"
+                );
+                assert!(state.retained_bytes(&Limits::default()).unwrap() <= cap);
+            }
+        }
+        for cap in [work, work - 1] {
+            let (batch, mut state, event) = fixture();
+            let result = state.continuity_cuts(
+                &batch,
+                0,
+                &batch.records[0],
+                &event,
+                None,
+                &Limits {
+                    work: cap,
+                    ..Limits::default()
+                },
+            );
+            assert_eq!(result.is_ok(), cap == work, "cap={cap} work={work}");
+            if let Err(error) = result {
+                assert_eq!(error.field, "bgp_mrt_gap_work");
+            }
         }
     }
 }

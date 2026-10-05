@@ -13,7 +13,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const ROW: usize = 64;
+// Private scratch format: original byte identity plus exact capture time.
+const ROW: usize = 65;
 
 pub struct PacketMap {
     source: File,
@@ -79,6 +80,10 @@ impl PacketMap {
         row[8..16].copy_from_slice(&offset.to_le_bytes());
         row[16..24].copy_from_slice(&(cap as u64).to_le_bytes());
         row[24..56].copy_from_slice(&hash);
+        if let Some(time) = capture_time(get(&event.data, "timestamp_ns")) {
+            row[56..64].copy_from_slice(&time.to_le_bytes());
+            row[64] = 1;
+        }
         self.index.seek(SeekFrom::Start(end - ROW as u64))?;
         self.index.write_all(&row)?;
         self.rows = frame;
@@ -91,6 +96,18 @@ impl PacketMap {
             },
             0,
         ))
+    }
+    // Select by capture-frame ordinal, never by timestamp or span layout.
+    // Call only after materialization verifies every contributing raw span.
+    fn observed_at_ns(&mut self, raw: &EvidenceBytes) -> Result<Option<i64>> {
+        let Some(span) = raw.spans().iter().max_by_key(|span| span.packet.frame) else {
+            return Ok(None);
+        };
+        let mut row = [0u8; ROW];
+        self.index
+            .seek(SeekFrom::Start((span.packet.frame - 1) * ROW as u64))?;
+        self.index.read_exact(&mut row)?;
+        Ok((row[64] == 1).then(|| i64::from_le_bytes(row[56..64].try_into().unwrap())))
     }
     pub fn namespace(&self) -> [u8; 32] {
         self.namespace
@@ -203,6 +220,37 @@ impl PacketMap {
         self.index.sync_all()?;
         Ok(())
     }
+}
+
+fn capture_time(value: Option<&Json>) -> Option<i64> {
+    let Some(Json::String(text)) = value else {
+        return None;
+    };
+    let time = text.parse::<i64>().ok()?;
+    (time.to_string() == *text).then_some(time)
+}
+
+// The stream producer names canonical endpoint a as source and b as
+// destination in FlowStart.key. These labels do not establish BGP role truth.
+fn flow_endpoints(data: &Json) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
+    let key = get(data, "key")?;
+    if get(key, "transport") != Some(&Json::String("tcp".into())) {
+        return None;
+    }
+    let endpoint = |ip_key, port_key| {
+        let Some(Json::String(text)) = get(key, ip_key) else {
+            return None;
+        };
+        let address = text.parse::<std::net::IpAddr>().ok()?;
+        if address.to_string() != *text || number(get(key, port_key)).ok()? > u16::MAX as u64 {
+            return None;
+        }
+        Some(address)
+    };
+    Some((
+        endpoint("source_ip", "source_port")?,
+        endpoint("destination_ip", "destination_port")?,
+    ))
 }
 
 fn hash_source(source: &mut File) -> Result<[u8; 32]> {
@@ -399,6 +447,7 @@ pub struct DeepSink<'a> {
     dnp_file: super::dnp_file::FileReconciler,
     bgp: super::bgp_manager::CapturedSessionManager,
     bgp_seen: BTreeSet<u64>,
+    flow_endpoints: BTreeMap<u64, (std::net::IpAddr, std::net::IpAddr)>,
     bgp_pending_boundaries: BTreeMap<u64, Vec<(String, String)>>,
     bgp_pending_count: usize,
     bgp_pending_overflow: bool,
@@ -431,6 +480,7 @@ impl<'a> DeepSink<'a> {
             dnp_file: super::dnp_file::FileReconciler::new(),
             bgp,
             bgp_seen: BTreeSet::new(),
+            flow_endpoints: BTreeMap::new(),
             bgp_pending_boundaries: BTreeMap::new(),
             bgp_pending_count: 0,
             bgp_pending_overflow: false,
@@ -548,6 +598,16 @@ impl<'a> DeepSink<'a> {
                 )?;
             }
         }
+        if e.kind == EventKind::FlowStart {
+            if let Some(id) = e.session {
+                self.flow_endpoints.remove(&id);
+                if self.flow_endpoints.len() < self.limits.elements {
+                    if let Some(endpoints) = flow_endpoints(&e.data) {
+                        self.flow_endpoints.insert(id, endpoints);
+                    }
+                }
+            }
+        }
         // A scoped BGP framing issue means the stream decoder omitted source
         // bytes. It carries the same continuity consequence as a transport
         // gap, without manufacturing a withdrawal or successor generation.
@@ -587,6 +647,7 @@ impl<'a> DeepSink<'a> {
                     s.gap();
                 }
                 self.dnp_file.reset_session(id);
+                self.flow_endpoints.remove(&id);
                 self.remove_pending_bgp_session(id);
                 let was_bgp = self.bgp_seen.remove(&id);
                 if was_bgp {
@@ -607,6 +668,7 @@ impl<'a> DeepSink<'a> {
         }
         if e.kind == EventKind::Boundary {
             self.iec.clear();
+            self.flow_endpoints.clear();
             self.bacnet = super::bacnet::Session::new(self.limits.clone())?;
             self.dnp_file.reset();
             self.bgp_pending_boundaries.clear();
@@ -687,14 +749,46 @@ impl<'a> DeepSink<'a> {
             } else if protocol == "bgp" && !e.evidence.spans.is_empty() {
                 let raw = self.map.materialize(&e.evidence, &self.limits)?;
                 let record_id = event_record_id(e, self.inner.run_id(), &self.limits)?;
+                let endpoints = e.session.and_then(|id| self.flow_endpoints.get(&id));
+                let (peer, local) = match (e.direction, endpoints) {
+                    (Some(0), Some((a, b))) => (Some(a.to_string()), Some(b.to_string())),
+                    (Some(1), Some((a, b))) => (Some(b.to_string()), Some(a.to_string())),
+                    _ => (None, None),
+                };
+                let observed_at_ns = self.map.observed_at_ns(&raw)?;
+                set(
+                    &mut own.data,
+                    "depth_bgp_capture_metadata",
+                    Json::object([
+                        ("time_basis", "latest_contributing_capture_frame".into()),
+                        ("time_available", observed_at_ns.is_some().into()),
+                        ("clock_calibration", "unknown".into()),
+                        ("clock_uncertainty_ns", Json::Null),
+                        (
+                            "endpoint_basis",
+                            "flow_start_canonical_ip_pair_and_direction".into(),
+                        ),
+                        ("endpoints_available", peer.is_some().into()),
+                        (
+                            "endpoint_unavailable_reason",
+                            if peer.is_some() {
+                                Json::Null
+                            } else if !matches!(e.direction, Some(0 | 1)) {
+                                "direction_missing_or_unknown".into()
+                            } else {
+                                "flow_start_missing_invalid_or_not_retained".into()
+                            },
+                        ),
+                    ]),
+                )?;
                 let metadata = super::bgp::PcapMetadata {
                     source_id: self.inner.run_id().to_owned(),
                     record_id: record_id.clone(),
-                    observed_at_ns: None,
+                    observed_at_ns,
                     session: e.session,
                     direction: e.direction,
-                    peer: None,
-                    local: None,
+                    peer,
+                    local,
                 };
                 if let Some(id) = e.session {
                     let first_bgp_message = self.bgp_seen.insert(id);
@@ -967,6 +1061,281 @@ mod tests {
             0,
         ));
         event
+    }
+
+    fn captured_packet(frame: u64, offset: usize, bytes: &[u8], time: Json) -> Event {
+        Event::new(
+            EventKind::Packet,
+            EvidenceStatus::Observed,
+            Json::object([
+                ("frame", frame.to_string().into()),
+                ("record_offset", (frame * 100).to_string().into()),
+                ("data_offset", offset.to_string().into()),
+                ("captured_length", bytes.len().to_string().into()),
+                ("packet_sha256", sha256::hex(&sha256::digest(bytes)).into()),
+                ("link_type", 228usize.into()),
+                ("timestamp_ns", time),
+            ]),
+        )
+    }
+
+    fn flow_start(session: u64, a: &str, b: &str) -> Event {
+        let mut event = Event::new(
+            EventKind::FlowStart,
+            EvidenceStatus::Candidate,
+            Json::object([(
+                "key",
+                Json::object([
+                    ("source_ip", a.into()),
+                    ("source_port", 50000usize.into()),
+                    ("destination_ip", b.into()),
+                    ("destination_port", 179usize.into()),
+                    ("transport", "tcp".into()),
+                ]),
+            )]),
+        );
+        event.session = Some(session);
+        event
+    }
+
+    fn normalized(event: &Event) -> &Json {
+        get(&event.data, "depth_bgp").unwrap()
+    }
+
+    #[test]
+    fn captured_metadata_selects_latest_frame_across_reordered_spans_and_sealed_replay() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        let segments = [&keepalive[..5], &keepalive[5..10], &keepalive[10..]];
+        // The greatest contributing frame occurs first, middle and last in
+        // reconstructed byte order. Neither end of the span list selects time.
+        for frame_order in [[3usize, 1, 2], [1, 3, 2], [1, 2, 3]] {
+            let mut chunks = [&[][..]; 3];
+            for (segment, frame) in segments.iter().zip(frame_order) {
+                chunks[frame - 1] = *segment;
+            }
+            let mut source: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+            source.push(b'x');
+            for latest in [
+                Json::from("-50"),
+                Json::from("0"),
+                Json::from("-9223372036854775808"),
+                Json::Null,
+                Json::from("9223372036854775808"),
+                Json::from("not-a-time"),
+            ] {
+                with_test_sink(Limits::default(), &source, |sink, root| {
+                    let journal = root.join("metadata.journal");
+                    sink.enable_bgp_journal(&journal, 8192).unwrap();
+                    sink.augment(&flow_start(9, "198.51.100.1", "198.51.100.2"))
+                        .unwrap();
+                    let times = [Json::from("1000"), Json::from("9000"), latest.clone()];
+                    let mut offset = 0;
+                    let mut pieces = Vec::new();
+                    for (index, chunk) in chunks.iter().enumerate() {
+                        let frame = index as u64 + 1;
+                        sink.augment(&captured_packet(frame, offset, chunk, times[index].clone()))
+                            .unwrap();
+                        pieces.push(EvidenceBytes::from_packet(
+                            chunk,
+                            PacketId {
+                                capture: sink.map.namespace(),
+                                frame,
+                                record_offset: frame * 100,
+                            },
+                            0,
+                        ));
+                        offset += chunk.len();
+                    }
+                    // An unrelated later packet is carried only in packet refs;
+                    // it contributes no raw span and must not select message time.
+                    sink.augment(&captured_packet(4, offset, b"x", "20000".into()))
+                        .unwrap();
+                    let mut raw = pieces[frame_order[0] - 1].clone();
+                    raw.append(&pieces[frame_order[1] - 1], 4096).unwrap();
+                    raw.append(&pieces[frame_order[2] - 1], 4096).unwrap();
+                    assert_eq!(raw.data(), keepalive);
+                    assert_eq!(
+                        raw.spans()
+                            .iter()
+                            .map(|s| s.packet.frame)
+                            .collect::<Vec<_>>(),
+                        frame_order.map(|f| f as u64)
+                    );
+                    let mut event = message(1);
+                    event.evidence = Evidence::bytes(&raw);
+                    event.evidence.packets.push(PacketId {
+                        capture: sink.map.namespace(),
+                        frame: 4,
+                        record_offset: 400,
+                    });
+                    let output = sink.augment(&event).unwrap();
+                    let expected = match &latest {
+                        Json::String(text) if text == "-50" => Some(-50),
+                        Json::String(text) if text == "0" => Some(0),
+                        Json::String(text) if text == "-9223372036854775808" => Some(i64::MIN),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        get(normalized(&output), "observed_at_ns"),
+                        Some(&expected.map_or(Json::Null, |t| t.to_string().into()))
+                    );
+                    assert_eq!(
+                        get(normalized(&output), "peer"),
+                        Some(&Json::from("198.51.100.1"))
+                    );
+                    assert_eq!(
+                        get(normalized(&output), "local"),
+                        Some(&Json::from("198.51.100.2"))
+                    );
+                    let basis = get(&output.data, "depth_bgp_capture_metadata").unwrap();
+                    assert_eq!(
+                        get(basis, "time_available"),
+                        Some(&Json::Bool(expected.is_some()))
+                    );
+                    sink.map.verify_source().unwrap();
+                    sink.bgp_journal.take().unwrap().seal().unwrap();
+                    let archive =
+                        super::super::bgp_store::replay(&journal, 8192, Limits::default()).unwrap();
+                    assert_eq!(archive.observations.len(), 1);
+                    assert_eq!(archive.observations[0].source().observed_at_ns, expected);
+                    assert_eq!(
+                        archive.observations[0].source().peer.as_deref(),
+                        Some("198.51.100.1")
+                    );
+                    assert_eq!(
+                        archive.observations[0].source().local.as_deref(),
+                        Some("198.51.100.2")
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn captured_endpoint_direction_missing_retention_and_cleanup_controls() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        with_test_sink(Limits::default(), &keepalive, |sink, _| {
+            let original = map_message(sink, &keepalive);
+            sink.augment(&flow_start(9, "198.51.100.1", "198.51.100.2"))
+                .unwrap();
+            for (direction, expected) in [
+                (Some(0), Some(("198.51.100.1", "198.51.100.2"))),
+                (Some(1), Some(("198.51.100.2", "198.51.100.1"))),
+                (None, None),
+                (Some(2), None),
+            ] {
+                let mut event = original.clone();
+                event.direction = direction;
+                let output = sink.augment(&event).unwrap();
+                if direction == Some(2) {
+                    assert_eq!(
+                        get(normalized(&output), "status"),
+                        Some(&Json::from("rejected"))
+                    );
+                } else {
+                    assert_eq!(
+                        get(normalized(&output), "peer"),
+                        Some(&expected.map_or(Json::Null, |e| e.0.into()))
+                    );
+                    assert_eq!(
+                        get(normalized(&output), "local"),
+                        Some(&expected.map_or(Json::Null, |e| e.1.into()))
+                    );
+                }
+                assert_eq!(
+                    get(
+                        get(&output.data, "depth_bgp_capture_metadata").unwrap(),
+                        "endpoints_available"
+                    ),
+                    Some(&Json::Bool(expected.is_some()))
+                );
+            }
+            let mut other_session = original.clone();
+            other_session.session = Some(11);
+            let output = sink.augment(&other_session).unwrap();
+            assert_eq!(get(normalized(&output), "peer"), Some(&Json::Null));
+            assert_eq!(get(normalized(&output), "local"), Some(&Json::Null));
+            assert_eq!(
+                get(normalized(&output), "observed_at_ns"),
+                Some(&Json::Null)
+            );
+            for kind in [EventKind::FlowEnd, EventKind::Boundary] {
+                let mut end = protocol_issue(Some(9), "bgp");
+                end.kind = kind;
+                sink.augment(&end).unwrap();
+                let output = sink.augment(&original).unwrap();
+                assert_eq!(get(normalized(&output), "peer"), Some(&Json::Null));
+                // End the synthetic unavailable occurrence before ID reuse.
+                let mut occurrence_end = end.clone();
+                occurrence_end.kind = EventKind::FlowEnd;
+                sink.augment(&occurrence_end).unwrap();
+                sink.augment(&flow_start(9, "2001:db8::1", "2001:db8::2"))
+                    .unwrap();
+                let output = sink.augment(&original).unwrap();
+                assert_eq!(
+                    get(normalized(&output), "peer"),
+                    Some(&Json::from("2001:db8::1"))
+                );
+                assert_eq!(
+                    get(normalized(&output), "local"),
+                    Some(&Json::from("2001:db8::2"))
+                );
+            }
+            let mut end = protocol_issue(Some(9), "bgp");
+            end.kind = EventKind::FlowEnd;
+            sink.augment(&end).unwrap();
+            // Retention pressure on non-BGP flow starts preserves progress and
+            // explicitly leaves skipped sessions unavailable, without borrowing.
+            sink.flow_endpoints.clear();
+            sink.limits.elements = 1;
+            sink.augment(&flow_start(10, "192.0.2.1", "192.0.2.2"))
+                .unwrap();
+            sink.augment(&flow_start(9, "198.51.100.1", "198.51.100.2"))
+                .unwrap();
+            assert_eq!(sink.flow_endpoints.len(), 1);
+            sink.limits.elements = Limits::default().elements;
+            let output = sink.augment(&original).unwrap();
+            assert_eq!(get(normalized(&output), "peer"), Some(&Json::Null));
+            assert_eq!(
+                get(
+                    get(&output.data, "depth_bgp_capture_metadata").unwrap(),
+                    "endpoints_available"
+                ),
+                Some(&Json::Bool(false))
+            );
+            sink.augment(&flow_start(9, "invalid", "198.51.100.2"))
+                .unwrap();
+            assert!(!sink.flow_endpoints.contains_key(&9));
+        });
+    }
+
+    #[test]
+    fn packet_map_exact_disk_budget_and_one_below_include_capture_time() {
+        with_test_sink(Limits::default(), b"ab", |_, root| {
+            for budget in [ROW as u64 * 2, ROW as u64 * 2 - 1] {
+                let path = root.join(format!("bounded-{budget}.map"));
+                let mut map = PacketMap::create(
+                    File::open(root.join("source.bin")).unwrap(),
+                    &path,
+                    budget,
+                    "run",
+                )
+                .unwrap();
+                map.record(&captured_packet(1, 0, b"a", "0".into()))
+                    .unwrap();
+                let result = map.record(&captured_packet(2, 1, b"b", "-1".into()));
+                if budget == ROW as u64 * 2 {
+                    result.unwrap();
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), budget);
+                } else {
+                    assert_eq!(result.unwrap_err().field, "depth_packet_map_disk");
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), ROW as u64);
+                    assert_eq!(map.rows, 1);
+                }
+            }
+        });
     }
 
     #[test]

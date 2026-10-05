@@ -213,6 +213,7 @@ pub(super) fn quarantine_event(
                 "gap differs from exact tracked source scope",
             ));
         }
+        let before = rib.accounted_work();
         rib.apply(RibEvent {
             scope: RibScope {
                 source: SourcePartition::from_import_context(context, limits)?,
@@ -231,8 +232,118 @@ pub(super) fn quarantine_event(
             },
         })?;
         work = work
-            .checked_add(rib.accounted_work())
+            .checked_add(
+                rib.accounted_work()
+                    .checked_sub(before)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+            )
             .filter(|work| *work <= limits.work)
+            .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+    }
+    Ok(work)
+}
+
+pub(super) fn apply_continuity_cuts(
+    rib: &mut AdjRibIn,
+    cuts: &[super::super::bgp_import::ImportContinuityCut],
+    limits: &Limits,
+) -> Result<usize> {
+    let mut work = 0usize;
+    for cut in cuts {
+        let context = &cut.context;
+        let before = rib.accounted_work();
+        rib.apply(RibEvent {
+            scope: RibScope {
+                source: SourcePartition::from_import_context(context, limits)?,
+                session: context.session.clone(),
+                generation: context.generation,
+                direction: context.direction,
+                peer: context.peer.clone(),
+            },
+            record_id: cut.record_id.clone(),
+            kind: RibEventKind::Gap {
+                reason: cut.reason.clone(),
+            },
+        })?;
+        work = work
+            .checked_add(
+                rib.accounted_work()
+                    .checked_sub(before)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+            )
+            .filter(|n| *n <= limits.work)
+            .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+    }
+    Ok(work)
+}
+
+/// Native gaps can initialize a scope without a shared-journal observation.
+/// Forward reset only for an actual admitted native predecessor; the shared
+/// journal retains its own stricter predecessor inventory.
+pub(super) fn reset_native_scopes(
+    rib: &mut AdjRibIn,
+    event: &Json,
+    record_index: usize,
+    record: &MrtRecord,
+    limits: &Limits,
+) -> Result<usize> {
+    let Some((generation, reason)) = bgp4mp_reset_generation(event, record_index)? else {
+        return Ok(0);
+    };
+    let Some(session) = event_text(event, "session") else {
+        return Ok(0);
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut resets = Vec::new();
+    let mut work = 0usize;
+    for prior in rib.events().iter().rev() {
+        work = work
+            .checked_add(prior.scope.session.len() + 1)
+            .filter(|n| *n <= limits.work)
+            .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
+        if prior.scope.session != session
+            || event_text(event, "source_id") != Some(prior.scope.source.source_id.as_str())
+            || !seen.insert(prior.scope.source.clone())
+            || prior.scope.generation == generation
+        {
+            continue;
+        }
+        if prior.scope.generation.checked_add(1) != Some(generation) {
+            return Err(bad(
+                "bgp_mrt_generation_boundary",
+                record_index,
+                "native reset does not advance the admitted generation exactly once",
+            ));
+        }
+        let mut scope = prior.scope.clone();
+        let previous_generation = scope.generation;
+        scope.generation = generation;
+        scope.direction = None;
+        resets
+            .try_reserve(1)
+            .map_err(|_| Error::limit("bgp_mrt_generation_contexts"))?;
+        resets.push(RibEvent {
+            scope,
+            record_id: format!(
+                "mrt-bgp4mp-reset:{}:{}:{}:{}",
+                record.offset, record.subtype, record_index, record.sha256
+            ),
+            kind: RibEventKind::Reset {
+                previous_generation,
+                reason: reason.to_owned(),
+            },
+        });
+    }
+    for reset in resets {
+        let before = rib.accounted_work();
+        rib.apply(reset)?;
+        work = work
+            .checked_add(
+                rib.accounted_work()
+                    .checked_sub(before)
+                    .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?,
+            )
+            .filter(|n| *n <= limits.work)
             .ok_or_else(|| Error::limit("bgp_mrt_rib_work"))?;
     }
     Ok(work)

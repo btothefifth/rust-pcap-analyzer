@@ -1,157 +1,101 @@
 # Current implementation pointer
 
-## Active objective work
+This pointer identifies the current BGP implementation surfaces and their
+validation route. The planned root-owned receipt will record executed outcomes and exact source
+inventory; local, hosted, and qualification scopes remain separate.
 
-The additive incremental MRT, checkpoint chronology, evidence-manifest and
-external BGP comparison increment is governed by
-[the stream evidence contract](../product/BGP_STREAM_EVIDENCE.md). The
-[stream validation receipt](../../evidence/bgp-stream-validation.json) records
-its actual source generation, review and finite validation outcomes; a pending
-or absent receipt establishes no passing gate. Existing receipts remain bound
-to their own source generation.
+## Active BGP surfaces
 
-The repository-owner-authorized objectives 1–4 implementation and exact
-evidence record are tracked in the [objective ledger](OBJECTIVES_1_4.md). The
-ledger records source ownership, implementation progress, receipts, and
-remaining qualification gaps; it does not change the acceptance conditions in
-the [BGP completion contract](../product/BGP_COMPLETION.md). Until accepted
-receipts are recorded there, in-progress work does not close a gate.
+The implementation has these declared offline product surfaces:
 
-## Repository review
+- Bounded captured BGP framing, normalized observations, and packet-span
+  provenance.
+- MRT/TABLE_DUMP_V2/BGP4MP and BMP import, source identity, fresh replay, and
+  source-scoped route candidates.
+- Persisted replay, state, typed query selectors, source-ordered change and
+  caller-scoped expectation analysis, policy, export, and association consumers
+  for supported captured/MRT/BMP stores. The observation-event selector owner
+  suite returned 11 passing finite checks. Captured decoded Gap/Reset events
+  bind their native decision to verified observation and journal occurrences
+  before source-ordered analysis.
+- Incremental MRT source admission, chronology, explicit ASN/time-window
+  selection, evidence manifests, and bounded attributed external comparison;
+  see [BGP_STREAM_EVIDENCE.md](../product/BGP_STREAM_EVIDENCE.md) and
+  [matrix row BGP-S013](../product/bgp-support-matrix.json).
 
-The [2026-10-02 repository review](REPOSITORY_REVIEW_2026-10-02.md) inventories
-the published baseline, records independently checked findings and validation
-limits, and orders the next work. It also records the local project storage
-ceiling of 50 GB. This review adds no parser implementation or qualification
-claim; the controlling BGP contract and the priorities below remain in force.
+- Persisted evidence rows expose checked native version-origin references and
+  route evidence. The 12-case persisted-evidence owner suite returned 12 passing
+  finite checks, including the captured-continuity extension. Details are in
+  [BGP_CAPTURED_CONTINUITY.md](../product/BGP_CAPTURED_CONTINUITY.md) and
+  [BGP_PERSISTED_EVIDENCE.md](../product/BGP_PERSISTED_EVIDENCE.md).
+- Observer and Adj-RIB-In prepared paths use bounded staged admission and typed
+  logical accounting. Embedded reducers use a separate logical-output proxy;
+  each outer owner retains the caller's actual encoded-output limit.
+- Incremental stream evidence includes the optional native/Python per-field
+  action/prefix comparison bridge.
 
-## Objective and authority
+These surfaces produce offline observations and candidates. They do not prove
+source authenticity, endpoint negotiation, actual router FSM state, route
+installation, reachability, causality, or attribution. A generation boundary
+preserves history; it does not invent per-prefix withdrawals.
 
-Continue the declared offline BGP evidence profile in
-[BGP completion](../product/BGP_COMPLETION.md), with RFCs and IANA registries as
-normative authority and other analyzers as disagreement probes only. The design
-docs remain authoritative for product intent. This pointer is the concise
-current-state view; older slice receipts are historical unless cited below.
+## Implementation, design, and proof boundaries
 
-## Current implementation candidate
+- OPEN Identifier parsing uses RFC 6286 four-octet unsigned nonzero semantics,
+  including values previously rejected by the unicast-only guard. Broader core
+  malformed-message disposition and profile qualification remain separate.
+- Typed persisted selectors cover directional prefix containment,
+  origin/path-member ASN, standard/large/extended communities, next hop,
+  source/session/partition, generation, direction, path-ID state, lifecycle,
+  and caller-reported clock windows. `bgp changes` and `bgp expectations` are
+  source-ordered and caller-scoped. The observation-event selector owner suite
+  returned 11 passing finite checks. Captured decoded Gap/Reset events bind the
+  typed decision to the exact verified observation and journal occurrence
+  before analysis. Unknown times, incomplete fields, and missing boundaries
+  stay unknown.
+- Persisted evidence rows expose checked native version-origin references and
+  route evidence; the 12-case persisted-evidence owner suite returned 12 passing
+  finite checks. A digest or caller label does not authenticate the source.
+- The observer appends ordinary events without copying prior history. The
+  Adj-RIB-In reducer stages only affected entries and uses typed logical charges
+  and explicit route-origin references. Repeated updates to one key still copy
+  and measure its growing version/witness history. Embedded logical output is
+  capped by `min(retained-state limit, 8 MiB default)` while each outer owner
+  applies its original cap to actual encoded output. Logical admission does not
+  bound allocator use, OOM, RSS, CPU, or throughput; exact output outcomes are
+  recorded by the source-bound receipt.
+- Richer source-scoped finite-state observation remains open. Caller-reported
+  GR/LLGR timer assessment is design pending and requires clock basis and
+  provenance, with source-clock uncertainty kept as its own evidence field and
+  separated from broader qualification. No host wall-clock expiry or actual
+  router state is inferred.
 
-The current O14-1 candidate extends imported BGP4MP replay into the canonical
-source-scoped Adj-RIB-In reducer, preserves malformed complete embedded records
-as rejected evidence, and advances only the matching peer partition at reset
-boundaries. A generation boundary retains history and does not invent
-per-prefix withdrawal evidence. Captured, MRT, and BMP route producers now use
-the versioned source-neutral semantic identity for its supported profile;
-persisted consumers provide bounded replay, state, query, policy, export, and
-cross-source association paths for captured, MRT, and BMP stores. These remain
-offline candidate-evidence paths: equal identities do not merge partitions or
-establish endpoint negotiation, source authenticity, installation, or
-reachability. The owning contracts are [MRT ingestion](../product/BGP_MRT.md),
-[MRT source storage](../product/BGP_MRT_STORE.md), [BMP ingestion](../product/BGP_BMP.md),
-[persisted consumers](../product/BGP_PERSISTED.md), and
-[semantic identity](../product/BGP_SEMANTIC_IDENTITY.md).
+The [BGP support matrix](../product/bgp-support-matrix.json) links each profile
+area to its owning source modules and tests. `accepted_local` or `partial` rows
+are bounded local profile statuses, not full qualification claims.
 
-The same candidate includes work across the repository-owner-selected storage,
-bounded-listing, validation/package, CLI parsing, and operator-truth objectives.
-The [objectives 1–4 ledger](OBJECTIVES_1_4.md) records those source seams,
-component receipts, and remaining gates. Implementation scope and validation
-outcome are separate; use the receipt below for the exact assembled generation.
+## Validation and qualification status
 
-## Current validation status
+GitHub Actions is Linux-only by repository-owner direction. Windows/macOS
+receipts, if present for older revisions, remain historical and do not imply
+continuing non-Linux CI. The support-matrix test pins the `usage().detail`
+selector text from `product/src/bin/pcap-depth.rs` by SHA-256; it is static and
+does not execute the native CLI. Paired finite owner runs returned 32 analysis,
+12 persisted-evidence, 37 pipeline, and 42 replay checks (123 total, with zero
+failed or ignored); four additional admission-unit tests passed separately.
+Other bounded outcomes include 37 session/RIB checks, 73 vector checks, 66
+Python comparison checks plus one native comparison bridge check, and a 13-check
+source-inventory frontier after the vector census was corrected to 11 modules
+and 73 tests. These results do not constitute the full product gate. The
+standalone 11-case selector result does not by itself establish complete source
+coverage; the current captured-continuity extension is covered by the paired
+suites. The root-owned
+[evidence/bgp-profile-review-validation.json](../../evidence/bgp-profile-review-validation.json)
+receipt will record executed outcomes and exact source inventory; local, hosted,
+and qualification scopes remain separate.
 
-GitHub Actions runs Linux-only by repository-owner direction. Native validation,
-streaming contracts, product qualification and manual hardening retain their
-Linux checks; Windows and macOS jobs are retired. Historical platform receipts
-remain tied to their recorded revisions and do not imply continuing non-Linux CI.
-
-The latest BMP continuity/query and native RIB-disposition feedback repairs
-are recorded in the
-[round-four feedback receipt](../../evidence/pr-feedback-round4-validation.json).
-It binds unsupported Peer Down uncertainty, actual affected-session event
-attribution, imported RIB candidate disposition and Linux-only qualification
-wording. The [round-three receipt](../../evidence/pr-feedback-round3-validation.json)
-retains its named source generation for typed clock selection, incomplete
-semantic identities, exact byte extents and verified source-local conversion. A pending
-or absent receipt establishes no pass. The preceding
-[stream receipt](../../evidence/bgp-stream-validation.json) remains bound to its
-original generation; its hosted results do not qualify later changes.
-
-Earlier PR review repairs are recorded in the
-[O14-F2 feedback receipt](../../evidence/pr-feedback-round2-validation.json) and the
-repair contracts in the [objective ledger](OBJECTIVES_1_4.md). The
-[O14-F1 receipt](../../evidence/pr-feedback-validation.json) describes the preceding
-`225b730` source generation. A pending receipt
-does not establish a passing result. The earlier
-[O14-1 validation receipt](../../evidence/objectives-1-4-validation.json)
-remains bound to its recorded source generation preceding those repairs.
-Component observations and finite synthetic evidence are not a substitute for
-same-generation proof. Open normative, real-corpus, sustained-fuzz, scale/RSS, security, and
-exact-head platform gates remain unqualified unless their own receipts say
-otherwise. The historical results below apply only to their stated revisions.
-
-## Historical validation receipts (not current candidate validation)
-
-Windows-only evidence, collected 2026-09-25 with Rust 1.85.1:
-
-- Product all-target debug tests: 447 passed; release tests: 447 passed.
-- Product warnings-denied Clippy and root, streaming, product, and FFI rustfmt
-  checks: passed. Root, streaming, product, and FFI locked debug/release tests,
-  Clippy, and release builds passed.
-- All six product feature profiles passed: no-default, standard, extensions,
-  industrial, industrial-full, and binary.
-- Ordered root validator: all 13 steps passed, including root debug/release,
-  locked offline check/build/Clippy, fixture/oracle checks, CLI hardening, and
-  mutation checks. Its source-unchanged receipt passed.
-- Full product qualification ran 202 Python tests (3 skipped), catalog audit,
-  and JavaScript model tests successfully. Its overall receipt is BLOCKED—not
-  failed—because this Windows host has no `cc` for the C-header harness and
-  cannot execute the Linux-only live-denial and C-ABI link/run gates.
-- BGP support-matrix contract tests: 4 passed.
-
-The first GitHub run for the preceding published tree also exposed a Windows
-status-endpoint race: a transient `PermissionError` while reading a worker's
-`state.json` was reported as an authorization 403. The repair adds bounded
-state-read retries and a redacted 503 for persistent local access
-failure, while preserving 403 for actual token, Host, and Origin denials. Nine
-focused HTTP tests cover the status and job-list consumers, bounded exhaustion,
-redaction, and preserved authorization behavior. The full 202-test Python suite
-passes. Published candidate commit `8ff367591d66045ea1a0172a5c0e516b88fe592e`
-passed both exact-commit GitHub Actions workflows: native validation #62 and
-streaming evidence contracts #58. All six Ubuntu, Windows, and macOS jobs
-passed, including the Windows contract job that exposed the race.
-
-The same receipt records sustained fuzzing, representative large-capture
-benchmarking, full browser-to-native exercise, and normative protocol
-qualification as NOT RUN/NOT ESTABLISHED; automatic full-history TCP remains
-unimplemented. Exact-commit CI above covers the implementation-code candidate
-`8ff367591d66045ea1a0172a5c0e516b88fe592e`. Documentation-only refresh commit
-`3f0680c4c2188714e58ebed498ab11022cbd0d6f` also passed native validation #63
-and streaming evidence contracts #59, without changing implementation or test
-files. Neither local nor CI results establish lawful real-corpus parity,
-scale or performance targets, security qualification, external-source
-authenticity, or complete normative protocol conformance. Passing these gates
-is not a production-readiness claim.
-
-## Remaining work and priority
-
-1. Close the assembled-source PR feedback test and integration gates with the exact
-   source inventory and outcomes in the [round-four feedback receipt](../../evidence/pr-feedback-round4-validation.json).
-   A pending or partial receipt does not establish a final validation pass.
-2. Complete independent RFC/IANA review and broader executable coverage for
-   every declared BGP profile row. Registration and typed parsing do not by
-   themselves establish full semantic support.
-3. Retain sustained stateful fuzzing and lawful capture/collector disagreement
-   evidence, adjudicated from original bytes and primary specifications.
-4. Measure representative scale, memory, and throughput; obtain fresh exact-head
-   Linux repository CI and security review before raising the corresponding
-   qualification claims. Any Windows or macOS claim requires separately retained
-   manual or external platform qualification; those platforms are retired from
-   repository CI.
-5. Continue the separate DNP3 non-secure profile toward its documented
-   completion criteria; secure authentication, device truth, and unsupported
-   vendor semantics remain outside current proof.
-
-## Boundaries
-
-All parser, replay, policy, and association output is offline evidence or
-candidate analysis. No source authenticity, endpoint negotiation, route
-installation, reachability, causality, or attack attribution is claimed.
+Normative completeness, sustained fuzzing, lawful real-corpus
+parity/differential minimization, representative scale/RSS, security review, and
+any manual Windows/macOS claim each require separate evidence bound to the
+source and scope claimed. Integrity digests, synthetic tests, external-analyzer agreement, or a partial
+local profile status do not supply those qualifications.

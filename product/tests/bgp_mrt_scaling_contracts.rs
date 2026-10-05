@@ -2,6 +2,7 @@
 //! Synthetic local contracts, not corpus, endpoint, or throughput qualification.
 use pcap_evidence::{json::Json, sha256};
 use pcap_evidence_product::deep::{
+    bgp_import::{ImportContext, ImportedSourceEvent, ImportedSourceEventKind},
     bgp_mrt::{Bgp4mpPayload, MrtBatch, MrtBody, MrtLimits, MrtSource},
     bgp_mrt_store,
     bgp_state::{ApplyStatus, CandidateState, Observation},
@@ -408,20 +409,236 @@ fn v1_sealed_bytes_remain_exact_and_disk_rejection_leaves_no_destination() {
     assert!(!temp.file("too-small").exists());
 }
 
+// Independent logical inventory: fixed context/range units are the public
+// imported-carrier contract, not allocator estimates or producer charge calls.
+fn imported_context_units(context: &ImportContext) -> usize {
+    1024 + [
+        Some(context.source_id.as_str()),
+        Some(context.source_schema.as_str()),
+        context.source_version.as_deref(),
+        context.clock.clock_id.as_deref(),
+        context.batch.batch_id.as_deref(),
+        context.batch.sha256.as_deref(),
+        Some(context.checkpoint_id.as_str()),
+        Some(context.session.as_str()),
+        context.peer.as_deref(),
+        context.local.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::len)
+    .sum::<usize>()
+        + context
+            .provenance
+            .iter()
+            .map(|range| 128 + range.sha256.as_ref().map_or(0, String::len))
+            .sum::<usize>()
+}
+
+fn json_allocation_units(value: &Json) -> usize {
+    fn heap(value: &Json) -> usize {
+        match value {
+            Json::String(text) => text.capacity(),
+            Json::Array(items) => {
+                items.capacity() * std::mem::size_of::<Json>()
+                    + items.iter().map(heap).sum::<usize>()
+            }
+            Json::Object(fields) => {
+                fields.capacity() * std::mem::size_of::<(&str, Json)>()
+                    + fields.iter().map(|(_, value)| heap(value)).sum::<usize>()
+            }
+            Json::Null | Json::Bool(_) | Json::Number(_) => 0,
+        }
+    }
+    std::mem::size_of::<Json>() + heap(value)
+}
+
+// Reconstruct this fixture's source witness from its literal wire contract.
+// The charge is for the original reference before clone: cloned String/Vec
+// capacities can be smaller, so measuring an archived clone is insufficient.
+fn table_fixture_reference(record_index: usize, rib_index: usize, raw: &[u8]) -> Json {
+    let peer_index = record_index % 2 == 0;
+    let offset = if peer_index {
+        rib_index * 85
+    } else {
+        rib_index * 85 + 34
+    };
+    let length = if peer_index { 22 } else { 39 };
+    let record_bytes = &raw[offset..offset + 12 + length];
+    let body = if peer_index {
+        Json::object([
+            ("kind", "peer_index".into()),
+            ("peers", 1usize.to_string().into()),
+        ])
+    } else {
+        Json::object([
+            ("kind", "rib".into()),
+            ("sequence", rib_index.into()),
+            (
+                "prefix",
+                Json::object([
+                    ("afi", 1u16.into()),
+                    ("safi", 1u8.into()),
+                    ("length", 32u8.into()),
+                    (
+                        "address",
+                        std::net::Ipv4Addr::new(198, 18, 0, rib_index as u8)
+                            .to_string()
+                            .into(),
+                    ),
+                ]),
+            ),
+            ("entries", 1usize.to_string().into()),
+            (
+                "peer_table_offset",
+                ((rib_index * 85) as u64).to_string().into(),
+            ),
+        ])
+    };
+    Json::object([
+        ("schema", "pcap-evidence.bgp.mrt-record-summary.v1".into()),
+        ("offset", (offset as u64).to_string().into()),
+        ("length", length.into()),
+        ("record_type", 13u16.into()),
+        ("subtype", (if peer_index { 1u16 } else { 2u16 }).into()),
+        ("seconds", (if peer_index { 11u32 } else { 12u32 }).into()),
+        ("microseconds", Json::Null),
+        ("sha256", sha256::hex(&sha256::digest(record_bytes)).into()),
+        ("body", body),
+    ])
+}
+
+fn source_event_units(event: &ImportedSourceEvent, original_reference: &Json) -> usize {
+    std::mem::size_of::<ImportedSourceEvent>()
+        + json_allocation_units(original_reference)
+        + event.context.as_ref().map_or(0, imported_context_units)
+        + event
+            .continuity_cuts
+            .iter()
+            .map(|cut| {
+                imported_context_units(&cut.context) + cut.record_id.len() + cut.reason.len()
+            })
+            .sum::<usize>()
+}
+
 #[test]
 fn output_and_combined_retention_failures_precede_destination_creation() {
     let temp = Scratch::new();
     let raw = mrt(4, true);
+    assert_eq!(raw.len(), 4 * (34 + 51));
     let archive = build(&temp.file("reference"), &raw, limits());
     let output_size = archive.encoded_len_bounded(limits().output_bytes).unwrap();
-    let retained = archive.state.retained_bytes()
+    assert_eq!(output_size, archive.json().encode().len());
+    // The fixture has eight containers and four bound observations. All other
+    // variable retained archive members are explicitly inventoried below.
+    assert_eq!(archive.batch().records.len(), 8);
+    assert_eq!(archive.state.observations().len(), 4);
+    assert_eq!(archive.candidates.len(), 4);
+    assert!(archive.bgp4mp_candidates.is_empty());
+    assert!(archive.bgp4mp_events.is_empty());
+    assert_eq!(archive.bgp4mp_messages, 0);
+    assert_eq!(archive.bgp4mp_state_changes, 0);
+    assert_eq!(archive.opaque_records, 0);
+    assert_eq!(archive.unsupported_rib_entries, 0);
+    assert_eq!(archive.peer_relationship, None);
+    assert_eq!(archive.source_events.len(), 12);
+    assert_eq!(
+        archive
+            .source_events
+            .iter()
+            .filter(|event| event.context.is_some())
+            .count(),
+        4
+    );
+    let source_units = archive
+        .source_events
+        .iter()
+        .map(|event| {
+            let record_index = event.source_record_index;
+            assert!(record_index < 8);
+            assert!(event.continuity_cuts.is_empty());
+            let peer_index = record_index % 2 == 0;
+            assert_eq!(
+                event.kind,
+                if peer_index {
+                    ImportedSourceEventKind::SessionMetadata
+                } else {
+                    ImportedSourceEventKind::Update
+                }
+            );
+            if let Some(observation_index) = event.observation_index {
+                assert!(!peer_index);
+                assert_eq!(observation_index, record_index / 2);
+                assert_eq!(
+                    event.context.as_ref(),
+                    archive.state.observations()[observation_index].import_context()
+                );
+            } else {
+                assert!(event.context.is_none());
+            }
+            let reference = table_fixture_reference(record_index, record_index / 2, &raw);
+            assert_eq!(event.reference, reference);
+            source_event_units(event, &reference)
+        })
+        .sum::<usize>();
+    let old_piecemeal = archive.state.retained_bytes()
         + archive.bgp4mp_rib.retained_bytes()
         + archive.batch().retained_bytes
         + archive
             .candidates
             .iter()
-            .map(|c| c.json().encoded_len_bounded(usize::MAX).unwrap())
+            .map(|c| c.json().encode().len())
+            .sum::<usize>()
+        + archive
+            .bgp4mp_candidates
+            .iter()
+            .map(|c| c.json().encode().len())
+            .sum::<usize>()
+        + archive
+            .bgp4mp_events
+            .iter()
+            .map(|event| event.encode().len())
             .sum::<usize>();
+    // Unsupported evidence is an empty JSON array for this wholly normalized
+    // TDv2 fixture and contributes no additional retained projection units.
+    let Json::Object(fields) = archive.json() else {
+        panic!("archive object required")
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .find(|(key, _)| *key == "unsupported_rib_entry_evidence")
+            .unwrap()
+            .1,
+        Json::Array(Vec::new())
+    );
+    let final_retained_floor = old_piecemeal + source_units;
+    // Pre-reduction peak keeps the normalized observations and parsed batch,
+    // alongside the same source references. There are no BGP4MP sessions/cuts
+    // in this fixture; their transient charge is zero. It is a separate cap
+    // obligation, never padding added to the final archive floor.
+    let observation_units = observations(4, true)
+        .iter()
+        .map(|observation| {
+            std::mem::size_of::<Observation>()
+                + json_allocation_units(observation.normalized())
+                + observation
+                    .import_context()
+                    .map_or(0, imported_context_units)
+        })
+        .sum::<usize>();
+    let precopy_peak = archive.batch().retained_bytes
+        + archive.bgp4mp_rib.retained_bytes()
+        + source_units
+        + observation_units;
+    assert!(
+        precopy_peak > final_retained_floor,
+        "fixture must isolate transient peak {precopy_peak} from final floor {final_retained_floor}"
+    );
+    // The shared cap must admit both inventories; exact final-only retention
+    // is insufficient for this fixture. No producer charge/helper supplies
+    // either independent inventory or their maximum.
+    let retained = final_retained_floor.max(precopy_peak);
     for (name, l) in [
         (
             "output",
@@ -437,6 +654,20 @@ fn output_and_combined_retention_failures_precede_destination_creation() {
                 ..limits()
             },
         ),
+        (
+            "final-only",
+            Limits {
+                retained_bytes: final_retained_floor,
+                ..limits()
+            },
+        ),
+        (
+            "old-piecemeal",
+            Limits {
+                retained_bytes: old_piecemeal,
+                ..limits()
+            },
+        ),
     ] {
         assert!(bgp_mrt_store::create(
             &temp.file(name),
@@ -449,14 +680,56 @@ fn output_and_combined_retention_failures_precede_destination_creation() {
         .is_err());
         assert!(!temp.file(name).exists());
     }
-    build(
+    let exact_limits = Limits {
+        retained_bytes: retained,
+        output_bytes: output_size,
+        ..limits()
+    };
+    let exact = build(&temp.file("exact-retention"), &raw, exact_limits.clone());
+    let replayed = bgp_mrt_store::replay(
         &temp.file("exact-retention"),
-        &raw,
+        4 * 1024 * 1024,
+        MrtLimits::default(),
+        exact_limits,
+    )
+    .unwrap();
+    assert_eq!(exact.json(), archive.json());
+    assert_eq!(replayed.json(), archive.json());
+    // Legacy archive JSON omits the additive typed carriers; verify their
+    // complete source bindings separately through exact-cap create and replay.
+    for result in [&exact, &replayed] {
+        assert_eq!(result.source_events.len(), archive.source_events.len());
+        for (actual, expected) in result.source_events.iter().zip(&archive.source_events) {
+            assert_eq!(actual.source_record_index, expected.source_record_index);
+            assert_eq!(actual.observation_index, expected.observation_index);
+            assert_eq!(actual.kind, expected.kind);
+            assert_eq!(actual.context, expected.context);
+            assert_eq!(actual.continuity_cuts, expected.continuity_cuts);
+            assert_eq!(actual.reference, expected.reference);
+        }
+    }
+    for l in [
         Limits {
-            retained_bytes: retained,
+            retained_bytes: final_retained_floor,
             ..limits()
         },
-    );
+        Limits {
+            retained_bytes: retained - 1,
+            ..limits()
+        },
+        Limits {
+            output_bytes: output_size - 1,
+            ..limits()
+        },
+    ] {
+        assert!(bgp_mrt_store::replay(
+            &temp.file("exact-retention"),
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            l
+        )
+        .is_err());
+    }
 }
 
 #[test]

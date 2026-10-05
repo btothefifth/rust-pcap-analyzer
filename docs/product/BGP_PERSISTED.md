@@ -64,14 +64,120 @@ pcap-depth bgp query STORE --output NEW_FILE --prefix 203.0.113.0/24 --afi 1 --s
 pcap-depth bgp policy STORE --policy-profile PROFILE --output NEW_FILE
 ```
 
-Rich query and policy share exact filters `--session`, `--prefix`, `--afi`,
+Rich query and policy preserve exact v1 filters `--session`, `--prefix`, `--afi`,
 `--safi`, `--peer`, `--source`, `--checkpoint` and `--status`. CIDRs use canonical
-address and length text. No matching rows produces an explicit empty array.
-A missing checkpoint/peer does not match a requested value. Status accepts
-`active`, `withdrawn`, `superseded`, `unresolved`, `rejected`, `stale_graceful`,
+network address and length text, with no host bits or textual aliases. No matching
+rows produces an explicit empty array. Status accepts `active`, `withdrawn`,
+`superseded`, `unresolved`, `rejected`, `stale_graceful`,
 `stale_long_lived_graceful`, `stale_at_eor`, and `collector_candidate`. The earlier
-session-only query path remains compatible. Replay, state and export retain
-their existing store-specific outputs.
+session-only query path remains compatible. Default queries and policy calls with
+no new selectors keep their v1 schemas and field sets.
+
+The additive selector profile automatically selects the full v2 query/policy
+wrapper. `--evidence full` also selects it without extra filters; `--evidence
+legacy` conflicts with new selectors. Full state and association are selected
+explicitly through `--evidence full`; replay and export retain their existing
+store-specific outputs. `Query::default()` remains a v1 query; named
+`query_evidence`, `policy_evidence`, `state_evidence` and `associate_evidence`
+methods provide explicit full evidence APIs.
+
+| Selector | Accepted value and interpretation |
+| --- | --- |
+| `--prefix-mode` with `--prefix` | `exact`, `contains`, or `contained-by`; the selected network equals, contains, or is contained by the row network; address families must agree |
+| `--asn` with `--asn-role` | Nonzero canonical u32 and `origin` or `path-member`; both are required; the existing validated ASN selector rule is shared with streaming windows |
+| `--community` | Canonical u16:u16 pair; set membership |
+| `--large-community` | Three canonical u32 components separated by colons; tuple set membership |
+| `--extended-community` | Exactly 16 lowercase hexadecimal digits identifying eight raw bytes; membership of an effective raw attribute occurrence, with no interpretation of unknown community semantics |
+| `--next-hop` | Canonical IPv4 or IPv6 address; membership in the validated next-hop address set, including a global/link-local IPv6 pair |
+| `--partition`, `--generation` | Exact native partition ID and canonical u64 generation |
+| `--direction`, `--lifecycle` | Explicit direction `0` or `1`, and canonical captured lifecycle u64 |
+| `--path-id` | `absent`, `unknown`, or canonical u32; no implicit ADD-PATH inference |
+| `--attribute-scope` | `current-effective` (the default for attribute selectors), `any-retained-version`, or query-only `observation-event` |
+| `--version-index`, `--occurrence-id` | Zero-based retained version index and exact source occurrence ID, scoped by each returned route row |
+
+All selectors form a conjunction. Attribute predicates and a reported-time
+predicate must match the same validated occurrence of one retained version.
+Current-effective matching requires a current native route with exactly one
+current version; withdrawn, replaced, superseded, stale or collector attributes
+cannot match as current. Any-retained-version mode includes the retained versions
+and returns the exact matching version index, attribute identity, disposition and
+occurrence reference in `attribute_matches`. Version and occurrence selection does
+not alter the reducer's native state or manufacture a semantic identity.
+
+Origin ASN matching requires a complete unambiguous validated path whose terminal
+segment is AS_SEQUENCE; a terminal AS_SET, unresolved AS_TRANS, unresolved width or
+incomplete semantic identity remains uncertain. Path-member matching checks
+ordinary AS_SET/AS_SEQUENCE members using the same existing rule. Confederation
+segments are not silently treated as ordinary path members.
+
+A reported label-time window requires all five options:
+
+```text
+--reported-clock-policy source-label|ingestion-label
+--reported-clock-id EXACT_ID --reported-clock-source EXACT_SOURCE_ID
+--reported-start-ns SIGNED_I64 --reported-end-ns SIGNED_I64
+```
+
+The interval is `[start,end)` in signed nanoseconds, with `start < end`. A source,
+policy or ID mismatch excludes that clock; a missing clock/time remains typed
+uncertainty. No timestamp establishes measured accuracy or comparability. A
+row-only time query uses the row's reported last observation; an attribute-scoped
+time query uses its exact occurrence's clock and time. Observation events,
+withdrawals, resets and boundaries belong to the separate `changes` consumer.
+`--attribute-scope observation-event` selects exact validated source occurrences,
+including rejected announcements and withdrawals, and emits them in the separate
+`observation_matches` array with an empty native `routes` array. Each match carries
+its exact route key, source occurrence ID, normalized observation digest,
+observation/route index and captured lifecycle. A raw extended community can remain
+unsupported for admission into a native attribute version while its eight bytes
+match a source occurrence. `semantics_unknown` and
+`raw_extended_community_semantics=unknown` preserve this limit;
+`native_version_claimed=false` prevents promotion into accepted/current state.
+Observation-event queries reject native `--status` and `--version-index` selectors.
+Policy rejects observation-event scope. Current-effective and retained-version
+queries retain missing-version/current-attribute uncertainty for rejected rows.
+
+The v2 `selector_coverage` reports matched, excluded and uncertain row counts,
+typed uncertainty counts, up to 64 row witnesses (further bounded by caller
+limits), and the omitted-witness count. Missing or unsupported attributes,
+clocks, scope fields and native current versions cannot turn into evidence of
+absence. A known predicate mismatch excludes its conjunction; an existential
+retained-version match resolves uncertain alternative occurrences. Selector
+coverage is explicitly labeled `coverage_scope: "selector_fields"` and
+`source_coverage: "unknown"`. It describes availability of selector fields in
+replayed evidence. Zero uncertain rows never proves complete capture/import
+route population coverage or the absence of missing routes.
+V1 missing checkpoint/peer filters preserve their previous exclusion behavior;
+v2 reports reached missing evidence explicitly.
+
+CLI flags reject duplicates, incomplete selector groups, conflicting scope,
+noncanonical integers/addresses/CIDRs, malformed community values and reversed
+windows before store I/O. Query and policy output is measured as a complete
+encoded aggregate before publication. The exact byte limit accepts the document
+(and the CLI newline); one byte less rejects. Existing outputs are never replaced.
+
+Ordinary captured BGP observations populate `observed_at_ns` from the exact
+signed 64-bit timestamp of the greatest capture-frame ordinal among all raw
+spans contributing to that message. Reconstructed span order and numerical
+maximum timestamp do not select the clock. Missing, noncanonical or
+unrepresentable time on that selected frame stays unavailable; earlier frames
+cannot fill it. This is a capture evidence clock with unknown calibration and
+uncertainty, not an endpoint event clock or evidence of cross-source timing.
+The emitted `depth_bgp_capture_metadata` projection names that basis and its
+availability explicitly.
+
+For a retained TCP `flow.start` session, direction zero labels canonical
+endpoint a as `peer` and b as `local`; direction one reverses those IP labels.
+These are source/destination evidence labels and do not infer an AS relationship,
+BGP neighbor configuration or endpoint negotiation. Missing/invalid flow keys,
+missing/unknown direction or bounded retention exhaustion leaves both labels
+unavailable and records that unavailability in the emitted depth projection.
+Retention uses fixed-size IP address pairs capped by the element budget; flow
+end and coverage boundary events retire those pairs before session ID reuse.
+The private disk-backed packet map charges 65 bytes per captured frame,
+including the timestamp and its availability; source/hash/span checks still
+precede metadata use. Existing sealed journals preserve the populated fields
+through fresh replay and query without a persisted schema migration.
 
 Each rich route retains the original source kind/ID, partition, session,
 generation, direction, peer, family, path ID, checkpoint and clock. Every native
@@ -146,9 +252,13 @@ publishing output.
 A comparison namespace is a mandatory caller-established mapping. It does not
 rewrite either store's original namespace or partition. `same-clock` compares
 only the same policy and clock ID at zero label distance, using all reported
-uncertainty bounds. Missing/unknown/incompatible clocks or uncertainty yield an
-unresolved result. `ignore` requires a nonempty explicit basis and records that
-choice. No clock calibration or causal ordering is inferred.
+uncertainty bounds. Known unequal policies or clock IDs make a pair incompatible
+under that policy. Missing time, unknown clock identity or required-but-unknown
+uncertainty leaves it unresolved. Captured observations with present time carry
+`capture:<capture namespace hex>` source labels with unknown reported uncertainty;
+equal labels still do not establish calibrated time. `ignore` requires a nonempty
+explicit basis and records that choice. No clock calibration or causal ordering
+is inferred.
 
 The output `pcap-evidence.bgp.persisted-association.v1` references each sealed
 store by receipt, terminal digest, replay options and original namespace. It

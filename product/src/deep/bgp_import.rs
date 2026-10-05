@@ -75,6 +75,46 @@ pub struct ImportContext {
     pub provenance: Vec<SourceRange>,
 }
 
+/// A source-local continuity cut with its original immutable witness.
+/// Its exact scope may become known after a partial header is enriched, without
+/// changing the decoder session or permitting same-generation route currency.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportContinuityCut {
+    pub context: ImportContext,
+    pub record_id: String,
+    pub reason: String,
+}
+
+/// Producer-owned source semantics. Opaque references are evidence, not input
+/// to this classification or a substitute for checked observation bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportedSourceEventKind {
+    Open,
+    Keepalive,
+    Update,
+    Notification,
+    RouteRefresh,
+    SessionMetadata,
+    ContinuityGap,
+    /// A source occurrence that caused a decoder generation boundary. Its
+    /// context preserves the occurrence's original reported generation; this
+    /// classification is not a standalone native reset command.
+    GenerationBoundary,
+    Opaque,
+}
+
+/// An exact imported source occurrence, including route-free and rejected
+/// records. The enclosing verified archive binds the source-store receipt.
+#[derive(Clone, Debug)]
+pub struct ImportedSourceEvent {
+    pub source_record_index: usize,
+    pub observation_index: Option<usize>,
+    pub kind: ImportedSourceEventKind,
+    pub context: Option<ImportContext>,
+    pub continuity_cuts: Vec<ImportContinuityCut>,
+    pub reference: Json,
+}
+
 /// Separate checkpoint/batch namespaces never act as continuation of each other.
 /// Clock and record spans are record metadata, not partition selection inputs.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -197,6 +237,38 @@ impl ImportPartition {
     }
 }
 impl ImportContext {
+    /// Conservative logical retention charge without allocating JSON or
+    /// cloning metadata. Callers may multiply by six to admit escaped output.
+    pub fn retained_charge(&self) -> Result<usize> {
+        let mut bytes = 1024usize;
+        for value in [
+            Some(self.source_id.as_str()),
+            Some(self.source_schema.as_str()),
+            self.source_version.as_deref(),
+            self.clock.clock_id.as_deref(),
+            self.batch.batch_id.as_deref(),
+            self.batch.sha256.as_deref(),
+            Some(self.checkpoint_id.as_str()),
+            Some(self.session.as_str()),
+            self.peer.as_deref(),
+            self.local.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            bytes = bytes
+                .checked_add(value.len())
+                .ok_or_else(|| Error::limit("bgp_import_retained"))?;
+        }
+        for range in &self.provenance {
+            bytes = bytes
+                .checked_add(128)
+                .and_then(|n| n.checked_add(range.sha256.as_ref().map_or(0, String::len)))
+                .ok_or_else(|| Error::limit("bgp_import_retained"))?;
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn partition(&self) -> ImportPartition {
         ImportPartition {
             source_schema: self.source_schema.clone(),

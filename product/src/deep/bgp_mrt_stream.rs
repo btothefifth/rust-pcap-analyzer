@@ -3,6 +3,7 @@
 //! It never accumulates observations or derived RIB history.
 use super::{
     bgp,
+    bgp_import::ImportContinuityCut,
     bgp_mrt::{Bgp4mpPayload, MrtBatch, MrtBody, MrtRecord, MrtTime, SCHEMA},
     bgp_mrt_store::MrtReplayOptions,
     bgp_mrt_stream_store::{self as store, MrtStreamLimits, StreamReceipt},
@@ -34,6 +35,9 @@ pub struct StreamEvent<'a> {
     pub originated_seconds: Option<u32>,
     pub event: &'a Json,
     pub observation: Option<&'a Json>,
+    /// Exact decoder-owned continuity cuts, including before the first route.
+    /// These are provisional like the event and are not journal predecessors.
+    pub continuity_cuts: &'a [ImportContinuityCut],
 }
 fn record_event(record: &MrtRecord, kind: &str) -> Json {
     let reason = match &record.body {
@@ -67,15 +71,29 @@ impl VisitorBudget {
         entry: Option<usize>,
         event: &Json,
         observation: Option<&Json>,
+        continuity_cuts: &[ImportContinuityCut],
         l: &MrtStreamLimits,
         visitor: &mut F,
         state: &bgp::mrt::ReplayState,
         deep: &Limits,
     ) -> Result<()> {
+        let mut cut_bytes = 0usize;
+        for cut in continuity_cuts {
+            cut_bytes = cut_bytes
+                .checked_add(
+                    cut.context
+                        .retained_charge()?
+                        .checked_add(cut.record_id.len())
+                        .and_then(|n| n.checked_add(cut.reason.len()))
+                        .ok_or_else(|| Error::limit("mrt_stream_retained"))?,
+                )
+                .ok_or_else(|| Error::limit("mrt_stream_retained"))?;
+        }
         let session_bytes = state.retained_bytes(deep)?;
         let retained = self
             .retained_base
             .checked_add(session_bytes)
+            .and_then(|n| n.checked_add(cut_bytes))
             .and_then(|n| n.checked_add(store::json_memory(event)))
             .and_then(|n| n.checked_add(observation.map_or(0, store::json_memory)))
             .filter(|n| *n <= self.retained_cap)
@@ -122,6 +140,7 @@ impl VisitorBudget {
             originated_seconds,
             event,
             observation,
+            continuity_cuts,
         })
     }
 }
@@ -235,6 +254,7 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                         Some(entry),
                         &event,
                         observation.as_ref(),
+                        &[],
                         limits,
                         &mut visitor,
                         &state,
@@ -275,6 +295,39 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                     let replay = bgp::mrt::replay_message_record(
                         &batch, index, record, range, &effective, &mut state,
                     )?;
+                    let (mut cuts, cut_work) = state.continuity_cuts(
+                        &batch,
+                        index,
+                        record,
+                        &replay.event,
+                        replay.continuity_gap.as_ref(),
+                        &effective,
+                    )?;
+                    // Streaming has no native reducer. Keep the normalized
+                    // owner's initial typed cut in its source evidence row.
+                    if let Some(gap) = replay.continuity_gap {
+                        let mut bytes = state.retained_bytes(&effective)?;
+                        for cut in cuts.iter().chain(std::iter::once(&gap)) {
+                            bytes = bytes
+                                .checked_add(cut.context.retained_charge()?)
+                                .and_then(|n| n.checked_add(cut.record_id.len()))
+                                .and_then(|n| n.checked_add(cut.reason.len()))
+                                .filter(|n| *n <= effective.retained_bytes)
+                                .ok_or_else(|| Error::limit("mrt_stream_retained"))?;
+                        }
+                        if cuts.len() >= effective.elements {
+                            return Err(Error::limit("mrt_stream_retained"));
+                        }
+                        cuts.try_reserve(1)
+                            .map_err(|_| Error::limit("mrt_stream_retained"))?;
+                        cuts.push(gap);
+                    }
+                    store::charge(
+                        &mut budget.work,
+                        cut_work as u64,
+                        limits.work,
+                        "mrt_stream_work",
+                    )?;
                     budget.emit(
                         &verified,
                         ordinal,
@@ -282,6 +335,7 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                         None,
                         &replay.event,
                         replay.observation.as_ref(),
+                        &cuts,
                         limits,
                         &mut visitor,
                         &state,
@@ -292,6 +346,14 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                     let event = bgp::mrt::replay_state_record(
                         &batch, index, record, &effective, &mut state,
                     )?;
+                    let (cuts, cut_work) =
+                        state.continuity_cuts(&batch, index, record, &event, None, &effective)?;
+                    store::charge(
+                        &mut budget.work,
+                        cut_work as u64,
+                        limits.work,
+                        "mrt_stream_work",
+                    )?;
                     budget.emit(
                         &verified,
                         ordinal,
@@ -299,6 +361,7 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                         None,
                         &event,
                         None,
+                        &cuts,
                         limits,
                         &mut visitor,
                         &state,
@@ -313,6 +376,14 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                 let event = bgp::mrt::replay_malformed_record(
                     &batch, index, record, &effective, &mut state,
                 )?;
+                let (cuts, cut_work) =
+                    state.continuity_cuts(&batch, index, record, &event, None, &effective)?;
+                store::charge(
+                    &mut budget.work,
+                    cut_work as u64,
+                    limits.work,
+                    "mrt_stream_work",
+                )?;
                 budget.emit(
                     &verified,
                     ordinal,
@@ -320,6 +391,7 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                     None,
                     &event,
                     None,
+                    &cuts,
                     limits,
                     &mut visitor,
                     &state,
@@ -340,6 +412,7 @@ pub fn visit_verified<R: Read + Seek, F: FnMut(StreamEvent<'_>) -> Result<()>>(
                     None,
                     &event,
                     None,
+                    &[],
                     limits,
                     &mut visitor,
                     &state,

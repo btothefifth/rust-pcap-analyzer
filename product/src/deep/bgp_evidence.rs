@@ -7,7 +7,7 @@ use super::{
     bgp_mrt_store::MrtReplayOptions,
     bgp_mrt_stream::{visit_verified, StreamEvent},
     bgp_mrt_stream_store::{verify_stream, MrtStreamLimits, StreamReceipt},
-    bgp_state::Observation,
+    bgp_state::{Observation, ObservationKind, RoutePathId},
     model::{bad, Limits},
 };
 use pcap_evidence::{json::Json, sha256, Error, Result};
@@ -16,11 +16,23 @@ use std::{fs::File, io::Write, path::PathBuf};
 pub const SEQUENCE_SCHEMA: &str = "pcap-evidence.bgp.source-sequence.v1";
 pub const ROW_SCHEMA: &str = "pcap-evidence.bgp.evidence-row.v1";
 pub const MANIFEST_SCHEMA: &str = "pcap-evidence.bgp.evidence-manifest.v1";
+pub const ROW_SCHEMA_V2: &str = "pcap-evidence.bgp.evidence-row.v2";
+pub const MANIFEST_SCHEMA_V2: &str = "pcap-evidence.bgp.evidence-manifest.v2";
+pub const FIELD_AVAILABILITY_SCHEMA: &str = "pcap-evidence.bgp.route-field-availability.v1";
+
+/// Explicit compatibility boundary: legacy export bytes remain unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ComparisonFields {
+    #[default]
+    Legacy,
+    PerFieldV2,
+}
 pub const ALL_SOURCE_CLOCKS: &str = "all-source-clocks";
 const SEQUENCE_DOMAIN: &str = "pcap-evidence/bgp-source-sequence/v1";
 
 #[derive(Clone, Debug)]
 pub struct EvidenceLimits {
+    pub comparison_fields: ComparisonFields,
     pub checkpoints: usize,
     pub source_bytes: u64,
     pub store_bytes: u64,
@@ -34,6 +46,7 @@ pub struct EvidenceLimits {
 impl Default for EvidenceLimits {
     fn default() -> Self {
         Self {
+            comparison_fields: ComparisonFields::Legacy,
             checkpoints: 128,
             source_bytes: 1024 * 1024 * 1024,
             store_bytes: 2 * 1024 * 1024 * 1024,
@@ -368,6 +381,7 @@ impl Coverage {
 }
 #[derive(Clone, Debug)]
 pub struct EvidenceManifest {
+    pub comparison_fields: ComparisonFields,
     pub sequence: SourceSequence,
     pub rows: u64,
     pub rows_bytes: u64,
@@ -379,8 +393,16 @@ pub struct EvidenceManifest {
 }
 impl EvidenceManifest {
     fn payload(&self) -> Json {
-        Json::object([
-            ("schema", MANIFEST_SCHEMA.into()),
+        let mut payload = Json::object([
+            (
+                "schema",
+                if self.comparison_fields == ComparisonFields::Legacy {
+                    MANIFEST_SCHEMA
+                } else {
+                    MANIFEST_SCHEMA_V2
+                }
+                .into(),
+            ),
             ("complete", true.into()),
             ("rows", self.rows.to_string().into()),
             ("rows_bytes", self.rows_bytes.to_string().into()),
@@ -403,7 +425,18 @@ impl EvidenceManifest {
             ("source_authenticated", false.into()),
             ("endpoint_state_claimed", false.into()),
             ("resume_cursor_supported", false.into()),
-        ])
+        ]);
+        if self.comparison_fields == ComparisonFields::PerFieldV2 {
+            let Json::Object(fields) = &mut payload else {
+                unreachable!()
+            };
+            fields.push(("comparison_fields", "per-field-v2".into()));
+            fields.push((
+                "field_availability_schema",
+                FIELD_AVAILABILITY_SCHEMA.into(),
+            ));
+        }
+        payload
     }
     pub fn json(&self) -> Json {
         let Json::Object(mut fields) = self.payload() else {
@@ -726,7 +759,18 @@ fn export_inner<W: Write>(
                 time_disposition,
                 asn_disposition,
                 selected,
-            );
+                limits.comparison_fields,
+                deep,
+            )?;
+            // Declaration and original evidence coexist before encoding.
+            let row_size = row.encoded_len_bounded(limits.row_bytes)?;
+            if limits.comparison_fields == ComparisonFields::PerFieldV2
+                && retained
+                    .checked_add(row_size.saturating_mul(3))
+                    .is_none_or(|size| size > limits.retained_bytes)
+            {
+                return Err(Error::limit("bgp_evidence_retained_bytes"));
+            }
             let remaining = limits.output_bytes.saturating_sub(budget.output);
             let line = row.encode_bounded_line(limits.row_bytes.min(remaining))?;
             budget.charge((line.len() as u64).saturating_mul(4), limits)?;
@@ -756,6 +800,7 @@ fn export_inner<W: Write>(
         budget.charge(receipt.work_used, limits)?;
     }
     let mut manifest = EvidenceManifest {
+        comparison_fields: limits.comparison_fields,
         sequence: sequence.clone(),
         rows: coverage.rows,
         rows_bytes,
@@ -767,8 +812,14 @@ fn export_inner<W: Write>(
     };
     let payload = manifest.payload().encode_bounded(limits.retained_bytes)?;
     budget.charge((payload.len() as u64).saturating_mul(3), limits)?;
-    manifest.semantic_identity =
-        domain_digest("pcap-evidence/bgp-evidence-manifest/v1", payload.as_bytes());
+    manifest.semantic_identity = domain_digest(
+        if limits.comparison_fields == ComparisonFields::Legacy {
+            "pcap-evidence/bgp-evidence-manifest/v1"
+        } else {
+            "pcap-evidence/bgp-evidence-manifest/v2"
+        },
+        payload.as_bytes(),
+    );
     let line = manifest
         .json()
         .encode_bounded_line(limits.output_bytes.saturating_sub(budget.output))?;
@@ -777,6 +828,7 @@ fn export_inner<W: Write>(
     Ok(manifest)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row_json(
     entry: &SequenceEntry,
     event: &StreamEvent<'_>,
@@ -785,9 +837,19 @@ fn row_json(
     time_disposition: Option<&str>,
     asn_disposition: Option<&str>,
     selected: bool,
-) -> Json {
-    Json::object([
-        ("schema", ROW_SCHEMA.into()),
+    mode: ComparisonFields,
+    limits: &Limits,
+) -> Result<Json> {
+    let mut row = Json::object([
+        (
+            "schema",
+            if mode == ComparisonFields::Legacy {
+                ROW_SCHEMA
+            } else {
+                ROW_SCHEMA_V2
+            }
+            .into(),
+        ),
         ("provisional", true.into()),
         ("sequence_ordinal", entry.ordinal.to_string().into()),
         ("source_id", entry.source_id.clone().into()),
@@ -848,7 +910,126 @@ fn row_json(
         ),
         ("selected", selected.into()),
         ("certain_occurrence_time_claimed", false.into()),
-    ])
+    ]);
+    if mode == ComparisonFields::PerFieldV2 {
+        let declaration = route_field_availability(entry, event, limits)?;
+        let Json::Object(fields) = &mut row else {
+            unreachable!()
+        };
+        fields.push(("field_availability", declaration));
+    }
+    Ok(row)
+}
+
+/// Derive availability from the validated producer DTO, never semantic completeness.
+/// Export commitments establish integrity only, not source authentication.
+fn route_field_availability(
+    entry: &SequenceEntry,
+    event: &StreamEvent<'_>,
+    limits: &Limits,
+) -> Result<Json> {
+    let mut status = "unavailable";
+    let mut projection_complete = false;
+    let mut routes = Vec::new();
+    if let Some(normalized) = event.observation {
+        let observation = Observation::from_normalized(normalized, None, limits)?;
+        let context = observation.import_context().ok_or_else(|| {
+            bad(
+                "bgp_field_availability",
+                0,
+                "imported source context missing",
+            )
+        })?;
+        let end = event
+            .record_offset
+            .checked_add(event.record_bytes)
+            .ok_or_else(|| Error::limit("bgp_field_availability"))?;
+        if observation.source().source_id != entry.source_id
+            || context.batch.sha256.as_deref() != Some(entry.source_sha256.as_str())
+            || context.batch.byte_length != Some(entry.source_bytes)
+            || !context.provenance.iter().any(|range| {
+                range.start >= event.record_offset
+                    && range.start < range.end
+                    && range.end <= end
+                    && range.sha256.is_some()
+            })
+        {
+            return Err(bad(
+                "bgp_field_availability",
+                0,
+                "observation/source row reference mismatch",
+            ));
+        }
+        if observation.kind() == ObservationKind::Routes {
+            // BGP4MP UPDATEs carry an explicit producer flag. Imported RIB
+            // observations have no opaque NLRI and no message detail.
+            projection_complete = match value_at(observation.normalized(), "message_detail") {
+                Some(Json::Null) | None => event.entry_index.is_some(),
+                Some(detail) => {
+                    value_at(detail, "route_projection_incomplete") == Some(&Json::Bool(false))
+                }
+            };
+            status = if projection_complete {
+                "complete"
+            } else {
+                "incomplete"
+            };
+            for (index, route) in observation.routes().iter().enumerate() {
+                let prefix = route.prefix();
+                if !matches!((prefix.afi, prefix.safi), (1 | 2, 1 | 2)) {
+                    status = "incomplete";
+                }
+                let path_id = match route.path_id() {
+                    RoutePathId::Absent => Json::Null,
+                    RoutePathId::Present(value) => value.into(),
+                };
+                routes.push(Json::object([
+                    ("route_index", index.to_string().into()),
+                    (
+                        "action",
+                        match route.action() {
+                            RouteAction::Announce => "announce",
+                            RouteAction::Withdraw => "withdraw",
+                        }
+                        .into(),
+                    ),
+                    (
+                        "prefix",
+                        Json::object([
+                            ("afi", prefix.afi.into()),
+                            ("safi", prefix.safi.into()),
+                            ("length", prefix.length.into()),
+                            ("address", prefix.address.clone().into()),
+                        ]),
+                    ),
+                    ("path_id", path_id),
+                ]));
+            }
+        }
+    }
+    Ok(Json::object([
+        ("schema", FIELD_AVAILABILITY_SCHEMA.into()),
+        (
+            "source_reference",
+            Json::object([
+                ("sequence_ordinal", entry.ordinal.to_string().into()),
+                ("source_sha256", entry.source_sha256.clone().into()),
+                ("store_seal", entry.store_seal.clone().into()),
+                ("record_ordinal", event.record_ordinal.to_string().into()),
+                ("record_offset", event.record_offset.to_string().into()),
+                ("record_sha256", event.record_sha256.into()),
+                (
+                    "entry_index",
+                    event
+                        .entry_index
+                        .map_or(Json::Null, |value| value.to_string().into()),
+                ),
+            ]),
+        ),
+        ("route_projection_complete", projection_complete.into()),
+        ("status", status.into()),
+        ("routes", Json::Array(routes)),
+    ]))
 }
 
 fn classify(
@@ -895,58 +1076,70 @@ fn classify(
 fn asn_match(observation: &Observation, selector: AsnSelector) -> &'static str {
     let mut unknown = observation.routes().is_empty();
     for route in observation.routes() {
-        if route.action() != RouteAction::Announce
-            || route.ambiguous_attributes()
-            || text_at(route.semantic_identity(), "completeness") != Some("complete")
-        {
-            unknown = true;
-            continue;
+        match asn_route_match(route, selector) {
+            "matched" => return "matched",
+            "unknown_asn" => unknown = true,
+            _ => {}
         }
-        let Some(Json::Array(path)) = value_at(route.attributes(), "as_path") else {
-            unknown = true;
-            continue;
-        };
-        if path.is_empty() {
-            unknown = true;
-            continue;
-        }
-        if selector.role == AsnRole::PathMember {
-            let mut unresolved = false;
-            for segment in path {
-                let kind = value_at(segment, "kind").and_then(number);
-                let Some(Json::Array(values)) = value_at(segment, "values") else {
-                    unresolved = true;
-                    continue;
-                };
-                if !matches!(kind, Some(1 | 2)) {
-                    unresolved = true;
-                    continue;
-                }
-                for value in values {
-                    if number(value) == Some(u64::from(selector.asn)) && selector.asn != 23456 {
-                        return "matched";
-                    }
-                    if number(value) == Some(23456) {
-                        unresolved = true;
-                    }
-                }
-            }
-            unknown |= unresolved;
-        } else {
-            let terminal = path.last().expect("nonempty path");
-            let Some(Json::Array(values)) = value_at(terminal, "values") else {
-                unknown = true;
+    }
+    if unknown {
+        "unknown_asn"
+    } else {
+        "not_matched"
+    }
+}
+/// The common ASN selector rule consumes one already validated native route.
+pub(crate) fn asn_route_match(
+    route: &super::bgp_state::RouteObservation,
+    selector: AsnSelector,
+) -> &'static str {
+    let mut unknown = false;
+    if route.action() != RouteAction::Announce
+        || route.ambiguous_attributes()
+        || text_at(route.semantic_identity(), "completeness") != Some("complete")
+    {
+        return "unknown_asn";
+    }
+    let Some(Json::Array(path)) = value_at(route.attributes(), "as_path") else {
+        return "unknown_asn";
+    };
+    if path.is_empty() {
+        return "unknown_asn";
+    }
+    if selector.role == AsnRole::PathMember {
+        let mut unresolved = false;
+        for segment in path {
+            let kind = value_at(segment, "kind").and_then(number);
+            let Some(Json::Array(values)) = value_at(segment, "values") else {
+                unresolved = true;
                 continue;
             };
-            if value_at(terminal, "kind").and_then(number) != Some(2) {
-                unknown = true;
+            if !matches!(kind, Some(1 | 2)) {
+                unresolved = true;
                 continue;
             }
-            match values.last().and_then(number) {
-                Some(23456) | None => unknown = true,
-                Some(value) if value == u64::from(selector.asn) => return "matched",
-                Some(_) => {}
+            for value in values {
+                if number(value) == Some(u64::from(selector.asn)) && selector.asn != 23456 {
+                    return "matched";
+                }
+                if number(value) == Some(23456) {
+                    unresolved = true;
+                }
             }
+        }
+        unknown |= unresolved;
+    } else {
+        let terminal = path.last().expect("nonempty path");
+        let Some(Json::Array(values)) = value_at(terminal, "values") else {
+            return "unknown_asn";
+        };
+        if value_at(terminal, "kind").and_then(number) != Some(2) {
+            return "unknown_asn";
+        }
+        match values.last().and_then(number) {
+            Some(23456) | None => unknown = true,
+            Some(value) if value == u64::from(selector.asn) => return "matched",
+            Some(_) => {}
         }
     }
     if unknown {

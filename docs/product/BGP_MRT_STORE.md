@@ -95,6 +95,16 @@ created on those bounded paths. Library `json()` and `bgp4mp_rib_json()` are
 convenience materializers; callers choosing them own that additional allocation.
 They are outside the bounded streaming writer contract.
 
+The logical retention cap admits both the complete final archive inventory and
+its separate transient pre-copy peak. The final inventory includes parsed source,
+shared state, native RIB, candidate/event projections, typed source references
+with their contexts and continuity cuts, and unsupported-entry evidence. During
+replay, pending normalized observations and imported decoder sessions also
+contribute to pre-copy admission. The required cap is the maximum of these
+inventories; a cap equal to the final archive alone can still reject before any
+destination is created. These defined logical units are not physical RSS or an
+allocator guarantee. Fresh replay enforces the same admission obligations.
+
 Unsupported RIB entries are discovered with a source-order zipper over the
 normalized candidate index. The bounded preflight streams rows one at a time
 and aggregates exact output growth, retained bytes, and logical work before it
@@ -141,9 +151,11 @@ are reported FSM evidence, not endpoint truth. The replay validates reported
 transition edges and message-state gates; it does not reconstruct the TCP,
 timer, or collision machinery behind the peer's FSM. An UPDATE becomes an imported
 route candidate only with a consistent source-order FSM at Established, no
-known state conflict, exactly one valid OPEN from each direction, and an
-unambiguous shared capability context. Entering Idle retires that generation's
-OPEN context; the legal OpenSent -> Active transition also retires the failed
+known state conflict, a valid unambiguous OPEN context from each direction,
+and an unambiguous shared capability context. Distinct source occurrences may
+repeat identical complete validated raw OPEN contents. Different complete OPEN
+bytes remain ambiguous even when their capability summaries match. Entering
+Idle retires that generation's OPEN context; the legal OpenSent -> Active transition also retires the failed
 TCP attempt's capability evidence before a retry. Missing or conflicting
 evidence is retained as a quarantine event rather than guessed through.
 
@@ -173,9 +185,11 @@ This follows the ignore rule in
 [RFC 7313, Section 5](https://www.rfc-editor.org/rfc/rfc7313.html#section-5).
 
 For subtype 1 (BoRR) or 2 (EoRR), the imported decoder additionally requires
-exactly one valid, unambiguous wire OPEN from the opposite direction in the
-current generation, advertising zero-length capability 70. Direction 0 is
-peer-to-local, so its receiver advertisement comes from OPEN direction 1;
+a valid, unambiguous wire OPEN context from the opposite direction in the
+current generation, advertising zero-length capability 70. Identical complete
+validated raw OPEN contents may repeat as distinct source occurrences; differing
+complete bytes remain ambiguous even with equal capability summaries. Direction
+0 is peer-to-local, so its receiver advertisement comes from OPEN direction 1;
 direction 1 uses OPEN direction 0. A receiver-only advertisement suffices for
 this sender-layout condition; a sender-only advertisement does not. The
 condition follows the sender procedure in
@@ -186,7 +200,7 @@ is not inferred from that sender-layout evidence.
 The event detail carries `receiver_open_direction`,
 `receiver_capability70_advertised`, and `sender_layout_basis`. A qualifying
 advertisement has basis `observed_peer_capability70_for_sender_layout`;
-missing, repeated, invalid, and non-advertising receiver OPENs have explicit
+missing, conflicting, invalid, and non-advertising receiver OPENs have explicit
 distinct bases. `negotiation_established` and `endpoint_processing_claimed`
 remain false. Missing capability context yields
 `quarantined_route_refresh_capability_context`; an invalid or missing

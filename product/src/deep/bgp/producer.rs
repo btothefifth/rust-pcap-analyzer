@@ -28,6 +28,8 @@ pub(super) struct CapabilitySet {
     pub add_path_malformed: bool,
     pub extended_messages: bool,
     pub enhanced_refresh: bool,
+    // Retain an unsupported layout modifier without interpreting its grammar.
+    pub unsupported_ipv6_next_hop_layout: bool,
     pub valid: bool,
 }
 
@@ -176,6 +178,10 @@ impl<'a> Budget<'a> {
             let (v, s) = self.encode(&range.value, self.limits.input_bytes)?;
             nodes = add(nodes, add(s.nodes, 12)?)?;
             bytes = add(bytes, add(v.len(), 512)?)?;
+            if let Some(raw) = &range.value_hex {
+                nodes = add(nodes, 1)?;
+                bytes = add(bytes, add(raw.len(), 2)?)?;
+            }
         }
         // Bound per-route attribute replication BEFORE cloning typed records.
         cap(
@@ -429,25 +435,27 @@ pub(super) fn layout_evidence(state: &SessionState, scoped: bool) -> (LayoutCont
     if !scoped {
         return (context, "missing_scope");
     }
-    if state
-        .opens
-        .values()
-        .any(|opens| opens.len() != 1 || opens[0].ambiguous || !opens[0].capabilities.valid)
-    {
+    if state.opens.keys().any(|direction| {
+        state
+            .unambiguous_open(*direction)
+            .is_none_or(|open| !open.capabilities.valid)
+    }) {
         unresolved(&mut context);
         return (context, "ambiguous_open_evidence");
     }
-    let (Some(a), Some(b)) = (state.opens.get(&0), state.opens.get(&1)) else {
+    let (Some(a), Some(b)) = (state.unambiguous_open(0), state.unambiguous_open(1)) else {
         unresolved(&mut context);
         return (context, "missing_open_evidence");
     };
-    let (a, b) = (&a[0].capabilities, &b[0].capabilities);
+    let (a, b) = (&a.capabilities, &b.capabilities);
     context.asn_width = if a.four_octet_asn.is_some() && b.four_octet_asn.is_some() {
         4
     } else {
         2
     };
     context.mp = a.mp.intersection(&b.mp).copied().collect();
+    context.unsupported_ipv6_next_hop_layout =
+        a.unsupported_ipv6_next_hop_layout || b.unsupported_ipv6_next_hop_layout;
     context.extended_messages = a.extended_messages && b.extended_messages;
     if b.extended_messages {
         context.extended_message_senders.insert(0);
@@ -565,7 +573,7 @@ fn session_json(state: &SessionState, scoped: bool) -> Json {
                         ("direction", (*direction).into()),
                         (
                             "advertised_asn_width",
-                            if opens.len() == 1 && !opens[0].ambiguous {
+                            if state.unambiguous_open(*direction).is_some() {
                                 state.asn_width(*direction).into()
                             } else {
                                 Json::Null
@@ -691,7 +699,11 @@ pub(super) fn decode(
                     items.iter().any(|o| o.witness.value == open.witness.value)
                 });
                 if !identical {
-                    if old.is_some() {
+                    if old.is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|o| o.message_sha256 != open.message_sha256)
+                    }) {
                         issues.push("repeated_open_requires_explicit_generation_boundary");
                     }
                     cap(
@@ -1118,6 +1130,12 @@ fn parse_open_body(
                     }
                 }
                 if valid == Json::Null {
+                    // Capability 77 can change IPv6 next-hop layout. Its
+                    // unsupported bytes remain hash-only; do not select the
+                    // RFC 2545 grammar in the presence of this advertisement.
+                    if code == 77 {
+                        capability_set.unsupported_ipv6_next_hop_layout = true;
+                    }
                     issues.push("unsupported_capability_retained_by_hash");
                 } else if valid == Json::from(true) {
                     match code {
@@ -1225,14 +1243,13 @@ fn parse_open_body(
     cap(issues.len(), limits.elements, "bgp_producer_issues")?;
     let identifier_value = be32(b, 24)?;
     let identifier_address = Ipv4Addr::from(identifier_value);
-    if identifier_value == 0
-        || identifier_address.is_multicast()
-        || identifier_address.is_broadcast()
-    {
+    // RFC 6286 defines the identifier as an unsigned, nonzero 32-bit value.
+    // Dotted display is retained; IP address classes do not constrain this ID.
+    if identifier_value == 0 {
         return Err(bad(
             "bgp_identifier",
             24,
-            "BGP Identifier must be a nonzero unicast IPv4 address",
+            "BGP Identifier must be a nonzero unsigned 32-bit value",
         ));
     }
     let identifier = identifier_address.to_string();
@@ -1270,6 +1287,7 @@ fn parse_open_body(
     ]);
     let (encoded, size) = budget.encode(&value, limits.input_bytes.min(limits.retained_bytes))?;
     Ok(OpenState {
+        message_sha256: sha256::digest(b),
         autonomous_system,
         four_octet_asn: four,
         capabilities: capability_set,
@@ -1457,7 +1475,8 @@ mod tests {
 
     #[test]
     fn bilateral_layout_requires_both_open_witnesses_and_directional_modes() {
-        let make = |asn, mode| OpenState {
+        let make = |asn: u32, mode| OpenState {
+            message_sha256: sha256::digest(&asn.to_be_bytes()),
             autonomous_system: 23_456, // AS_TRANS for the four-octet test values.
             four_octet_asn: Some(asn),
             capabilities: CapabilitySet {

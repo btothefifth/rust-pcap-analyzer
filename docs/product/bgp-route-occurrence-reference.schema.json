@@ -1,0 +1,620 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pcap-evidence.bgp.route-occurrence-reference.schema",
+  "description": "Structural closure only. Native origins require verified producer and observation validation; JSON alone does not confer authority. v1 remains collector/direct evidence without native origin.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "pcap-evidence.bgp.route-occurrence-reference.v1"
+        },
+        "record_id": {
+          "type": "string"
+        },
+        "source_occurrence_id": {
+          "type": "string"
+        },
+        "normalized_observation_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "route_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "route_key": {
+          "type": "object",
+          "properties": {
+            "source_id": {
+              "type": "string"
+            },
+            "partition_id": {
+              "type": "string"
+            },
+            "source_kind": {
+              "enum": [
+                "captured",
+                "imported"
+              ]
+            },
+            "session": {
+              "type": "string"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "direction": {
+              "enum": [
+                null,
+                0,
+                1
+              ]
+            },
+            "peer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "afi": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "safi": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prefix": {
+              "type": "string"
+            },
+            "path_id": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                {
+                  "const": "unknown"
+                }
+              ]
+            }
+          },
+          "required": [
+            "source_id",
+            "partition_id",
+            "source_kind",
+            "session",
+            "generation",
+            "direction",
+            "peer",
+            "afi",
+            "safi",
+            "prefix",
+            "path_id"
+          ],
+          "additionalProperties": false
+        },
+        "original_namespace": {
+          "type": "string"
+        },
+        "captured_lifecycle": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_record_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_start": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_end": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "journal_record_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clock": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "enum": [
+                "unknown",
+                "source_label",
+                "ingestion_label"
+              ]
+            },
+            "clock_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reported_uncertainty_ns": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "policy",
+            "clock_id",
+            "reported_uncertainty_ns"
+          ],
+          "additionalProperties": false
+        },
+        "observed_at_ns": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^-?[0-9]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semantic_identity": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "coordinate_system": {
+              "enum": [
+                "captured_packet",
+                "source_relative"
+              ]
+            },
+            "import_context": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "captured_evidence": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "coordinate_system",
+            "import_context",
+            "captured_evidence"
+          ],
+          "additionalProperties": false
+        },
+        "normalized_observation": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema",
+        "record_id",
+        "source_occurrence_id",
+        "normalized_observation_sha256",
+        "route_index",
+        "route_key",
+        "original_namespace",
+        "captured_lifecycle",
+        "source_record_index",
+        "source_start",
+        "source_end",
+        "journal_record_sha256",
+        "checkpoint_id",
+        "clock",
+        "observed_at_ns",
+        "semantic_identity",
+        "provenance",
+        "normalized_observation"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "pcap-evidence.bgp.route-occurrence-reference.v2"
+        },
+        "record_id": {
+          "type": "string"
+        },
+        "source_occurrence_id": {
+          "type": "string"
+        },
+        "normalized_observation_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "route_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "route_key": {
+          "type": "object",
+          "properties": {
+            "source_id": {
+              "type": "string"
+            },
+            "partition_id": {
+              "type": "string"
+            },
+            "source_kind": {
+              "enum": [
+                "captured",
+                "imported"
+              ]
+            },
+            "session": {
+              "type": "string"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "direction": {
+              "enum": [
+                null,
+                0,
+                1
+              ]
+            },
+            "peer": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "afi": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "safi": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "prefix": {
+              "type": "string"
+            },
+            "path_id": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                {
+                  "const": "unknown"
+                }
+              ]
+            }
+          },
+          "required": [
+            "source_id",
+            "partition_id",
+            "source_kind",
+            "session",
+            "generation",
+            "direction",
+            "peer",
+            "afi",
+            "safi",
+            "prefix",
+            "path_id"
+          ],
+          "additionalProperties": false
+        },
+        "original_namespace": {
+          "type": "string"
+        },
+        "captured_lifecycle": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_record_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_start": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_end": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "journal_record_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clock": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "enum": [
+                "unknown",
+                "source_label",
+                "ingestion_label"
+              ]
+            },
+            "clock_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reported_uncertainty_ns": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "policy",
+            "clock_id",
+            "reported_uncertainty_ns"
+          ],
+          "additionalProperties": false
+        },
+        "observed_at_ns": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^-?[0-9]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "semantic_identity": {
+          "anyOf": [
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "coordinate_system": {
+              "enum": [
+                "captured_packet",
+                "source_relative"
+              ]
+            },
+            "import_context": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "captured_evidence": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "coordinate_system",
+            "import_context",
+            "captured_evidence"
+          ],
+          "additionalProperties": false
+        },
+        "normalized_observation": {
+          "type": "object"
+        },
+        "native_origin": {
+          "type": "object",
+          "properties": {
+            "event_index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "observation_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "route_index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "version_index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "event_index",
+            "observation_sha256",
+            "route_index",
+            "version_index"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "record_id",
+        "source_occurrence_id",
+        "normalized_observation_sha256",
+        "route_index",
+        "route_key",
+        "original_namespace",
+        "captured_lifecycle",
+        "source_record_index",
+        "source_start",
+        "source_end",
+        "journal_record_sha256",
+        "checkpoint_id",
+        "clock",
+        "observed_at_ns",
+        "semantic_identity",
+        "provenance",
+        "normalized_observation",
+        "native_origin"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

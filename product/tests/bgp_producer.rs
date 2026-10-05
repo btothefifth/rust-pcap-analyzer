@@ -544,11 +544,106 @@ fn malformed_capability_and_partial_looking_open_leave_the_prior_state_intact() 
     );
 }
 #[test]
-fn repeated_open_is_an_alternative_not_an_implicit_generation_boundary() {
+fn identical_open_bytes_retain_distinct_source_occurrences_and_bilateral_grammar() {
+    let raw = wire("open_four_a");
     let mut state = paired();
     let value = decode("open_four_a", &mut state, Some(0), 3);
     assert_eq!(state.generation(), 0);
-    assert_eq!(array(get(&opens(&value)[0], "observations")).len(), 2);
+    assert_eq!(opens(&value).len(), 2);
+    let witnesses = array(get(&opens(&value)[0], "observations"));
+    assert_eq!(witnesses.len(), 2);
+    for (witness, frame) in witnesses.iter().zip([1u64, 3]) {
+        assert_eq!(
+            get(get(witness, "source"), "record_id"),
+            &Json::from(format!("record-{frame}"))
+        );
+        let proof = get(witness, "evidence");
+        assert_eq!(
+            get(proof, "byte_length"),
+            &Json::from(raw.len().to_string())
+        );
+        assert_eq!(
+            get(proof, "reconstructed_sha256"),
+            &Json::from(sha256::hex(&sha256::digest(&raw)))
+        );
+        let spans = array(get(proof, "spans"));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(get(&spans[0], "frame"), &Json::from(frame.to_string()));
+    }
+    assert_eq!(get(&witnesses[0], "open"), get(&witnesses[1], "open"));
+    assert_ne!(
+        get(&witnesses[0], "evidence"),
+        get(&witnesses[1], "evidence")
+    );
+    assert_eq!(array(get(&opens(&value)[1], "observations")).len(), 1);
+    assert_eq!(get(context(&value), "asn_width"), &Json::from(4usize));
+    assert!(!array(get(&value, "issues")).contains(&Json::from(
+        "repeated_open_requires_explicit_generation_boundary"
+    )));
+    let route = decode("announce_four", &mut state, Some(0), 4);
+    assert_eq!(
+        array(get(&array(get(attrs(&route), "as_path"))[0], "values")),
+        &[Json::from(65636u32)]
+    );
+    assert!(
+        !Observation::from_normalized(&route, None, &Limits::default())
+            .unwrap()
+            .routes()[0]
+            .ambiguous_attributes()
+    );
+}
+
+#[test]
+fn repeated_open_is_an_alternative_not_an_implicit_generation_boundary() {
+    let original = wire("open_four_a");
+    let mut changed = original.clone();
+    // Hold time differs; ASN, identifier and capability occurrences are identical.
+    changed[22..24].copy_from_slice(&91u16.to_be_bytes());
+    assert_ne!(sha256::digest(&original), sha256::digest(&changed));
+    let mut state = paired();
+    let value = bgp::decode_pcap(
+        &evidence(&changed, 3),
+        metadata(Some(0), 3),
+        &mut state,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        get(get(&value, "message_detail"), "ambiguous"),
+        &Json::Bool(false)
+    );
+    assert_eq!(state.generation(), 0);
+    let witnesses = array(get(&opens(&value)[0], "observations"));
+    assert_eq!(witnesses.len(), 2);
+    assert_eq!(array(get(&opens(&value)[1], "observations")).len(), 1);
+    for key in [
+        "autonomous_system",
+        "four_octet_asn",
+        "identifier",
+        "capability_occurrences",
+    ] {
+        assert_eq!(
+            get(get(&witnesses[0], "open"), key),
+            get(get(&witnesses[1], "open"), key)
+        );
+    }
+    assert_eq!(
+        get(get(&witnesses[0], "open"), "hold_time"),
+        &Json::from(90u16)
+    );
+    assert_eq!(
+        get(get(&witnesses[1], "open"), "hold_time"),
+        &Json::from(91u16)
+    );
+    for (witness, raw) in witnesses.iter().zip([&original, &changed]) {
+        assert_eq!(
+            get(get(witness, "evidence"), "reconstructed_sha256"),
+            &Json::from(sha256::hex(&sha256::digest(raw)))
+        );
+    }
+    assert!(array(get(&value, "issues")).contains(&Json::from(
+        "repeated_open_requires_explicit_generation_boundary"
+    )));
     assert_eq!(get(context(&value), "asn_width"), &Json::Null);
     let route = decode("announce_two", &mut state, Some(0), 4);
     assert!(array(get(attrs(&route), "as_path")).is_empty());
@@ -561,6 +656,35 @@ fn repeated_open_is_an_alternative_not_an_implicit_generation_boundary() {
             .unwrap()
             .routes()[0]
             .ambiguous_attributes()
+    );
+
+    // The real consumer rejects the ambiguous announcement, preserving generation0.
+    let mut pipeline = pcap_evidence_product::deep::bgp_pipeline::CapturedSessionPipeline::new(
+        packet(1).capture,
+        "capture-source".into(),
+        7,
+        Limits::default(),
+    )
+    .unwrap();
+    for (raw, direction, frame) in [
+        (original, 0, 1),
+        (wire("open_four_b"), 1, 2),
+        (changed, 0, 3),
+    ] {
+        pipeline
+            .apply_message(&evidence(&raw, frame), metadata(Some(direction), frame))
+            .unwrap();
+    }
+    let receipt = pipeline
+        .apply_message(&evidence(&wire("announce_two"), 4), metadata(Some(0), 4))
+        .unwrap();
+    assert!(!receipt.protocol_reset);
+    assert_eq!(pipeline.wire_state().generation(), 0);
+    assert!(pipeline.rib().entries().is_empty());
+    assert_eq!(pipeline.rib().rejections().len(), 1);
+    assert_eq!(
+        pipeline.rib().rejections()[0].reason,
+        "ambiguous_attribute_context"
     );
 }
 #[test]

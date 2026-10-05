@@ -1,5 +1,7 @@
 //! Actual opt-in pipeline. Does not change the established pcap-product default.
 #![forbid(unsafe_code)]
+#[path = "pcap_depth_support/bgp_query_selectors.rs"]
+mod bgp_query_selectors;
 #[path = "pcap_depth_support/bgp_stream_commands.rs"]
 mod bgp_stream_commands;
 use pcap_evidence::{
@@ -19,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
 };
 fn usage() -> Error {
-    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth bgp import-mrt-stream MRT --workspace NEW_DIR --source-id ID --checkpoint ID [STREAM_LIMITS] | bgp chronology STORE [--with-store STORE] --workspace NEW_DIR [--peer-relationship unknown|internal|external] [STREAM_LIMITS] | bgp window STORE [--with-store STORE] --workspace NEW_DIR --asn N --asn-role origin|path-member --time-basis mrt-record|rib-originated|observation (--clock-source SOURCE_ID|--clock-scope SOURCE_ID|all-source-clocks) --start-ns I --end-ns I [STREAM_LIMITS] | analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] [--peer-relationship unknown|internal|external] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] [--peer-relationship unknown|internal|external] [--other-peer-relationship unknown|internal|external] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | STREAM_LIMITS: --max-source-bytes N --max-store-bytes N --max-record-bytes N --max-records N --max-work N (exports also --max-output-bytes N)")
+    Error::new(ErrorCode::Usage,0,"arguments","pcap-depth bgp import-mrt-stream MRT --workspace NEW_DIR --source-id ID --checkpoint ID [STREAM_LIMITS] | bgp chronology STORE [--with-store STORE] --workspace NEW_DIR [--peer-relationship unknown|internal|external] [--comparison-fields legacy-v1|per-field-v2] [STREAM_LIMITS] | bgp window STORE [--with-store STORE] --workspace NEW_DIR --asn N --asn-role origin|path-member --time-basis mrt-record|rib-originated|observation (--clock-source SOURCE_ID|--clock-scope SOURCE_ID|all-source-clocks) --start-ns I --end-ns I [--comparison-fields legacy-v1|per-field-v2] [STREAM_LIMITS] | analyze CAPTURE --workspace NEW_DIR [--format ndjson|tlv] [--ua-security-none] [--max-bgp-journal-bytes N] | decode PROTOCOL UNIT [--function N] [--fcs] [--ua-security-none] | bgp import-mrt MRT --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-mrt-bytes N] [--max-journal-bytes N] | bgp import-bmp BMP --workspace NEW_DIR --source-id ID --checkpoint ID [--peer-relationship unknown|internal|external] [--max-bmp-bytes N] [--max-journal-bytes N] | bgp changes STORE --output NEW_FILE [FILTERS] | bgp expectations STORE --profile PROFILE --output NEW_FILE | bgp policy STORE --policy-profile PROFILE --output NEW_FILE [FILTERS] [--peer-relationship unknown|internal|external] | bgp associate STORE --with-store STORE --comparison-namespace ID --clock-policy same-clock|ignore [--clock-basis BASIS] [--peer-relationship unknown|internal|external] [--other-peer-relationship unknown|internal|external] --output NEW_FILE | bgp replay|state|export STORE --output NEW_FILE [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | bgp query STORE --output NEW_FILE [--session ID] [--prefix CIDR] [--afi N] [--safi N] [--peer ID] [--source ID] [--checkpoint ID] [--status active|withdrawn|unresolved|collector_candidate] [--evidence legacy|full] [RICH_SELECTORS] [--peer-relationship unknown|internal|external] [--max-journal-bytes N] [--max-output-bytes N] | STREAM_LIMITS: --max-source-bytes N --max-store-bytes N --max-record-bytes N --max-records N --max-work N (exports also --max-output-bytes N) | RICH_SELECTORS: --prefix-mode exact|contains|contained-by --asn N --asn-role origin|path-member --community U16:U16 --large-community U32:U32:U32 --extended-community HEX16 --next-hop IP --partition ID --generation N --direction 0|1 --path-id absent|unknown|N --lifecycle N --attribute-scope current-effective|any-retained-version|observation-event --version-index N --occurrence-id ID --reported-clock-policy source-label|ingestion-label --reported-clock-id ID --reported-clock-source ID --reported-start-ns I --reported-end-ns I")
 }
 
 fn parse_peer_relationship(value: &str) -> Result<deep::bgp::PeerRelationship> {
@@ -584,7 +586,14 @@ fn bgp(v: &[String]) -> Result<()> {
     }
     if !matches!(
         command,
-        "replay" | "state" | "query" | "export" | "policy" | "associate"
+        "replay"
+            | "state"
+            | "query"
+            | "export"
+            | "policy"
+            | "associate"
+            | "changes"
+            | "expectations"
     ) {
         return Err(usage());
     }
@@ -593,7 +602,10 @@ fn bgp(v: &[String]) -> Result<()> {
     let mut session = None;
     let mut filters = deep::bgp_persisted::Query::default();
     let mut rich_query = false;
+    let mut selectors = bgp_query_selectors::SelectorFlags::default();
+    let mut evidence = None;
     let mut profile = None;
+    let mut expectation_profile = None;
     let mut other_store = None;
     let mut namespace = None;
     let mut clock_policy = None;
@@ -613,6 +625,13 @@ fn bgp(v: &[String]) -> Result<()> {
         let value = v.get(i).ok_or_else(usage)?;
         match flag {
             "--output" => output = Some(PathBuf::from(value)),
+            "--evidence" => {
+                evidence = Some(match value.as_str() {
+                    "full" => true,
+                    "legacy" => false,
+                    _ => return Err(usage()),
+                })
+            }
             "--session" => {
                 session = Some(value.clone());
                 filters.session = Some(value.clone());
@@ -622,11 +641,11 @@ fn bgp(v: &[String]) -> Result<()> {
                 rich_query = true;
             }
             "--afi" => {
-                filters.afi = Some(value.parse().map_err(|_| usage())?);
+                filters.afi = Some(bgp_query_selectors::unsigned(value)?);
                 rich_query = true;
             }
             "--safi" => {
-                filters.safi = Some(value.parse().map_err(|_| usage())?);
+                filters.safi = Some(bgp_query_selectors::unsigned(value)?);
                 rich_query = true;
             }
             "--peer" => {
@@ -646,6 +665,7 @@ fn bgp(v: &[String]) -> Result<()> {
                 rich_query = true;
             }
             "--policy-profile" => profile = Some(PathBuf::from(value)),
+            "--profile" => expectation_profile = Some(PathBuf::from(value)),
             "--with-store" => other_store = Some(PathBuf::from(value)),
             "--comparison-namespace" => namespace = Some(value.clone()),
             "--clock-policy" => clock_policy = Some(value.clone()),
@@ -656,18 +676,39 @@ fn bgp(v: &[String]) -> Result<()> {
             }
             "--max-journal-bytes" => maximum = value.parse().map_err(|_| usage())?,
             "--max-output-bytes" => max_output = value.parse().map_err(|_| usage())?,
+            _ if selectors.take(&mut filters, flag, value)? => rich_query = true,
             _ => return Err(usage()),
         }
         i += 1;
+    }
+    selectors.finish(&mut filters)?;
+    if evidence == Some(false) && (filters.is_v2() || command == "changes") {
+        return Err(usage());
+    }
+    if filters.is_observation_event() && command != "query" {
+        return Err(usage());
+    }
+    let full_evidence = evidence == Some(true) || filters.is_v2();
+    if full_evidence
+        && !matches!(
+            command,
+            "query" | "policy" | "state" | "associate" | "changes"
+        )
+    {
+        return Err(usage());
     }
     let output = output.ok_or_else(usage)?;
     if maximum < 128 || max_output == 0 {
         return Err(usage());
     }
-    if matches!(command, "policy" | "associate")
+    if matches!(command, "policy" | "associate" | "changes" | "expectations")
+        || full_evidence
         || command == "query" && (rich_query || session.is_none())
     {
-        if command != "policy" && profile.is_some()
+        if command != "expectations" && expectation_profile.is_some()
+            || command == "expectations" && (rich_query || session.is_some() || evidence.is_some())
+            || command == "state" && (rich_query || session.is_some())
+            || command != "policy" && profile.is_some()
             || command != "associate"
                 && (other_store.is_some()
                     || namespace.is_some()
@@ -692,10 +733,22 @@ fn bgp(v: &[String]) -> Result<()> {
         )?;
         let load_limits = limits.clone();
         limits.output_bytes = consumer_output_limit;
-        let encoded = if command == "policy" {
+        let encoded = if command == "changes" {
+            store.changes(&filters, &limits)?
+        } else if command == "expectations" {
+            let profile = deep::bgp_persisted::analysis::ExpectationProfile::read(
+                &expectation_profile.ok_or_else(usage)?,
+                &limits,
+            )?;
+            store.expectations(&profile, &limits)?
+        } else if command == "policy" {
             let profile =
                 deep::bgp_persisted::PolicyProfile::read(&profile.ok_or_else(usage)?, &limits)?;
-            store.policy(&filters, &profile, &limits)?
+            if full_evidence {
+                store.policy_evidence(&filters, &profile, &limits)?
+            } else {
+                store.policy(&filters, &profile, &limits)?
+            }
         } else if command == "associate" {
             use deep::bgp_association::*;
             let time = match clock_policy.as_deref().ok_or_else(usage)? {
@@ -731,7 +784,15 @@ fn bgp(v: &[String]) -> Result<()> {
                 spatial: SpatialRule::EqualPrefix,
                 time,
             };
-            store.associate(&other, &namespace, &policy, &limits)?
+            if full_evidence {
+                store.associate_evidence(&other, &namespace, &policy, &limits)?
+            } else {
+                store.associate(&other, &namespace, &policy, &limits)?
+            }
+        } else if command == "state" {
+            store.state_evidence(&limits)?
+        } else if full_evidence {
+            store.query_evidence(&filters, &limits)?
         } else {
             store.query(&filters, &limits)?
         };
@@ -749,6 +810,8 @@ fn bgp(v: &[String]) -> Result<()> {
         });
     }
     if rich_query
+        || evidence.is_some()
+        || expectation_profile.is_some()
         || profile.is_some()
         || other_store.is_some()
         || namespace.is_some()

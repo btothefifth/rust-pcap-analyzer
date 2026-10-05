@@ -617,6 +617,51 @@ fn feedback_session_event(
     assert!(short.is_empty(), "query preflight leaves no partial output");
 }
 
+fn assert_exact_negative_partition_cuts(
+    archive: &bgp_mrt_store::MrtReplayArchive,
+    expected_partitions: usize,
+    expected_sessions: usize,
+) {
+    use std::collections::BTreeSet;
+    let gaps = archive.bgp4mp_rib.gaps();
+    assert_eq!(
+        gaps.len(),
+        expected_partitions,
+        "negative evidence covers decoder-only and route-bearing exact partitions"
+    );
+    let partitions: BTreeSet<_> = gaps
+        .iter()
+        .map(|(scope, _)| {
+            (
+                &scope.source,
+                &scope.session,
+                scope.generation,
+                scope.direction,
+            )
+        })
+        .collect();
+    assert_eq!(
+        partitions.len(),
+        expected_partitions,
+        "no duplicate initial native cut"
+    );
+    let sessions: BTreeSet<_> = gaps.iter().map(|(scope, _)| &scope.session).collect();
+    assert_eq!(
+        sessions.len(),
+        expected_sessions,
+        "unrelated sessions remain outside the cut"
+    );
+    let record = archive.batch().records.last().unwrap();
+    let witness = format!(
+        "mrt-bgp4mp-quarantine:{}:{}",
+        archive.batch().records.len() - 1,
+        record.sha256
+    );
+    assert!(gaps.iter().all(|(scope, record_id)| scope.generation == 0
+        && scope.direction.is_none()
+        && record_id == &witness));
+}
+
 #[test]
 fn feedback_identifiable_empty_and_one_byte_payloads_invalidate_only_their_peer() {
     use pcap_evidence_product::deep::bgp_rib::RouteStatus;
@@ -680,7 +725,7 @@ fn feedback_identifiable_empty_and_one_byte_payloads_invalidate_only_their_peer(
                 assert!(entries.values().any(|e| e.status == RouteStatus::Unresolved
                     && e.key.scope.peer.as_deref()
                         == Some(format!("{asn}@198.51.100.1").as_str())));
-                assert_eq!(archive.bgp4mp_rib.gaps().len(), 1);
+                assert_exact_negative_partition_cuts(&archive, 2, 1);
                 let event = archive.bgp4mp_events.last().unwrap();
                 assert_eq!(field_string(event, "parse_status"), Some("rejected"));
                 assert_eq!(
@@ -755,7 +800,7 @@ fn feedback_unknown_interface_ambiguity_invalidates_all_compatible_real_scopes()
         let path = scratch.file(&format!("ambiguous-{state_change}.store"));
         let archive = import(&path, &bytes, "feedback-ambiguous");
         feedback_current_count(&archive, 1);
-        assert_eq!(archive.bgp4mp_rib.gaps().len(), 2);
+        assert_exact_negative_partition_cuts(&archive, 4, 2);
         assert_eq!(
             archive.state.observations().len(),
             3,
@@ -944,7 +989,7 @@ fn feedback_unidentifiable_malformed_records_expose_conservative_coverage_gap() 
         let path = scratch.file(&format!("unknown-{case}.store"));
         let archive = import(&path, &bytes, "feedback-coverage");
         feedback_current_count(&archive, 0);
-        assert_eq!(archive.bgp4mp_rib.gaps().len(), 3);
+        assert_exact_negative_partition_cuts(&archive, 6, 3);
         assert_eq!(archive.state.observations().len(), 3);
         assert!(archive
             .bgp4mp_rib
@@ -1007,7 +1052,7 @@ fn feedback_malformed_state_metadata_is_scoped_and_unsupported_opaque_is_exclude
         let path = scratch.file(&format!("state-malformed-{}.store", payload.len()));
         let archive = import(&path, &bytes, "feedback-state");
         feedback_current_count(&archive, 2);
-        assert_eq!(archive.bgp4mp_rib.gaps().len(), 1);
+        assert_exact_negative_partition_cuts(&archive, 2, 1);
         assert_eq!(archive.state.observations().len(), 3);
         feedback_fresh_selection(&path, &archive, 2);
     }
@@ -2288,7 +2333,7 @@ fn malformed_complete_bgp4mp_messages_remain_sealed_and_quarantine_only_their_se
             field_string(range, "sha256"),
             Some(sha256::hex(&sha256::digest(&malformed)).as_str())
         );
-        assert_eq!(archive.bgp4mp_rib.gaps().len(), 1);
+        assert_exact_negative_partition_cuts(&archive, 2, 1);
         assert_eq!(
             archive
                 .bgp4mp_rib
@@ -2494,6 +2539,49 @@ fn imported_session_rib_exact_output_and_store_limits_fail_before_publication() 
     .unwrap();
     assert_eq!(exact.bgp4mp_rib_json(None), reference.bgp4mp_rib_json(None));
     assert_eq!(fs::metadata(&exact_path).unwrap().len(), store_bytes);
+    let replay = bgp_mrt_store::replay(
+        &exact_path,
+        store_bytes,
+        MrtLimits::default(),
+        Limits {
+            output_bytes,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        replay.bgp4mp_rib_json(None),
+        reference.bgp4mp_rib_json(None)
+    );
+    for (case, retained_bytes, work) in [
+        (
+            "retained-below-native-state",
+            reference.bgp4mp_rib.retained_bytes() - 1,
+            Limits::default().work,
+        ),
+        (
+            "work-below-native-state",
+            Limits::default().retained_bytes,
+            reference.bgp4mp_rib.accounted_work() - 1,
+        ),
+    ] {
+        let path = scratch.file(case);
+        assert!(bgp_mrt_store::create(
+            &path,
+            &bytes,
+            source("limits"),
+            store_bytes,
+            MrtLimits::default(),
+            Limits {
+                retained_bytes,
+                work,
+                output_bytes,
+                ..Limits::default()
+            },
+        )
+        .is_err());
+        assert!(!path.exists(), "resource refusal must precede publication");
+    }
     for (case, maximum, output_cap) in [
         ("output-below", store_bytes, output_bytes - 1),
         ("store-below", store_bytes - 1, output_bytes),
@@ -2917,4 +3005,977 @@ fn continuity_internal_cli_fixture() -> Vec<u8> {
         at += 12 + body_length;
     }
     bytes
+}
+
+#[test]
+fn rejected_bgp4mp_body_retains_gap_before_first_route_and_native_only_reset() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::RouteStatus};
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    // Every message has a valid common BGP header and exact enclosing extent.
+    // These errors share semantic rejection without a decoder-generation reset.
+    for (wire, issue) in [
+        (bgp_message(4, &[0]), "bgp4mp_keepalive_rejected"),
+        (bgp_message(2, &[0, 0, 0]), "bgp4mp_update_rejected"),
+        (bgp_message(3, &[0]), "bgp4mp_notification_rejected"),
+        (bgp_message(5, &[0, 1, 0]), "bgp4mp_route_refresh_rejected"),
+    ] {
+        for prior in [false, true] {
+            for recover in [false, true] {
+                let scratch = Scratch::new();
+                let mut bytes = continuity_internal_flow(7, prior);
+                bytes.extend(continuity_internal_flow(8, true));
+                let rejected = message_record(
+                    MessageRecordMetadata::new(
+                        Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                        16,
+                        4,
+                        31,
+                        None,
+                        false,
+                    ),
+                    &wire,
+                );
+                let offset = bytes.len();
+                bytes.extend(&rejected);
+                if recover {
+                    // Reset before the first normalized observation when prior=false.
+                    bytes.extend(state_record(
+                        Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                        5,
+                        32,
+                        6,
+                        1,
+                    ));
+                    bytes.extend(state_record(
+                        Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                        5,
+                        32,
+                        1,
+                        2,
+                    ));
+                    bytes.extend(continuity_internal_flow(7, false));
+                }
+                bytes.extend(continuity_internal_message(7, true));
+                let path = scratch.file("semantic-rejection.mrt");
+                let archive = bgp_mrt_store::create_with_options(
+                    &path,
+                    &bytes,
+                    source("semantic-rejection"),
+                    4 * 1024 * 1024,
+                    MrtLimits::default(),
+                    Limits::default(),
+                    options,
+                )
+                .unwrap();
+                let message_hash = sha256::hex(&sha256::digest(&wire));
+                let rejected_hash = sha256::hex(&sha256::digest(&rejected));
+                let event = archive
+                    .bgp4mp_events
+                    .iter()
+                    .find(|event| event.encode().contains(issue))
+                    .expect("original semantic rejection survives");
+                let event_json = event.encode();
+                assert!(
+                    event_json.contains("\"parse_status\":\"rejected\""),
+                    "{event_json}"
+                );
+                assert!(event_json.contains(&message_hash), "{event_json}");
+                assert!(event_json.contains(&rejected_hash), "{event_json}");
+                assert!(event_json.contains("\"generation\":0"), "{event_json}");
+                let session = match event {
+                    Json::Object(fields) => fields.iter().find_map(|(key, value)| {
+                        if *key == "session" {
+                            if let Json::String(s) = value {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                }
+                .unwrap();
+                assert_eq!(
+                    archive.bgp4mp_rib.gaps().len(),
+                    1,
+                    "issue={issue} prior={prior} recover={recover}"
+                );
+                let target: Vec<_> = archive
+                    .bgp4mp_rib
+                    .entries()
+                    .values()
+                    .filter(|entry| entry.key.scope.session == session)
+                    .collect();
+                assert_eq!(
+                    target
+                        .iter()
+                        .filter(|entry| entry.status == RouteStatus::Active)
+                        .count(),
+                    usize::from(recover)
+                );
+                assert_eq!(
+                    target
+                        .iter()
+                        .filter(|entry| entry.status == RouteStatus::Unresolved)
+                        .count(),
+                    usize::from(!recover)
+                );
+                assert!(target
+                    .iter()
+                    .all(|entry| entry.status != RouteStatus::Withdrawn));
+                assert_eq!(
+                    archive
+                        .bgp4mp_rib
+                        .entries()
+                        .values()
+                        .filter(|entry| entry.key.scope.session != session
+                            && entry.status == RouteStatus::Active)
+                        .count(),
+                    1
+                );
+                let gap = &archive.bgp4mp_rib.gaps()[0];
+                assert_eq!(gap.0.session, session);
+                assert_eq!(gap.0.generation, 0);
+                assert!(gap.1.contains(&rejected_hash));
+                let sealed = bgp_mrt_store::read_source(&path, 4 * 1024 * 1024).unwrap();
+                let source_start = sealed
+                    .windows(bytes.len())
+                    .position(|part| part == bytes.as_slice())
+                    .expect("sealed store retains exact original source bytes");
+                assert_eq!(
+                    sealed[source_start + offset..source_start + offset + rejected.len()],
+                    rejected
+                );
+                let replay = bgp_mrt_store::replay_with_options(
+                    &path,
+                    4 * 1024 * 1024,
+                    MrtLimits::default(),
+                    Limits::default(),
+                    options,
+                )
+                .unwrap();
+                assert_eq!(archive.bgp4mp_rib_json(None), replay.bgp4mp_rib_json(None));
+                assert_eq!(archive.state.encode(), replay.state.encode());
+            }
+        }
+    }
+}
+
+#[test]
+fn valid_route_free_bgp4mp_controls_and_unrelated_opaque_record_preserve_currency() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::RouteStatus};
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for wire in [bgp_message(4, &[]), bgp_message(2, &[0, 0, 0, 0])] {
+        let scratch = Scratch::new();
+        let mut bytes = continuity_internal_flow(7, false);
+        bytes.extend(message_record(
+            MessageRecordMetadata::new(
+                Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                16,
+                4,
+                31,
+                None,
+                false,
+            ),
+            &wire,
+        ));
+        bytes.extend(mrt_record(32, 99, 0, b"unsupported unrelated record"));
+        bytes.extend(continuity_internal_message(7, true));
+        let archive = bgp_mrt_store::create_with_options(
+            &scratch.file("controls.mrt"),
+            &bytes,
+            source("valid-controls"),
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert!(archive.bgp4mp_rib.gaps().is_empty());
+        assert_eq!(
+            archive.bgp4mp_rib.entries().values().next().unwrap().status,
+            RouteStatus::Active
+        );
+        assert_eq!(archive.bgp4mp_rib.eors().len(), usize::from(wire[18] == 2));
+    }
+}
+
+#[test]
+fn incremental_bgp4mp_semantic_rejection_carries_exact_pre_route_cut() {
+    use pcap_evidence_product::deep::{
+        bgp::PeerRelationship,
+        bgp_mrt_stream::visit_verified,
+        bgp_mrt_stream_store::{write_stream, MrtStreamLimits},
+    };
+    use std::io::Cursor;
+    let wire = bgp_message(4, &[0]);
+    let rejected = message_record(
+        MessageRecordMetadata::new(
+            Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+            16,
+            4,
+            31,
+            None,
+            false,
+        ),
+        &wire,
+    );
+    let mut bytes = continuity_internal_flow(7, false);
+    bytes.extend(continuity_internal_flow(8, true));
+    let offset = bytes.len();
+    bytes.extend(&rejected);
+    bytes.extend(continuity_internal_message(7, true));
+    let mut stored = Vec::new();
+    let limits = MrtStreamLimits::default();
+    write_stream(
+        &mut Cursor::new(&bytes),
+        &mut stored,
+        bytes.len() as u64,
+        source("incremental-semantic-rejection"),
+        &limits,
+    )
+    .unwrap();
+    let mut cuts = Vec::new();
+    let mut first_route_session = None;
+    visit_verified(
+        &mut Cursor::new(stored),
+        &limits,
+        &Limits::default(),
+        &bgp_mrt_store::MrtReplayOptions {
+            peer_relationship: Some(PeerRelationship::Internal),
+        },
+        |event| {
+            if event.event.encode().contains("bgp4mp_keepalive_rejected") {
+                assert!(event.observation.is_none());
+                assert_eq!(event.continuity_cuts.len(), 1);
+                assert_eq!(event.record_offset, offset as u64);
+                assert_eq!(event.record_sha256, sha256::hex(&sha256::digest(&rejected)));
+                cuts.extend_from_slice(event.continuity_cuts);
+            } else {
+                assert!(event.continuity_cuts.is_empty());
+                if event.record_offset > offset as u64 {
+                    if let Some(normalized) = event.observation {
+                        let observation =
+                            pcap_evidence_product::deep::bgp_state::Observation::from_normalized(
+                                normalized,
+                                None,
+                                &Limits::default(),
+                            )?;
+                        first_route_session = observation.source().session.clone();
+                    }
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(cuts.len(), 1);
+    assert_eq!(Some(cuts[0].context.session.clone()), first_route_session);
+    assert_eq!(cuts[0].context.generation, 0);
+    assert_eq!(
+        cuts[0].context.batch.sha256,
+        Some(sha256::hex(&sha256::digest(&bytes)))
+    );
+    assert_eq!(cuts[0].context.provenance[0].start, offset as u64);
+    assert_eq!(
+        cuts[0].context.provenance[0].end,
+        (offset + rejected.len()) as u64
+    );
+    assert_eq!(
+        cuts[0].context.provenance[0].sha256,
+        Some(sha256::hex(&sha256::digest(&rejected)))
+    );
+}
+
+#[test]
+fn rejected_unknown_asn_header_transfers_original_gap_to_enriched_partition() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::RouteStatus};
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for recover in [false, true] {
+        let scratch = Scratch::new();
+        let rejected = message_record(
+            MessageRecordMetadata::new(Bgp4mpMetadata::new(4, 0, 0, 7), 16, 4, 1, None, false),
+            &bgp_message(4, &[0]),
+        );
+        let hash = sha256::hex(&sha256::digest(&rejected));
+        let mut bytes = rejected.clone();
+        bytes.extend(continuity_internal_flow(7, false));
+        bytes.extend(continuity_internal_flow(8, true));
+        if recover {
+            bytes.extend(state_record(
+                Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                5,
+                32,
+                6,
+                1,
+            ));
+            bytes.extend(state_record(
+                Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                5,
+                32,
+                1,
+                2,
+            ));
+            bytes.extend(continuity_internal_flow(7, false));
+        }
+        bytes.extend(continuity_internal_message(7, true));
+        let path = scratch.file("enriched.mrt");
+        let archive = bgp_mrt_store::create_with_options(
+            &path,
+            &bytes,
+            source("enriched"),
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        let target = archive
+            .bgp4mp_candidates
+            .iter()
+            .find(|c| c.record_index == archive.batch().records.len() - 1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "final route candidate absent; producer events={} native={}",
+                    Json::array(archive.bgp4mp_events.clone()).encode(),
+                    archive.bgp4mp_rib_json(None).encode()
+                )
+            });
+        let entry = archive
+            .bgp4mp_rib
+            .entries()
+            .values()
+            .find(|entry| {
+                entry.key.scope.session == target.session
+                    && entry.key.scope.generation == u64::from(recover)
+            })
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            if recover {
+                RouteStatus::Active
+            } else {
+                RouteStatus::Unresolved
+            }
+        );
+        assert!(archive
+            .bgp4mp_rib
+            .gaps()
+            .iter()
+            .all(|(scope, witness)| scope.generation == 0 && witness.contains(&hash)));
+        assert!(archive
+            .bgp4mp_rib
+            .gaps()
+            .iter()
+            .any(|(scope, _)| scope.peer.as_deref() == Some("65551@198.51.100.1")));
+        assert_eq!(
+            archive
+                .bgp4mp_rib
+                .entries()
+                .values()
+                .filter(|entry| entry.key.scope.session != target.session
+                    && entry.status == RouteStatus::Active)
+                .count(),
+            1
+        );
+        let replay = bgp_mrt_store::replay_with_options(
+            &path,
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(archive.bgp4mp_rib_json(None), replay.bgp4mp_rib_json(None));
+    }
+}
+
+#[test]
+fn opaque_update_gap_transfers_exact_direction_and_witness_to_future_partition() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::RouteStatus};
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for already_known in [false, true] {
+        for recover in [false, true] {
+            let scratch = Scratch::new();
+            let mut bytes = continuity_internal_flow(7, false);
+            bytes.extend(continuity_internal_flow(8, true));
+            if already_known {
+                bytes.extend(message_record(
+                    MessageRecordMetadata::new(
+                        Bgp4mpMetadata::new(4, 0, 0, 7),
+                        16,
+                        4,
+                        30,
+                        None,
+                        false,
+                    ),
+                    &bgp_message(4, &[]),
+                ));
+            }
+            let opaque_index = 11 + usize::from(already_known);
+            bytes.extend(continuity_internal_message(7, false));
+            if recover {
+                bytes.extend(state_record(
+                    Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                    5,
+                    32,
+                    6,
+                    1,
+                ));
+                bytes.extend(state_record(
+                    Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                    5,
+                    32,
+                    1,
+                    2,
+                ));
+                bytes.extend(continuity_internal_flow(7, false));
+            }
+            bytes.extend(message_record(
+                MessageRecordMetadata::new(Bgp4mpMetadata::new(4, 0, 0, 7), 16, 4, 33, None, false),
+                &continuity_internal_update(true),
+            ));
+            let path = scratch.file("opaque-enriched.mrt");
+            let archive = bgp_mrt_store::create_with_options(
+                &path,
+                &bytes,
+                source("opaque-enriched"),
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            let target = archive
+                .bgp4mp_candidates
+                .iter()
+                .find(|c| c.record_index == archive.batch().records.len() - 1)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "final route candidate absent; producer events={} native={}",
+                        Json::array(archive.bgp4mp_events.clone()).encode(),
+                        archive.bgp4mp_rib_json(None).encode()
+                    )
+                });
+            let entry = archive
+                .bgp4mp_rib
+                .entries()
+                .values()
+                .find(|entry| {
+                    entry.key.scope.session == target.session
+                        && entry.key.scope.peer == target.peer
+                        && entry.key.scope.generation == u64::from(recover)
+                })
+                .unwrap();
+            assert_eq!(
+                entry.status,
+                if recover {
+                    RouteStatus::Active
+                } else {
+                    RouteStatus::Unresolved
+                }
+            );
+            let original = archive
+                .state
+                .observations()
+                .iter()
+                .find(|observation| {
+                    observation.import_context().is_some_and(|c| {
+                        c.provenance[0].sha256
+                            == archive
+                                .batch()
+                                .bgp4mp_message_source_range(opaque_index)
+                                .unwrap()
+                                .unwrap()
+                                .sha256
+                    })
+                })
+                .unwrap();
+            let witness = &original.source().record_id;
+            let gaps = archive.bgp4mp_rib.gaps();
+            assert_eq!(
+                gaps.len(),
+                if recover && !already_known { 1 } else { 2 },
+                "initial normalized Gap is not duplicated"
+            );
+            assert!(gaps
+                .iter()
+                .all(|(scope, record_id)| scope.direction == Some(0)
+                    && scope.generation == 0
+                    && record_id == witness));
+            assert_eq!(
+                archive
+                    .bgp4mp_rib
+                    .entries()
+                    .values()
+                    .filter(|entry| entry.key.scope.session != target.session
+                        && entry.status == RouteStatus::Active)
+                    .count(),
+                1
+            );
+            let replay = bgp_mrt_store::replay_with_options(
+                &path,
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(archive.bgp4mp_rib_json(None), replay.bgp4mp_rib_json(None));
+            assert_eq!(archive.state.encode(), replay.state.encode());
+        }
+    }
+}
+
+#[test]
+fn identical_repeated_receiver_open_qualifies_enhanced_refresh_sender_layout() {
+    for changed in [false, true] {
+        let scratch = Scratch::new();
+        let metadata = Bgp4mpMetadata::new(4, 65_551, 65_552, 7);
+        let mut bytes = state_record(metadata, 5, 1, 2, 4);
+        bytes.extend(message_record(
+            MessageRecordMetadata::new(metadata, 16, 4, 2, None, false),
+            &open(65_551, true, [198, 51, 100, 1]),
+        ));
+        for identifier in [
+            [198, 51, 100, 2],
+            [198, 51, 100, if changed { 3 } else { 2 }],
+        ] {
+            let mut receiver = open(65_552, true, identifier);
+            receiver[28] += 4;
+            receiver.extend_from_slice(&[2, 2, 70, 0]);
+            let length = receiver.len() as u16;
+            receiver[16..18].copy_from_slice(&length.to_be_bytes());
+            bytes.extend(message_record(
+                MessageRecordMetadata::new(metadata, 16, 4, 2, None, true),
+                &receiver,
+            ));
+        }
+        bytes.extend(state_record(metadata, 5, 3, 4, 5));
+        bytes.extend(state_record(metadata, 5, 4, 5, 6));
+        bytes.extend(message_record(
+            MessageRecordMetadata::new(metadata, 16, 4, 5, None, false),
+            &bgp_message(5, &[0, 1, 1, 1]),
+        ));
+        let archive = bgp_mrt_store::create(
+            &scratch.file("repeat-refresh.mrt"),
+            &bytes,
+            source("repeat-refresh"),
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            json_field(archive.bgp4mp_events.last().unwrap(), "parse_status"),
+            &Json::String(
+                if changed {
+                    "quarantined_route_refresh_capability_context"
+                } else {
+                    "decoded_route_refresh"
+                }
+                .to_owned()
+            )
+        );
+        assert_eq!(
+            archive
+                .bgp4mp_events
+                .iter()
+                .filter(|event| json_field(event, "parse_status")
+                    == &Json::String("decoded_open".to_owned()))
+                .count(),
+            3
+        );
+    }
+}
+
+#[test]
+fn imported_source_events_retain_route_free_negative_boundary_and_observation_bindings() {
+    use pcap_evidence_product::deep::{
+        bgp::PeerRelationship, bgp_import::ImportedSourceEventKind as Kind,
+    };
+    let scratch = Scratch::new();
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    let mut bytes = continuity_internal_flow(7, false);
+    let metadata = Bgp4mpMetadata::new(4, 65_551, 65_552, 7);
+    let wrap = |message: &[u8]| {
+        message_record(
+            MessageRecordMetadata::new(metadata, 16, 4, 30, None, false),
+            message,
+        )
+    };
+    bytes.extend(wrap(&bgp_message(4, &[])));
+    bytes.extend(wrap(&bgp_message(2, &[0, 0, 0, 0])));
+    bytes.extend(wrap(&bgp_message(4, &[0])));
+    bytes.extend(continuity_internal_message(7, false));
+    bytes.extend(state_record(metadata, 5, 32, 6, 1));
+    bytes.extend(mrt_record(33, 99, 0, &[1, 2, 3]));
+    let path = scratch.file("source-events.mrt");
+    let archive = bgp_mrt_store::create_with_options(
+        &path,
+        &bytes,
+        source("source-events"),
+        4 * 1024 * 1024,
+        MrtLimits::default(),
+        Limits::default(),
+        options,
+    )
+    .unwrap();
+    let events = &archive.source_events;
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].source_record_index <= pair[1].source_record_index));
+    for index in 0..archive.batch().records.len() {
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| event.source_record_index == index && event.observation_index.is_none()
+                )
+                .count(),
+            1,
+            "source container ordinal={index}"
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::Open)
+            .count(),
+        2
+    );
+    let valid = events
+        .iter()
+        .find(|event| event.source_record_index == 5)
+        .unwrap();
+    assert_eq!(valid.kind, Kind::Keepalive);
+    assert!(valid.continuity_cuts.is_empty());
+    assert_eq!(valid.context.as_ref().unwrap().direction, Some(0));
+    let eor = events
+        .iter()
+        .find(|event| event.source_record_index == 6 && event.observation_index.is_some())
+        .unwrap();
+    assert_eq!(eor.kind, Kind::Update);
+    assert!(eor.continuity_cuts.is_empty());
+    let reject = events
+        .iter()
+        .find(|event| event.source_record_index == 7)
+        .unwrap();
+    assert_eq!(reject.kind, Kind::ContinuityGap);
+    assert!(reject.observation_index.is_none());
+    assert_eq!(reject.continuity_cuts.len(), 1);
+    assert_eq!(reject.continuity_cuts[0].context.direction, None);
+    assert_eq!(
+        reject.continuity_cuts[0].context.provenance[0]
+            .sha256
+            .as_deref(),
+        Some(archive.batch().records[7].sha256.as_str())
+    );
+    let opaque = events
+        .iter()
+        .find(|event| event.source_record_index == 8 && event.observation_index.is_none())
+        .unwrap();
+    assert_eq!(opaque.kind, Kind::ContinuityGap);
+    assert!(opaque
+        .continuity_cuts
+        .iter()
+        .any(|cut| cut.context.direction == Some(0)
+            && cut.reason == "decoded_update_opaque_route_evidence"));
+    let reset = events
+        .iter()
+        .find(|event| event.source_record_index == 9 && event.observation_index.is_none())
+        .unwrap();
+    assert_eq!(reset.kind, Kind::GenerationBoundary);
+    assert_eq!(reset.context.as_ref().unwrap().generation, 1);
+    assert!(reset.continuity_cuts.is_empty());
+    let unsupported = events.last().unwrap();
+    assert_eq!(unsupported.kind, Kind::Opaque);
+    assert!(unsupported.context.is_none() && unsupported.continuity_cuts.is_empty());
+    for event in events {
+        if let Some(index) = event.observation_index {
+            assert_eq!(
+                event.context.as_ref(),
+                archive.state.observations()[index].import_context()
+            );
+        }
+    }
+    let replay = bgp_mrt_store::replay_with_options(
+        &path,
+        4 * 1024 * 1024,
+        MrtLimits::default(),
+        Limits::default(),
+        options,
+    )
+    .unwrap();
+    assert_eq!(events.len(), replay.source_events.len());
+    for (a, b) in events.iter().zip(&replay.source_events) {
+        assert_eq!(
+            (a.source_record_index, a.observation_index, a.kind),
+            (b.source_record_index, b.observation_index, b.kind)
+        );
+        assert_eq!(a.context, b.context);
+        assert_eq!(a.continuity_cuts, b.continuity_cuts);
+        assert_eq!(a.reference, b.reference);
+    }
+}
+
+#[test]
+fn pending_continuity_direction_session_generation_twins_use_exact_scopes() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::RouteStatus};
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for semantic in [false, true] {
+        for recover in [false, true] {
+            let scratch = Scratch::new();
+            let metadata = Bgp4mpMetadata::new(4, 65_551, 65_552, 7);
+            let mut bytes = continuity_internal_flow(7, false);
+            bytes.extend(continuity_internal_flow(8, true));
+            for local in [false, true] {
+                bytes.extend(message_record(
+                    MessageRecordMetadata::new(metadata, 16, 4, 30, None, local),
+                    &continuity_internal_update(false),
+                ));
+            }
+            if semantic {
+                bytes.extend(message_record(
+                    MessageRecordMetadata::new(metadata, 16, 4, 31, None, false),
+                    &bgp_message(4, &[0]),
+                ));
+            }
+            if recover {
+                bytes.extend(state_record(metadata, 5, 32, 6, 1));
+                bytes.extend(state_record(metadata, 5, 32, 1, 2));
+                bytes.extend(continuity_internal_flow(7, false));
+            }
+            let unknown_index = 13 + usize::from(semantic) + if recover { 7 } else { 0 };
+            for local in [false, true] {
+                bytes.extend(message_record(
+                    MessageRecordMetadata::new(
+                        Bgp4mpMetadata::new(4, 0, 0, 7),
+                        16,
+                        4,
+                        33,
+                        None,
+                        local,
+                    ),
+                    &continuity_internal_update(true),
+                ));
+            }
+            let path = scratch.file("direction-twins.mrt");
+            let archive = bgp_mrt_store::create_with_options(
+                &path,
+                &bytes,
+                source("direction-twins"),
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            let target = archive
+                .bgp4mp_candidates
+                .iter()
+                .find(|c| c.record_index == unknown_index)
+                .unwrap();
+            let entries: Vec<_> = archive
+                .bgp4mp_rib
+                .entries()
+                .values()
+                .filter(|entry| {
+                    entry.key.scope.session == target.session
+                        && entry.key.scope.peer.as_deref() == Some("0@198.51.100.1")
+                        && entry.key.scope.generation == u64::from(recover)
+                })
+                .collect();
+            assert_eq!(entries.len(), 2);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.key.scope.direction == Some(0))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.key.scope.direction == Some(1))
+                    .count(),
+                1
+            );
+            assert!(entries.iter().all(|entry| entry.status
+                == if recover {
+                    RouteStatus::Active
+                } else {
+                    RouteStatus::Unresolved
+                }));
+            assert_eq!(
+                archive
+                    .bgp4mp_rib
+                    .entries()
+                    .values()
+                    .filter(|entry| entry.key.scope.session != target.session
+                        && entry.status == RouteStatus::Active)
+                    .count(),
+                1
+            );
+            let count = 2 + usize::from(semantic);
+            assert_eq!(
+                archive.bgp4mp_rib.gaps().len(),
+                count * if recover { 1 } else { 2 }
+            );
+            assert!(archive
+                .bgp4mp_rib
+                .gaps()
+                .iter()
+                .all(|(scope, _)| scope.session == target.session && scope.generation == 0));
+            let row = archive
+                .source_events
+                .iter()
+                .find(|event| {
+                    event.source_record_index == unknown_index && event.observation_index.is_none()
+                })
+                .unwrap();
+            assert_eq!(row.continuity_cuts.len(), if recover { 0 } else { count });
+            if !recover {
+                assert_eq!(
+                    row.continuity_cuts
+                        .iter()
+                        .filter(|cut| cut.context.direction == Some(0))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    row.continuity_cuts
+                        .iter()
+                        .filter(|cut| cut.context.direction == Some(1))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    row.continuity_cuts
+                        .iter()
+                        .filter(|cut| cut.context.direction.is_none())
+                        .count(),
+                    usize::from(semantic)
+                );
+                for cut in &row.continuity_cuts {
+                    let origin = archive
+                        .source_events
+                        .iter()
+                        .find(|event| {
+                            event.observation_index.is_none()
+                                && event.continuity_cuts.iter().any(|original| {
+                                    original.record_id == cut.record_id
+                                        && original.context.peer.as_deref()
+                                            == Some("65551@198.51.100.1")
+                                })
+                        })
+                        .unwrap();
+                    let original = origin
+                        .continuity_cuts
+                        .iter()
+                        .find(|original| original.record_id == cut.record_id)
+                        .unwrap();
+                    assert_eq!(cut.reason, original.reason);
+                    assert_eq!(cut.context.direction, original.context.direction);
+                    assert_eq!(cut.context.provenance, original.context.provenance);
+                }
+            }
+            let replay = bgp_mrt_store::replay_with_options(
+                &path,
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(archive.bgp4mp_rib_json(None), replay.bgp4mp_rib_json(None));
+        }
+    }
+}
+
+#[test]
+fn native_mrt_versions_bind_exact_observation_occurrence_and_route_ordinal() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::VersionDisposition};
+    let scratch = Scratch::new();
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    let mut wire = continuity_internal_update(true);
+    wire.extend_from_slice(&[24, 198, 51, 101]);
+    let length = wire.len() as u16;
+    wire[16..18].copy_from_slice(&length.to_be_bytes());
+    let update = message_record(
+        MessageRecordMetadata::new(
+            Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+            16,
+            4,
+            31,
+            None,
+            false,
+        ),
+        &wire,
+    );
+    let mut bytes = continuity_internal_flow(7, false);
+    bytes.extend(&update);
+    bytes.extend(&update);
+    let path = scratch.file("native-origins.mrt");
+    let archive = bgp_mrt_store::create_with_options(
+        &path,
+        &bytes,
+        source("native-origins"),
+        4 * 1024 * 1024,
+        MrtLimits::default(),
+        Limits::default(),
+        options,
+    )
+    .unwrap();
+    let observations = archive.state.observations();
+    assert_eq!(observations.len(), 2);
+    assert_ne!(observations[0].sha256(), observations[1].sha256());
+    assert_eq!(archive.bgp4mp_rib.events().len(), 2);
+    assert_eq!(archive.bgp4mp_rib.entries().len(), 2);
+    for entry in archive.bgp4mp_rib.entries().values() {
+        assert_eq!(entry.versions.len(), 1);
+        let version = &entry.versions[0];
+        assert_eq!(version.disposition, VersionDisposition::Current);
+        assert_eq!(version.occurrences.len(), 2);
+        for (index, occurrence) in version.occurrences.iter().enumerate() {
+            assert_eq!(occurrence.event_index, index);
+            assert_eq!(occurrence.observation_sha256, observations[index].sha256());
+            assert_eq!(
+                observations[index].routes()[occurrence.route_index].prefix(),
+                &entry.key.prefix
+            );
+            assert_eq!(
+                archive.bgp4mp_rib.events()[occurrence.event_index].record_id,
+                observations[index].source().record_id
+            );
+        }
+    }
+    let replay = bgp_mrt_store::replay_with_options(
+        &path,
+        4 * 1024 * 1024,
+        MrtLimits::default(),
+        Limits::default(),
+        options,
+    )
+    .unwrap();
+    for (key, entry) in archive.bgp4mp_rib.entries() {
+        let fresh = replay.bgp4mp_rib.entries().get(key).unwrap();
+        assert_eq!(entry.versions, fresh.versions);
+    }
 }

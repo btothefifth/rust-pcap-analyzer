@@ -1443,6 +1443,52 @@ fn malformed_termination_requires_reason_gaps_context_and_valid_up_recovers() {
         .any(|entry| entry.key.scope.generation == 1 && entry.status == RouteStatus::Withdrawn));
 }
 
+// Independent inventory of the typed source carrier's documented logical
+// units. Do not call archive.retained_charge or the producer's private helpers.
+fn imported_context_logical_units(
+    c: &pcap_evidence_product::deep::bgp_import::ImportContext,
+) -> usize {
+    1024 + [
+        Some(c.source_id.as_str()),
+        Some(c.source_schema.as_str()),
+        c.source_version.as_deref(),
+        c.clock.clock_id.as_deref(),
+        c.batch.batch_id.as_deref(),
+        c.batch.sha256.as_deref(),
+        Some(c.checkpoint_id.as_str()),
+        Some(c.session.as_str()),
+        c.peer.as_deref(),
+        c.local.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::len)
+    .sum::<usize>()
+        + c.provenance
+            .iter()
+            .map(|r| 128 + r.sha256.as_ref().map_or(0, String::len))
+            .sum::<usize>()
+}
+fn typed_source_logical_units(archive: &bgp_bmp_store::BmpReplayArchive) -> usize {
+    archive
+        .source_events
+        .iter()
+        .map(|e| {
+            let context = e.context.as_ref().map_or(0, imported_context_logical_units);
+            let cuts = e
+                .continuity_cuts
+                .iter()
+                .map(|c| {
+                    imported_context_logical_units(&c.context)
+                        + c.record_id.len()
+                        + c.reason.len()
+                        + 128
+                })
+                .sum::<usize>();
+            6 * (512 + e.reference.encode().len() + context + cuts)
+        })
+        .sum()
+}
 #[test]
 fn final_combined_retention_exact_floor_and_one_below_are_atomic() {
     let bytes = up(1);
@@ -1452,10 +1498,15 @@ fn final_combined_retention_exact_floor_and_one_below_are_atomic() {
         .iter()
         .map(|e| e.encode().len())
         .sum::<usize>();
+    let typed_bytes = typed_source_logical_units(&archive);
+    assert_eq!(archive.source_events.len(), 1);
+    assert!(archive.state.observations().is_empty());
+    assert!(archive.bmp_rib.events().is_empty());
     let exact = archive.state.retained_bytes()
         + archive.bmp_rib.retained_bytes()
         + archive.batch().retained_charge
         + event_bytes
+        + typed_bytes
         + archive.receipt.json().encode().len();
     assert_eq!(archive.retained_charge().unwrap(), exact);
     // Original defect: separate event/state admission passed at this cap,
@@ -1513,6 +1564,7 @@ fn final_combined_retention_exact_floor_and_one_below_are_atomic() {
     assert!(!rejected.exists());
     assert!(bgp_bmp_store::replay(&path, 1_000_000, BmpLimits::default(), one_below).is_err());
     let exact_work = archive.batch().work_charge
+        + typed_bytes
         + event_bytes
         + archive.bmp_rib.accounted_work()
         + archive.encoded_len_bounded(1_000_000).unwrap();
@@ -2212,4 +2264,185 @@ fn continuity_opaque_mp_reach(conventional: bool) -> Vec<u8> {
     let length = wire.len() as u16;
     wire[16..18].copy_from_slice(&length.to_be_bytes());
     wire
+}
+
+#[test]
+fn reported_open_nonzero_integer_ids_survive_shared_parser_and_sealed_replay() {
+    use pcap_evidence_product::deep::bgp::PeerRelationship;
+    let options = bgp_bmp_store::BmpReplayOptions {
+        peer_relationship: Some(PeerRelationship::External),
+    };
+    for (id, text) in [([224, 0, 0, 1], "224.0.0.1"), ([255; 4], "255.255.255.255")] {
+        let mut peer_up = up(1);
+        // Common header6 + peer(type/flags2 + distinguisher8 + address16 + ASN4).
+        peer_up[36..40].copy_from_slice(&id);
+        peer_up[68 + 24..68 + 28].copy_from_slice(&id);
+        peer_up[97 + 24..97 + 28].copy_from_slice(&id);
+        let mut monitored = rm(1, 0, 101, true);
+        monitored[36..40].copy_from_slice(&id);
+        let raw = append(&[peer_up, monitored]);
+        let scratch = Scratch::new();
+        // External announcements carry mandatory ORIGIN, AS_PATH and NEXT_HOP.
+        let archive = bgp_bmp_store::create_with_options(
+            &scratch.file("bgp.bmp"),
+            &raw,
+            source("collector-a"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(
+            field(&archive.bmp_events[0], "status"),
+            &Json::from("reported_peer_up")
+        );
+        let detail = field(&archive.bmp_events[0], "detail");
+        for key in ["sent_open", "received_open"] {
+            assert_eq!(
+                field(field(field(detail, key), "open"), "identifier"),
+                &Json::from(text)
+            );
+        }
+        assert_eq!(
+            field(field(field(detail, "received_open"), "open"), "ambiguous"),
+            &Json::Bool(false)
+        );
+        assert_eq!(archive.bmp_rib.entries().len(), 1);
+        assert!(archive
+            .bmp_rib
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Active));
+        let fresh = bgp_bmp_store::replay_with_options(
+            &scratch.file("bgp.bmp"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(archive.bmp_events, fresh.bmp_events);
+        assert_eq!(archive.state.encode(), fresh.state.encode());
+    }
+    let mut zero = up(1);
+    zero[68 + 24..68 + 28].fill(0);
+    let (_, rejected) = store(&zero);
+    assert_eq!(
+        field(&rejected.bmp_events[0], "status"),
+        &Json::from("quarantined_peer_up")
+    );
+}
+
+#[test]
+fn imported_invalid_ipv4_next_hop_retains_occurrence_and_withdrawal_on_fresh_replay() {
+    for address in [[0; 4], [224, 0, 0, 1], [255; 4]] {
+        let mut raw_message = update(4, true);
+        // ORIGIN (4) + four-octet AS_PATH (9) put NEXT_HOP value at 39.
+        assert_eq!(&raw_message[36..39], &[0x40, 3, 4]);
+        raw_message[39..43].copy_from_slice(&address);
+        let mut body = peer(1, 0, 101);
+        body.extend_from_slice(&raw_message);
+        let raw = append(&[up(1), message(0, &body)]);
+        let (scratch, archive) = store(&raw);
+        let normalized = archive.state.observations()[0].normalized();
+        let Json::Array(ranges) = field(field(normalized, "message_detail"), "attribute_ranges")
+        else {
+            panic!("ranges")
+        };
+        let occurrence = &ranges[2];
+        assert_eq!(
+            field(occurrence, "sha256"),
+            &Json::from(sha256::hex(&sha256::digest(&address)))
+        );
+        assert_eq!(
+            field(occurrence, "disposition"),
+            &Json::from("treat_as_withdraw")
+        );
+        assert_eq!(field(occurrence, "decoded"), &Json::Null);
+        assert_eq!(archive.bmp_rib.entries().len(), 1);
+        assert!(archive
+            .bmp_rib
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Withdrawn));
+        let fresh = bgp_bmp_store::replay(
+            &scratch.file("bgp.bmp"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(archive.state.encode(), fresh.state.encode());
+        assert_eq!(archive.bmp_events, fresh.bmp_events);
+        assert!(fresh
+            .bmp_rib
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Withdrawn));
+    }
+}
+
+#[test]
+fn imported_unsupported_ipv6_next_hop_layout_cuts_continuity_on_sealed_replay() {
+    let with_caps = |asn, id, cap77| {
+        let mut raw = open(asn, id);
+        let mut caps = vec![1, 4, 0, 2, 0, 1]; // MP IPv6 unicast.
+        if cap77 {
+            caps.extend([77, 0]);
+        }
+        raw[28] = (2 + caps.len()) as u8;
+        raw.extend([2, caps.len() as u8]);
+        raw.extend(caps);
+        let length = raw.len() as u16;
+        raw[16..18].copy_from_slice(&length.to_be_bytes());
+        raw
+    };
+    for receiver_cap77 in [false, true] {
+        let mut up_body = peer(1, 0, 100);
+        up_body.extend([0; 12]);
+        up_body.extend([192, 0, 2, 254]);
+        up_body.extend(179u16.to_be_bytes());
+        up_body.extend(40000u16.to_be_bytes());
+        up_body.extend(with_caps(65000, 254, receiver_cap77));
+        up_body.extend(with_caps(65001, 1, true));
+        let mut mp = vec![0, 2, 1, 16];
+        mp.extend([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        mp.extend([0, 32, 0x20, 1, 0x0d, 0xb8]);
+        let mut attrs = vec![0x40, 1, 1, 0, 0x40, 2, 6, 2, 1];
+        attrs.extend(65001u32.to_be_bytes());
+        attrs.extend([0x80, 14, mp.len() as u8]);
+        attrs.extend(mp);
+        let mut update_body = vec![0, 0];
+        update_body.extend((attrs.len() as u16).to_be_bytes());
+        update_body.extend(attrs);
+        let mut body = peer(1, 0, 102);
+        body.extend(bgp(2, &update_body));
+        let raw = append(&[message(3, &up_body), rm(1, 0, 101, true), message(0, &body)]);
+        let (scratch, archive) = store(&raw);
+        assert_eq!(
+            field(archive.bmp_events.last().unwrap(), "status"),
+            &Json::from("opaque_route_monitoring_continuity_gap")
+        );
+        assert_eq!(archive.bmp_rib.entries().len(), 1);
+        assert!(archive
+            .bmp_rib
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Unresolved));
+        let fresh = bgp_bmp_store::replay(
+            &scratch.file("bgp.bmp"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(archive.bmp_events, fresh.bmp_events);
+        assert_eq!(archive.state.encode(), fresh.state.encode());
+        assert!(fresh
+            .bmp_rib
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Unresolved));
+    }
 }

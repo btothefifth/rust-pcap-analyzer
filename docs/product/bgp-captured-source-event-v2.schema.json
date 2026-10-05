@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pcap-evidence.bgp.captured-source-event.v2",
+  "title": "Captured admitted decoded continuity source event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_kind",
+    "source_record_index",
+    "journal_record_sha256",
+    "source_start",
+    "source_end",
+    "scopes",
+    "record_id",
+    "cause",
+    "metadata",
+    "spans",
+    "source_authenticated",
+    "route_action_created",
+    "decoded_continuity"
+  ],
+  "properties": {
+    "schema": {
+      "const": "pcap-evidence.bgp.captured-source-event.v2"
+    },
+    "event_kind": {
+      "enum": [
+        "decoded_gap",
+        "decoded_reset"
+      ]
+    },
+    "source_record_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "journal_record_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_start": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "source_end": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scopes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "captured_lifecycle",
+          "generation"
+        ],
+        "properties": {
+          "session": {
+            "type": "string"
+          },
+          "captured_lifecycle": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "record_id": {
+      "type": "string"
+    },
+    "cause": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "record_id",
+        "direction",
+        "peer",
+        "local",
+        "observed_at_ns"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string"
+        },
+        "record_id": {
+          "type": "string"
+        },
+        "direction": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "peer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "local": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at_ns": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "spans": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "end",
+          "packet_start",
+          "packet"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "packet_start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "packet": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "capture",
+              "frame",
+              "record_offset"
+            ],
+            "properties": {
+              "capture": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "frame": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "record_offset": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "source_authenticated": {
+      "const": false
+    },
+    "route_action_created": {
+      "const": false
+    },
+    "decoded_continuity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_index",
+        "observation_sha256",
+        "decision"
+      ],
+      "properties": {
+        "observation_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observation_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "decision": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source_id": {
+              "type": "string"
+            },
+            "partition_id": {
+              "type": "string"
+            },
+            "session": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "session_status": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "gap",
+                "reset"
+              ]
+            },
+            "affected_scope": {
+              "enum": [
+                "session_generation",
+                "session_all_generations",
+                "base_directional_generation"
+              ]
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "direction": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 1
+            },
+            "peer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "previous_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "next_generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "native_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "newly_applied": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "source_id",
+            "partition_id",
+            "session",
+            "reason",
+            "session_status",
+            "kind",
+            "affected_scope",
+            "generation",
+            "direction",
+            "peer",
+            "previous_generation",
+            "next_generation",
+            "native_status",
+            "newly_applied"
+          ]
+        }
+      }
+    }
+  }
+}

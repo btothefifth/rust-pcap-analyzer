@@ -1,10 +1,11 @@
 # Offline BGP session, Adj-RIB-In candidate, and policy slice
 
-This is the directly owning contract for the opt-in Phase 2/3 library modules
-`bgp_session`, `bgp_rib`, and `bgp_policy`. Their schema labels end in `.v1`.
-They do not change `bgp::SessionState`, `bgp_state::CandidateState`, the sink,
-CLI, or persisted producer events. Caller-supplied source identities and policy
-configuration are assertions, not authentication of a router or capture.
+This is the directly owning contract for the offline session observer,
+Adj-RIB-In reducer, and policy evaluator. Their source identities and caller
+configuration remain evidence labels; they do not authenticate a capture or
+router. Captured, MRT, and BMP adapters preserve these boundaries when they
+prepare or replay source events. Native route-origin references are additive
+metadata and do not change default route semantics or endpoint authority.
 
 ## Session observer
 
@@ -94,27 +95,71 @@ explicitly keeps endpoint RIB and propagation claims false.
 
 ## Bounds and proof boundary
 
-`apply` stages a complete clone and publishes only after event, active-entry,
-logical retention, output-proxy, and work caps pass. Exact-cap and one-below
-failures are tested for session and RIB operations. `evaluate` bounds candidate
-count, pair work, and complete trace size. These are conservative logical Rust
-structure/debug-representation budgets, not a canonical persisted encoding,
-measured CPU, allocator usage, or RSS. Canonical persistence and independent
-resource qualification remain Phase 5/6 obligations. In particular, each
-non-identical event clones the full reducer, and `accounted_size` allocates
-debug strings over retained state; `accounted_work` invokes that scan again.
-MRT and BMP replay can apply this path once per record. Growing retained
-history can therefore cause quadratic total traversal/allocation work and
-transient memory beyond the retained-state proxy. Finite admission limits do
-not establish production-scale throughput or peak RSS.
+`AdjRibIn::apply` prepares only route entries that the event can mutate, then
+publishes the complete record after exact event/action, version, active-entry,
+logical-retention, output-proxy and cumulative-work admission. A multi-action
+record can target one key repeatedly; all actions share one private stage and
+publish atomically. Resets require the same explicit advancing predecessor and
+retain old history. A generation-wide gap, stale/EOR marker, peer mismatch or
+record conflict may inspect the entry map and stage matching entries; it never
+clones unrelated event history. Ordinary current directed UPDATEs use key
+lookups and stage only their affected entries.
 
-Before production-scale corpora, replace full-state cloning/debug-string
-accounting with incremental or transactional accounting. Acceptance must
-preserve atomic publication, exact-limit rejection, identical-replay behavior,
-source/session/generation isolation, and byte-identical supported projections;
-measure traversal/allocation cost and peak RSS on the same bounded inputs and
-execution surface before and after the change. The PR review's non-blocking
-scale note records this open requirement, not an executed optimization.
+Exact event replay selects the session/record-label bucket and compares complete
+`RibEvent` values, including scope, ordered actions and JSON. Index membership or
+a hash alone does not establish equality. Every retained alternative remains
+replayable, including historical or conflicting events. A separate gap index
+covers session plus generation; peer binding inventories all retained
+route-scoped events, including missing-scope and historical records.
+
+Retention uses deterministic typed logical units instead of `Debug` strings:
+an owned text charges `32 + 6 * UTF-8-byte-count`; a structural object or map/set
+node charges 256; a child sequence container charges 64, a sequence slot 32,
+and each scalar identity allowance 8. JSON recursively charges its typed nodes,
+text keys/values and slots without rendering. Every duplicated route key,
+entry, version, witness, journal event, marker, rejection, generation, taint and
+private-index value is charged. Empty top-level containers have zero content
+charge. The read-only legacy projection charges its typed entries plus the
+existing immutable snapshot's own retained charge once at construction.
+
+`accounted_work()` is cumulative admitted conservative work. It adds three
+incoming-event charges (validation, traversal and equality setup), two charges
+for prospective private-index growth, two charges for each staged existing
+entry (copy plus traversal), a typed-key charge for each entry inspected by a
+wide control, and two charges for the incoming mutation bound. The mutation
+bound includes prospective generation/taint/gap nodes and, per action, all
+possible new entry/version/witness or rejection content. Each indexed equality
+candidate adds the incoming and retained event charges. Work and necessary
+retained growth are checked before cloning affected entry content; exact final
+retention/output and element counts are checked before publication. Overflow
+rejects admission. Rejection and inert identical replay preserve both counters and
+public state; replay comparison work has a per-attempt bound without consuming
+admitted work. Replay consumers charge the checked difference between the
+counter before and after their operation, rather than repeatedly adding the
+whole cumulative value. Default limits are unchanged.
+
+The private prepared API binds a plan to its reducer instance and append-only
+revision. Enclosing pipeline transactions check every plan and budget before
+their first publication. Commit contains no Result-returning operation; append
+vector replacement capacity is reserved during preparation and old event
+objects move only on amortized capacity growth. Standard Rust map insertion may
+still abort on allocator exhaustion. Logical charged units do not establish an
+allocator quota, persisted encoding size, or RSS bound. Diagnostic counters
+report admitted staged-entry copies, indexed equality comparisons, wide entry
+visits, copied/measured versions and witnesses, committed entry inserts, deep
+journal-event copies and shallow capacity-growth event moves. Standard map
+updates insert individual staged members; they never append/rebuild the
+canonical map. Rejection/inert replay leave diagnostics unchanged. A repeatedly
+updated single key still copies that affected entry's growing versions and
+witnesses; that cost is prospectively charged and remains an explicit limit.
+
+Finite regression cases cover typed exact/one-below admission, multi-action
+rollback, old alternatives, historical conflicts and 200 ordinary updates.
+These cases establish a bounded implementation improvement only. Full scale,
+peak RSS and corpus qualification remain open. Policy evaluation still bounds
+candidate counts, pair comparisons and the complete output trace under its
+existing separate accounting contract. Session-observer and enclosing
+pipeline accounting are distinct owners with their own source/evidence.
 
 The direct hand-built tests are
 `product/tests/bgp_session_rib_policy.rs`; the atomic captured join is covered by
@@ -122,3 +167,100 @@ The direct hand-built tests are
 not prove persisted replay, MRT/BMP ingestion, independent router policy
 equivalence, Linux/fuzz/corpus/scale qualification, or endpoint truth. Those
 remain separate contract phases.
+
+
+Native version occurrence evidence is additive and explicit. `apply_with_origin`
+and the prepared equivalent accept the digest of a checked normalized
+Observation. Adapters must preserve the full Update action sequence, including
+withdrawals and rejects, so each zero-based route ordinal identifies its
+original normalized route. The reducer stamps `NativeVersionOccurrence`
+(event index, 32-byte observation digest, route ordinal) at each actual Announce
+append or coalesce, including conflicting versions. Generic `apply` and legacy
+projection leave occurrences empty. No label, attribute match, source ordering
+or timestamp recovers this evidence later. Existing default native JSON remains
+unchanged; `NativeVersionOccurrence::json()` is an explicit helper for opt-in
+consumers, with `event_index`, `observation_sha256` (64 lowercase hexadecimal
+characters) and `route_index`.
+
+An internal event-index binding inventory records the actual key, stable
+version index and route ordinal even for manual Announce input. An exact full
+native-event replay with a distinct checked observation digest appends its proof
+to those original bound versions, preserving currency, status, witnesses and
+the event journal. The same event plus digest is inert. Historical versions and
+versions quarantined by later record collisions retain their bindings. A replay
+whose original event produced no announced version has no occurrence to attach.
+Origin-only replay plans publish their admitted evidence delta even though their
+status remains `IdenticalReplay`; consumers must still commit the plan and charge
+the checked work delta. The owner/revision check includes cumulative work, so
+such a metadata publication invalidates earlier prepared plans.
+
+Each version's occurrence container charges 64 units, including an empty one;
+each occurrence charges 336 (node 256 + two scalar ordinals 16 + digest 32 +
+sequence slot 32). Each binding map header charges 328 (node 256 + event ordinal 8
++ container 64), and each binding charges 304 plus its duplicated typed route
+key (node 256 + two ordinals 16 + slot 32). Each exact event/digest inventory member
+charges 296 (node 256 + event ordinal 8 + digest 32). Work prospectively charges all
+new binding/proof content twice as part of the mutation bound. Origin replay
+charges indexed full-event equality, each selected binding visit, both copy and
+measurement of each affected entry, and twice the new proof/inventory growth.
+Bindings, occurrences and proof-inventory members also count toward the existing
+element limit; defaults are unchanged. Actual copy/measurement diagnostics include
+occurrences and binding traversal. Repeated proof growth on one version still
+requires copying its affected entry and is admitted against the cumulative budget.
+
+The independent literal full-route oracle uses one-byte source/partition/session,
+record and attribute identities, a Null attribute value and 0.0.0.0/0. Its first
+origin-aware event charges 13374 retained units and 34428 work units. A distinct
+origin on exact replay charges 632 additional retained units and 25464 additional
+work units, without another event or witness. Exact limits and each one-below
+limit test atomic rollback, including the proof inventories. Separate finite
+cases cover same-label equal-attribute conflicts, duplicate action ordinals,
+manual-origin unavailability, coalescing and replay after explicit reset. These
+are local finite evidence requirements, not endpoint authority or full scale/RSS
+qualification.
+
+
+## Prepared-event continuity effects
+
+`PreparedRibEvent::continuity_effect()` returns an optional borrowed
+`NativeContinuityRef` for a newly staged native transition. It carries the
+native scope, status, reason, continuity kind and affected-scope effect without
+copying retained history. `continuity_affects_scope` is the shared allocation-
+free matcher. Adapters may retain an owned source-event copy only after their
+own admission, and publish it with the enclosing prepared transaction.
+
+| Native transition | Affected candidate scope |
+| --- | --- |
+| Explicit Gap | Same source partition, session, and generation; reported direction and peer do not narrow it |
+| New record-identity collision | Same source partition and session across all generations |
+| Peer-binding mismatch | Same source partition, session, generation, and direction; peer does not narrow it |
+| Accepted Reset | Exact predecessor generation; the effect also identifies the next generation |
+
+Exact event replay, origin-only replay, historical input, already-tainted no-ops,
+directionless missing scope, and ordinary Update/Stale/EOR events yield no new
+continuity effect. Consumers therefore cannot manufacture a fresh barrier from
+a status label or replay an old one. This seam reports finite reducer evidence;
+it does not establish actual speaker/router FSM state, source authenticity, or
+full scale/RSS qualification.
+
+Embedded projection output has a distinct owner boundary. Standalone
+`AdjRibIn::new(Limits)` preserves its typed logical-state output ceiling and
+literal exact/one-below accounting contract. Captured pipeline, BMP archive and
+MRT archive adapters use the crate-visible `for_embedded_projection` constructor
+because their public output quota measures their actual serialized receipt or
+archive. It validates the original configuration first, including a nonzero
+public output cap, and sets only the internal native logical output ceiling to
+`min(caller.retained_bytes, Limits::default().output_bytes)`. This preserves the
+8 MiB native default ceiling, honors smaller retained caps, and leaves native
+input, work, element and active caps unchanged. It does not raise defaults or
+remove native logical admission.
+
+The caller retains its original Limits for actual encoded-output admission and
+publication. Exact actual-output acceptance and one-below refusal remain the
+encoder/store owner's obligation. Private native indexes and occurrence proofs
+therefore cannot be mistaken for emitted output bytes. The constructor's finite
+controls preserve the 5026/13086 literal Gap charges with a smaller valid public
+output cap; lower retained/work/element caps still refuse atomically, invalid
+original configuration is rejected, and the native default ceiling remains.
+Standalone typed charge tests are unchanged. Whole archive/receipt qualification
+still belongs to its owning adapter gates and assembled review.

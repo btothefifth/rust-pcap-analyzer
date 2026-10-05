@@ -6,7 +6,7 @@ use pcap_evidence_product::deep::{
     bgp_bmp_store,
     bgp_mrt::{MrtLimits, MrtSource},
     bgp_mrt_store,
-    bgp_rib::{AdjRibIn, RibEventKind, RouteStatus, VersionDisposition},
+    bgp_rib::{AdjRibIn, NativeVersionOccurrence, RibEventKind, RouteStatus, VersionDisposition},
     Limits,
 };
 use std::{
@@ -260,28 +260,137 @@ fn enhanced_refresh_bilateral_advertisements_preserve_both_marker_types() {
     }
 }
 #[test]
-fn malformed_or_duplicate_receiver_open_cannot_supply_capability_authority() {
-    for malformed in [false, true] {
-        let mut input = established(&[], if malformed { &[70, 1, 0] } else { &[70, 0] });
-        if !malformed {
-            // Duplicate OPEN in the opening state; preserve valid source FSM edges.
-            input = [
+fn identical_receiver_open_occurrences_preserve_directional_refresh_authority() {
+    for advertising_local in [false, true] {
+        for subtype in [1, 2] {
+            let receiver = open(advertising_local, &[70, 0]);
+            let mut input = [
                 state(3, 4),
-                message(false, &open(false, &[])),
-                message(true, &open(true, &[70, 0])),
-                message(true, &open(true, &[70, 0])),
+                message(
+                    false,
+                    &open(false, if advertising_local { &[] } else { &[70, 0] }),
+                ),
+                message(
+                    true,
+                    &open(true, if advertising_local { &[70, 0] } else { &[] }),
+                ),
+                message(advertising_local, &receiver),
                 state(4, 5),
                 state(5, 6),
             ]
             .concat();
+            let wire = refresh(subtype);
+            input.extend(message(!advertising_local, &wire));
+            let archive = replay(&input);
+            assert_event(&archive, "decoded_route_refresh", &wire);
+            assert_eq!(
+                member(member(last(&archive), "detail"), "receiver_open_direction"),
+                &Json::from(u8::from(advertising_local))
+            );
+            let first = &archive.bgp4mp_events[if advertising_local { 2 } else { 1 }];
+            let repeated = &archive.bgp4mp_events[3];
+            for event in [first, repeated] {
+                assert_eq!(member(event, "parse_status"), &Json::from("decoded_open"));
+                assert_eq!(
+                    member(event, "direction"),
+                    &Json::from(u8::from(advertising_local))
+                );
+                assert_eq!(
+                    member(member(event, "message_range"), "sha256"),
+                    &Json::from(sha256::hex(&sha256::digest(&receiver)))
+                );
+            }
+            assert_ne!(
+                member(first, "record_index"),
+                member(repeated, "record_index")
+            );
+            assert_ne!(
+                member(member(first, "message_range"), "start"),
+                member(member(repeated, "message_range"), "start")
+            );
+            // Repeated receiver evidence cannot authorize the opposite sender.
+            input.extend(message(advertising_local, &wire));
+            assert_event(
+                &replay(&input),
+                "quarantined_route_refresh_capability_context",
+                &wire,
+            );
         }
-        let wire = refresh(1);
-        input.extend(message(false, &wire));
-        assert_event(
-            &replay(&input),
-            "quarantined_route_refresh_capability_context",
-            &wire,
-        );
+    }
+}
+
+#[test]
+fn different_receiver_open_bytes_cannot_supply_refresh_capability_authority() {
+    for advertising_local in [false, true] {
+        for subtype in [1, 2] {
+            let receiver = open(advertising_local, &[70, 0]);
+            let mut changed = receiver.clone();
+            // Hold time differs; both OPENs still carry the same valid cap 70.
+            changed[22..24].copy_from_slice(&91u16.to_be_bytes());
+            assert_ne!(sha256::digest(&receiver), sha256::digest(&changed));
+            let mut input = [
+                state(3, 4),
+                message(
+                    false,
+                    &open(false, if advertising_local { &[] } else { &[70, 0] }),
+                ),
+                message(
+                    true,
+                    &open(true, if advertising_local { &[70, 0] } else { &[] }),
+                ),
+                message(advertising_local, &changed),
+                state(4, 5),
+                state(5, 6),
+            ]
+            .concat();
+            let wire = refresh(subtype);
+            input.extend(message(!advertising_local, &wire));
+            let archive = replay(&input);
+            assert_event(
+                &archive,
+                "quarantined_route_refresh_capability_context",
+                &wire,
+            );
+            assert_eq!(
+                member(member(last(&archive), "detail"), "sender_layout_basis"),
+                &Json::from("ambiguous_receiver_open")
+            );
+            let first = &archive.bgp4mp_events[if advertising_local { 2 } else { 1 }];
+            let alternative = &archive.bgp4mp_events[3];
+            assert_eq!(member(first, "parse_status"), &Json::from("decoded_open"));
+            assert_eq!(
+                member(alternative, "parse_status"),
+                &Json::from("decoded_open")
+            );
+            assert_eq!(
+                member(member(first, "message_range"), "sha256"),
+                &Json::from(sha256::hex(&sha256::digest(&receiver)))
+            );
+            assert_eq!(
+                member(member(alternative, "message_range"), "sha256"),
+                &Json::from(sha256::hex(&sha256::digest(&changed)))
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_receiver_open_cannot_supply_refresh_capability_authority() {
+    for advertising_local in [false, true] {
+        for subtype in [1, 2] {
+            let mut input = if advertising_local {
+                established(&[], &[70, 1, 0])
+            } else {
+                established(&[70, 1, 0], &[])
+            };
+            let wire = refresh(subtype);
+            input.extend(message(!advertising_local, &wire));
+            assert_event(
+                &replay(&input),
+                "quarantined_route_refresh_capability_context",
+                &wire,
+            );
+        }
     }
 }
 #[test]
@@ -371,8 +480,18 @@ fn tracked_route_refresh_dispositions_preserve_history_and_qualify_continuity() 
             after.bgp4mp_rib.events()[0].kind,
             RibEventKind::Update(_)
         ));
+        let observation = &after.state.observations()[0];
+        let event = &after.bgp4mp_rib.events()[0];
+        let RibEventKind::Update(actions) = &event.kind else {
+            unreachable!("checked UPDATE fixture")
+        };
+        assert_eq!(observation.routes().len(), 1);
+        assert_eq!(actions.len(), observation.routes().len());
+        assert_eq!(event.record_id, observation.source().record_id);
         let mut before = AdjRibIn::new(Limits::default()).unwrap();
-        before.apply(after.bgp4mp_rib.events()[0].clone()).unwrap();
+        before
+            .apply_with_origin(event.clone(), observation.sha256())
+            .unwrap();
         assert_eq!(before.entries().len(), 1);
         assert!(before.gaps().is_empty());
         assert!(before.eors().is_empty());
@@ -388,6 +507,15 @@ fn tracked_route_refresh_dispositions_preserve_history_and_qualify_continuity() 
         assert_eq!(original.key.prefix.length, 24);
         assert_eq!(original.key.prefix.address, "198.51.100.0");
         assert_eq!(original.versions.len(), 1);
+        assert_eq!(
+            original.versions[0].occurrences,
+            vec![NativeVersionOccurrence {
+                event_index: 0,
+                observation_sha256: observation.sha256(),
+                route_index: 0,
+            }]
+        );
+        assert_eq!(observation.routes()[0].prefix(), &original.key.prefix);
         assert_eq!(
             original.versions[0].disposition,
             VersionDisposition::Current

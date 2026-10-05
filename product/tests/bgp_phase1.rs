@@ -8,6 +8,8 @@ use pcap_evidence::{
 };
 use pcap_evidence_product::deep::{
     bgp::{self, PcapMetadata, SessionState},
+    bgp_pipeline::CapturedSessionPipeline,
+    bgp_rib::RouteStatus,
     bgp_state::Observation,
     Limits,
 };
@@ -254,21 +256,98 @@ fn malformed_capability_extent_and_every_open_truncation_are_atomic() {
 }
 
 #[test]
-fn non_unicast_bgp_identifiers_are_rejected_before_open_state_mutation() {
-    for identifier in [[0, 0, 0, 0], [224, 0, 0, 1], [255, 255, 255, 255]] {
+fn zero_bgp_identifier_is_rejected_before_open_state_mutation() {
+    let mut raw = opened(64512, &[]);
+    raw[24..28].fill(0);
+    let mut state = SessionState::default();
+    let before = state.clone();
+    let error = bgp::decode_pcap(
+        &evidence(&raw, 1),
+        metadata(Some(0), 1),
+        &mut state,
+        &Limits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ProtocolFraming);
+    assert_eq!(state, before);
+}
+
+#[test]
+fn unsigned_nonzero_bgp_identifiers_preserve_display_and_raw_open_evidence() {
+    // RFC 6286 changed the address-class oracle: these are integer IDs.
+    for (identifier, display) in [
+        ([0, 0, 0, 1], "0.0.0.1"),
+        ([192, 0, 2, 1], "192.0.2.1"),
+        ([224, 0, 0, 1], "224.0.0.1"),
+        ([255, 255, 255, 255], "255.255.255.255"),
+    ] {
         let mut raw = opened(64512, &[]);
+        raw.truncate(29);
+        raw[16..18].copy_from_slice(&29u16.to_be_bytes());
+        raw[28] = 0;
         raw[24..28].copy_from_slice(&identifier);
         let mut state = SessionState::default();
-        let before = state.clone();
-        let error = bgp::decode_pcap(
-            &evidence(&raw, 1),
-            metadata(Some(0), 1),
-            &mut state,
-            &Limits::default(),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, ErrorCode::ProtocolFraming);
-        assert_eq!(state, before);
+        let value = decode(&raw, Some(0), 1, &mut state);
+        assert_eq!(
+            get(get(&value, "message_detail"), "identifier"),
+            &Json::from(display)
+        );
+        assert_eq!(get(&value, "negotiation_established"), &Json::Bool(false));
+        assert_ne!(state, SessionState::default());
+        // The decoder must continue to accept exactly the same original bytes.
+        let repeated = decode(&raw, Some(0), 1, &mut state.clone());
+        assert_eq!(get(&value, "evidence"), get(&repeated, "evidence"));
+    }
+}
+
+#[test]
+fn invalid_ipv4_next_hop_is_retained_and_treated_as_withdraw() {
+    for address in [[0, 0, 0, 0], [224, 0, 0, 1], [255, 255, 255, 255]] {
+        let mut attrs = attribute(0x40, 1, &[0]);
+        attrs.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
+        attrs.extend(attribute(0x40, 3, &address));
+        let raw = update(&attrs, &[24, 203, 0, 113]);
+        let value = decode(&raw, Some(0), 3, &mut two_octet_context());
+        let occurrence = &ranges(&value)[2];
+        assert_eq!(get(occurrence, "start"), &Json::from(34usize));
+        assert_eq!(get(occurrence, "end"), &Json::from(41usize));
+        assert_eq!(
+            get(occurrence, "sha256"),
+            &Json::from(sha256::hex(&sha256::digest(&address)))
+        );
+        assert_eq!(get(occurrence, "decoded"), &Json::Null);
+        assert_eq!(
+            get(occurrence, "disposition"),
+            &Json::from("treat_as_withdraw")
+        );
+        assert_eq!(
+            get(get(&value, "message_detail"), "update_disposition"),
+            &Json::from("treat_as_withdraw")
+        );
+        let routes = array(get(&value, "routes"));
+        assert_eq!(routes.len(), 1);
+        assert_eq!(get(&routes[0], "action"), &Json::from("withdraw"));
+        Observation::from_normalized(&value, None, &Limits::default()).unwrap();
+    }
+    // Host/subnet/receiver relationship cannot be inferred from these bytes.
+    for address in [[192, 0, 2, 9], [10, 0, 0, 1], [203, 0, 113, 255]] {
+        let mut attrs = attribute(0x40, 1, &[0]);
+        attrs.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
+        attrs.extend(attribute(0x40, 3, &address));
+        let value = decode(
+            &update(&attrs, &[24, 203, 0, 113]),
+            Some(0),
+            3,
+            &mut two_octet_context(),
+        );
+        assert_eq!(
+            get(&ranges(&value)[2], "disposition"),
+            &Json::from("accept_evidence_only")
+        );
+        assert_eq!(
+            get(&array(get(&value, "routes"))[0], "action"),
+            &Json::from("announce")
+        );
     }
 }
 
@@ -1142,4 +1221,349 @@ fn typed_open_capability_reaches_real_pcap_depth_output() {
     assert!(events.contains("\"four_octet_asn\":70000"));
     assert!(events.contains("\"negotiation_established\":false"));
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn stateless_framer_admits_complete_body_errors_without_consuming_successor() {
+    // RFC 7606 section 4: ORIGIN claims one byte beyond the three-byte block.
+    let malformed_update = update(&[0x40, 1, 1], &[24, 203, 0, 113]);
+    let withdrawal = message(2, &[0, 4, 24, 203, 0, 113, 0, 0]);
+    let mut invalid_open = opened(64512, &[]);
+    invalid_open[19] = 3;
+    let cases = [
+        malformed_update.clone(),
+        update(&[0x40], &[24, 203, 0, 113]),
+        update(&[0x40, 1], &[24, 203, 0, 113]),
+        update(&[0x50, 1, 0], &[24, 203, 0, 113]),
+        invalid_open,
+        message(1, &[]),
+        message(3, &[6]),
+        message(4, &[0]),
+        message(5, &[0, 1, 0]),
+        message(5, &[0, 1, 0, 1, 0]),
+    ];
+    for first in cases {
+        let mut coalesced = first.clone();
+        coalesced.extend(&withdrawal);
+        let framed = Protocol::Bgp.decode(&coalesced).unwrap();
+        assert_eq!(framed.consumed, first.len());
+        assert!(framed.fields.iter().all(|field| field.end <= first.len()));
+        let second = Protocol::Bgp.decode(&coalesced[framed.consumed..]).unwrap();
+        assert_eq!(second.consumed, withdrawal.len());
+        for cut in 0..first.len() {
+            assert!(Protocol::Bgp.decode(&first[..cut]).is_err(), "cut={cut}");
+        }
+    }
+    let value = decode(&malformed_update, Some(0), 3, &mut two_octet_context());
+    assert_eq!(
+        get(get(&value, "message_detail"), "update_disposition"),
+        &Json::from("treat_as_withdraw")
+    );
+    assert_eq!(
+        get(&array(get(&value, "routes"))[0], "action"),
+        &Json::from("withdraw")
+    );
+    for (at, value) in [(0, 0), (16, 0), (18, 0)] {
+        let mut invalid_header = withdrawal.clone();
+        invalid_header[at] = value;
+        if at == 16 {
+            invalid_header[17] = 18;
+        }
+        assert!(Protocol::Bgp.decode(&invalid_header).is_err());
+    }
+}
+
+#[test]
+fn declared_multiprotocol_next_hop_address_classes_keep_capability_bound_dispositions() {
+    let global = [0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let link_local = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let mp_value = |afi: u16, hop: &[u8]| {
+        let mut value = afi.to_be_bytes().to_vec();
+        value.extend([1, hop.len() as u8]);
+        value.extend(hop);
+        value.push(0); // Reserved octet.
+        if afi == 1 {
+            value.extend([24, 203, 0, 113]);
+        } else {
+            value.extend([32, 0x20, 1, 0x0d, 0xb8]);
+        }
+        value
+    };
+    let observe = |afi: u16, hop: &[u8], capability_known: bool| {
+        let mp = mp_value(afi, hop);
+        let mut attrs = attribute(0x40, 1, &[0]);
+        attrs.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
+        attrs.extend(attribute(0x80, 14, &mp));
+        let mut state = SessionState::default();
+        let caps = if capability_known {
+            vec![capability(1, &[0, afi as u8, 0, 1])]
+        } else {
+            vec![]
+        };
+        decode(&opened(65000, &caps), Some(0), 1, &mut state);
+        decode(&opened(65001, &caps), Some(1), 2, &mut state);
+        (decode(&update(&attrs, &[]), Some(0), 3, &mut state), mp)
+    };
+    let mut unspecified = [0; 16];
+    let mut multicast = unspecified;
+    multicast[0] = 0xff;
+    unspecified[15] = 1; // Loopback has link-local scope, not the first global field.
+    let mut invalid = vec![
+        (1, vec![0; 4]),
+        (1, vec![224, 0, 0, 1]),
+        (1, vec![255; 4]),
+        (2, vec![0; 16]),
+        (2, unspecified.to_vec()),
+        (2, multicast.to_vec()),
+        (2, link_local.to_vec()),
+    ];
+    invalid.push((2, [global.as_slice(), global.as_slice()].concat()));
+    invalid.push((2, [global.as_slice(), multicast.as_slice()].concat()));
+    for (afi, hop) in invalid {
+        let (value, mp) = observe(afi, &hop, true);
+        assert_eq!(
+            get(&ranges(&value)[2], "sha256"),
+            &Json::from(sha256::hex(&sha256::digest(&mp)))
+        );
+        assert_eq!(get(&ranges(&value)[2], "decoded"), &Json::Null);
+        assert_eq!(
+            get(&ranges(&value)[2], "disposition"),
+            &Json::from("session_reset")
+        );
+        assert_eq!(
+            get(get(&value, "message_detail"), "update_disposition"),
+            &Json::from("session_reset")
+        );
+        assert!(array(get(&value, "routes")).is_empty());
+        let (opaque, _) = observe(afi, &hop, false);
+        assert_eq!(
+            get(&ranges(&opaque)[2], "interpretation"),
+            &Json::from("opaque_family_capability_or_add_path_layout")
+        );
+    }
+    // Unsupported capability 77 changes the next-hop layout hypothesis;
+    // retain opacity without interpreting the draft's values or negotiation.
+    for hop in [
+        global.to_vec(),
+        link_local.to_vec(),
+        [vec![0; 16], link_local.to_vec()].concat(),
+    ] {
+        let mp = mp_value(2, &hop);
+        let mut attrs = attribute(0x40, 1, &[0]);
+        attrs.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
+        attrs.extend(attribute(0x80, 14, &mp));
+        for advertised_sides in [1, 2] {
+            let mp_cap = capability(1, &[0, 2, 0, 1]);
+            let extra = capability(77, &[]);
+            let mut state = SessionState::default();
+            decode(
+                &opened(65000, &[mp_cap.clone(), extra.clone()]),
+                Some(0),
+                1,
+                &mut state,
+            );
+            let receiver_caps = if advertised_sides == 2 {
+                vec![mp_cap, extra]
+            } else {
+                vec![mp_cap]
+            };
+            decode(&opened(65001, &receiver_caps), Some(1), 2, &mut state);
+            let value = decode(&update(&attrs, &[]), Some(0), 3, &mut state);
+            assert_eq!(
+                get(&ranges(&value)[2], "interpretation"),
+                &Json::from("opaque_family_capability_or_add_path_layout")
+            );
+            assert_ne!(
+                get(&ranges(&value)[2], "disposition"),
+                &Json::from("session_reset")
+            );
+            assert!(array(get(&value, "routes")).is_empty());
+            assert!(array(get(&value, "issues"))
+                .contains(&Json::from("mp_reach_next_hop_layout_unresolved")));
+            // Reach the real native consumer: prior Active becomes unresolved
+            // at the opaque-layout cut, without inventing a protocol reset.
+            let mut pipeline = CapturedSessionPipeline::new(
+                sha256::digest(b"phase1-capture"),
+                "phase1-capture".into(),
+                17,
+                Limits::default(),
+            )
+            .unwrap();
+            let sender_open = opened(65000, &[capability(1, &[0, 2, 0, 1]), capability(77, &[])]);
+            for (raw, direction, frame) in
+                [(&sender_open, 0, 1), (&opened(65001, &receiver_caps), 1, 2)]
+            {
+                pipeline
+                    .apply_message(&evidence(raw, frame), metadata(Some(direction), frame))
+                    .unwrap();
+            }
+            let mut base = attribute(0x40, 1, &[0]);
+            base.extend(attribute(0x40, 2, &[2, 1, 0xfd, 0xe8]));
+            base.extend(attribute(0x40, 3, &[192, 0, 2, 9]));
+            pipeline
+                .apply_message(
+                    &evidence(&update(&base, &[24, 203, 0, 113]), 3),
+                    metadata(Some(0), 3),
+                )
+                .unwrap();
+            assert!(pipeline
+                .rib()
+                .entries()
+                .values()
+                .all(|entry| entry.status == RouteStatus::Active));
+            let receipt = pipeline
+                .apply_message(&evidence(&update(&attrs, &[]), 4), metadata(Some(0), 4))
+                .unwrap();
+            assert!(!receipt.protocol_reset);
+            assert_eq!(pipeline.rib().entries().len(), 1);
+            assert!(pipeline
+                .rib()
+                .entries()
+                .values()
+                .all(|entry| entry.status == RouteStatus::Unresolved));
+        }
+    }
+    let ula = [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let site_local = [0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    for (afi, hop) in [
+        (1, vec![192, 0, 2, 1]),
+        (2, global.to_vec()),
+        (2, ula.to_vec()),
+        (2, site_local.to_vec()),
+        (2, [global.as_slice(), link_local.as_slice()].concat()),
+    ] {
+        let (value, _) = observe(afi, &hop, true);
+        assert_eq!(
+            get(&ranges(&value)[2], "disposition"),
+            &Json::from("accept_evidence_only")
+        );
+        assert_eq!(
+            get(&array(get(&value, "routes"))[0], "action"),
+            &Json::from("announce")
+        );
+    }
+}
+
+#[test]
+fn unsupported_multiprotocol_family_never_enters_declared_next_hop_grammar() {
+    let mut mp = vec![0, 25, 70, 16];
+    mp.extend([0xff; 16]);
+    mp.push(0);
+    let attrs = attribute(0x80, 14, &mp);
+    let mut state = SessionState::default();
+    let caps = [capability(1, &[0, 25, 0, 70])];
+    decode(&opened(65000, &caps), Some(0), 1, &mut state);
+    decode(&opened(65001, &caps), Some(1), 2, &mut state);
+    let value = decode(&update(&attrs, &[]), Some(0), 3, &mut state);
+    assert_eq!(
+        get(&ranges(&value)[0], "interpretation"),
+        &Json::from("opaque_family_capability_or_add_path_layout")
+    );
+    assert_ne!(
+        get(&ranges(&value)[0], "disposition"),
+        &Json::from("session_reset")
+    );
+    assert!(array(get(&value, "routes")).is_empty());
+}
+
+#[test]
+fn repeated_open_bytes_retain_source_witnesses_and_bilateral_grammar() {
+    let caps = [
+        capability(65, &70000u32.to_be_bytes()),
+        capability(1, &[0, 2, 0, 1]),
+    ];
+    let a = opened(23456, &caps);
+    let b = opened(
+        23456,
+        &[capability(65, &70001u32.to_be_bytes()), caps[1].clone()],
+    );
+    let mut state = SessionState::default();
+    decode(&a, Some(0), 1, &mut state);
+    decode(&b, Some(1), 2, &mut state);
+    let first_repeat = decode(&a, Some(0), 3, &mut state);
+    let second_repeat = decode(&b, Some(1), 4, &mut state);
+    for value in [&first_repeat, &second_repeat] {
+        assert!(!array(get(value, "issues")).contains(&Json::from(
+            "repeated_open_requires_explicit_generation_boundary"
+        )));
+        assert_eq!(
+            get(get(value, "producer_context"), "asn_width"),
+            &Json::from(4usize)
+        );
+    }
+    let sides = array(get(get(&second_repeat, "producer_context"), "open_sides"));
+    assert_eq!(sides.len(), 2);
+    for side in sides {
+        let witnesses = array(get(side, "observations"));
+        assert_eq!(witnesses.len(), 2);
+        assert_ne!(get(&witnesses[0], "source"), get(&witnesses[1], "source"));
+        assert_ne!(
+            get(&witnesses[0], "evidence"),
+            get(&witnesses[1], "evidence")
+        );
+        assert_eq!(get(&witnesses[0], "open"), get(&witnesses[1], "open"));
+        assert_eq!(get(side, "advertised_asn_width"), &Json::from(4usize));
+    }
+    // The exact same source occurrence remains idempotent; the two new witnesses remain.
+    let replay = decode(&a, Some(0), 3, &mut state);
+    assert_eq!(
+        get(get(&replay, "producer_context"), "open_sides"),
+        &Json::Array(sides.to_vec())
+    );
+
+    let mut attrs = attribute(0x40, 1, &[0]);
+    attrs.extend(attribute(0x40, 2, &[2, 1, 0, 1, 0x11, 0x70]));
+    attrs.extend(attribute(0x40, 3, &[192, 0, 2, 9]));
+    let value = decode(&update(&attrs, &[24, 203, 0, 113]), Some(0), 5, &mut state);
+    let routes = array(get(&value, "routes"));
+    assert_eq!(routes.len(), 1);
+    let path = array(get(get(&routes[0], "attributes"), "as_path"));
+    assert_eq!(array(get(&path[0], "values")), &[Json::from(70000u32)]);
+    Observation::from_normalized(&value, None, &Limits::default()).unwrap();
+
+    // Byte-distinct valid OPENs remain alternatives even when capabilities are unchanged.
+    let mut changed_asn = a.clone();
+    changed_asn[33..37].copy_from_slice(&70002u32.to_be_bytes());
+    let mut changed_hold_time = a.clone();
+    changed_hold_time[23] = 91;
+    let mut changed_identifier = a.clone();
+    changed_identifier[27] = 9;
+    let reordered_capabilities = opened(23456, &[caps[1].clone(), caps[0].clone()]);
+    for changed in [
+        changed_asn,
+        changed_hold_time,
+        changed_identifier,
+        reordered_capabilities,
+    ] {
+        let mut conflicting_state = state.clone();
+        let conflict = decode(&changed, Some(0), 6, &mut conflicting_state);
+        assert_eq!(
+            get(get(&conflict, "message_detail"), "ambiguous"),
+            &Json::Bool(false)
+        );
+        assert!(array(get(&conflict, "issues")).contains(&Json::from(
+            "repeated_open_requires_explicit_generation_boundary"
+        )));
+        assert_eq!(
+            get(get(&conflict, "producer_context"), "asn_width"),
+            &Json::Null
+        );
+        let later = decode(
+            &update(&attrs, &[24, 203, 0, 113]),
+            Some(0),
+            7,
+            &mut conflicting_state,
+        );
+        let retained_routes = array(get(&later, "routes"));
+        assert_eq!(retained_routes.len(), 1);
+        assert!(array(get(get(&retained_routes[0], "attributes"), "as_path")).is_empty());
+        assert_eq!(
+            get(&ranges(&later)[1], "interpretation"),
+            &Json::from("unresolved_capability_context")
+        );
+        let observation = Observation::from_normalized(&later, None, &Limits::default()).unwrap();
+        assert_eq!(observation.routes().len(), 1);
+        assert!(observation.routes()[0].ambiguous_attributes());
+    }
 }
