@@ -9,7 +9,7 @@ pub use dnp3_confirmations::{
 use crate::dnp3::MessageClass;
 use crate::engine::{Analysis, ApplicationAnalysis, ApplicationData};
 use crate::modbus::Role;
-use crate::provenance::PacketId;
+use crate::provenance::{EvidenceBytes, PacketId};
 use crate::wire::Endpoint;
 use crate::{Error, ErrorCode, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,14 +36,27 @@ struct Group {
     uncertain_boundary: bool,
 }
 
-/// Pair within one connection generation. Reused small sequence numbers remain
-/// ambiguous rather than being joined by an invented clock/order heuristic.
+// An absent, invalid or mixed-capture witness has no assignable source scope.
+fn capture_scope(raw: &EvidenceBytes) -> Option<[u8; 32]> {
+    if !raw.validate() {
+        return None;
+    }
+    let capture = raw.spans().first()?.packet.capture;
+    raw.spans()
+        .iter()
+        .all(|span| span.packet.capture == capture)
+        .then_some(capture)
+}
+
+/// Pair within one capture and connection generation. Reused small sequence
+/// numbers remain ambiguous rather than being joined by an invented clock/order heuristic.
 pub fn transactions(
     applications: &[ApplicationAnalysis],
     limits: &Limits,
 ) -> Result<Vec<Transaction>> {
-    // Protocol, flow, controller address/unit, outstation address, sequence/tx ID, function.
-    let mut groups: BTreeMap<(&'static str, usize, u16, u16, u16, u8), Group> = BTreeMap::new();
+    // Protocol, capture, flow, controller address/unit, outstation address, sequence/tx ID, function.
+    type Key = (&'static str, [u8; 32], usize, u16, u16, u16, u8);
+    let mut groups: BTreeMap<Key, Group> = BTreeMap::new();
     let mut output = Vec::new();
     let mut count = 0usize;
     let mut dnp_work = 0usize;
@@ -59,7 +72,10 @@ pub fn transactions(
                         application: ai,
                         message: mi,
                     };
-                    let verified = if message.complete && application.direction <= 1 {
+                    let verified = if message.complete
+                        && application.direction <= 1
+                        && application.protocol == "dnp3"
+                    {
                         crate::semantics::dnp3_workflow::verified_message_direction(
                             result,
                             message,
@@ -135,6 +151,7 @@ pub fn transactions(
                     let group = groups
                         .entry((
                             "dnp3",
+                            message.packets[0].capture, // the verifier established one nonempty capture
                             application.flow,
                             controller,
                             outstation,
@@ -159,9 +176,16 @@ pub fn transactions(
                         application: ai,
                         message: mi,
                     };
+                    dnp_work = dnp_work
+                        .checked_add(message.raw.spans().len())
+                        .and_then(|work| work.checked_add(1))
+                        .filter(|work| *work <= limits.max_correlation_checks)
+                        .ok_or_else(|| Error::limit("transaction_capture_scope_work"))?;
+                    let capture = capture_scope(&message.raw);
                     if !message.shape_valid
                         || !message.semantics_supported
                         || message.role == Role::Unknown
+                        || capture.is_none()
                     {
                         output.push(Transaction {
                             protocol: "modbus",
@@ -177,13 +201,18 @@ pub fn transactions(
                                 Vec::new()
                             },
                             status: "unclassified",
-                            reason: "invalid_or_unsupported_pdu_shape_or_endpoint_role",
+                            reason: if capture.is_none() {
+                                "modbus_transaction_capture_scope_invalid"
+                            } else {
+                                "invalid_or_unsupported_pdu_shape_or_endpoint_role"
+                            },
                         });
                         continue;
                     }
                     let group = groups
                         .entry((
                             "modbus",
+                            capture.expect("capture scope was checked"),
                             application.flow,
                             message.unit as u16,
                             0,
@@ -202,7 +231,7 @@ pub fn transactions(
             ApplicationData::Failed(_) => {}
         }
     }
-    for ((protocol, flow, _, _, _, _), group) in groups {
+    for ((protocol, _, flow, _, _, _, _), group) in groups {
         let inconsistent_modbus =
             if protocol == "modbus" && group.requests.len() == 1 && group.responses.len() == 1 {
                 let request = &group.requests[0];

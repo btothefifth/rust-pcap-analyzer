@@ -6,7 +6,7 @@ use crate::{
 use pcap_evidence::{sha256, wire::Endpoint};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-pub const ENGINE: &str = "pcap-evidence-history/1;state-policy/1";
+pub const ENGINE: &str = "pcap-evidence-history/2;state-policy/1";
 pub const MODULUS: i64 = 1i64 << 32;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EpochPolicy {
@@ -111,7 +111,10 @@ impl Config {
     pub fn decode(b: &[u8]) -> Result<Self> {
         let mut d = Decoder::new(b);
         if d.text(128)? != ENGINE {
-            return Err(bad("history_engine", "unsupported engine/policy identity"));
+            return Err(bad(
+                "history_engine",
+                "unsupported engine/policy identity; rebuild a new workspace from the immutable original capture",
+            ));
         }
         let v: Vec<u64> = (0..15).map(|_| d.u64()).collect::<Result<_>>()?;
         let to_usize = |i: usize| usize::try_from(v[i]).map_err(|_| Error::limit("history_config"));
@@ -154,6 +157,8 @@ pub struct SourceIdentity {
 pub struct Key {
     pub section: u32,
     pub interface: u32,
+    /// Link-header interface identity, independent of the capture container ID.
+    pub link_interface: Option<u32>,
     pub vlans: Vec<u16>,
     pub tunnels: Vec<String>,
     pub a: Endpoint,
@@ -209,6 +214,10 @@ impl Key {
         let mut e = Encoder::default();
         e.u32(self.section);
         e.u32(self.interface);
+        e.u8(u8::from(self.link_interface.is_some()));
+        if let Some(interface) = self.link_interface {
+            e.u32(interface);
+        }
         e.u8(self.vlans.len() as u8);
         for n in &self.vlans {
             e.u16(*n);
@@ -225,6 +234,7 @@ impl Key {
         let mut d = Decoder::new(b);
         let section = d.u32()?;
         let interface = d.u32()?;
+        let link_interface = if d.boolean()? { Some(d.u32()?) } else { None };
         let n = d.u8()? as usize;
         if n > 8 {
             return Err(Error::limit("vlans"));
@@ -241,6 +251,7 @@ impl Key {
         let k = Self {
             section,
             interface,
+            link_interface,
             vlans,
             tunnels,
             a,

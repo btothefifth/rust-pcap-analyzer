@@ -149,10 +149,17 @@ bilateral base advertisement supplies a two-byte layout context. The additive
 ADD-PATH layout, unresolved ADD-PATH families, per-sender extended-message
 eligibility and a compatibility-only bilateral extended-message summary.
 ADD-PATH layout requires the sender's send mode and the peer's receive mode for
-the same AFI/SAFI. A unilateral or malformed ADD-PATH advertisement leaves the
-affected NLRI opaque with range and hash evidence. No ADD-PATH evidence retains
+the same AFI/SAFI. With two complete, valid OPENs, an absent matching advertisement
+selects ordinary NLRI layout for that family. An observed ADD-PATH advertisement
+with missing, malformed, or conflicting OPEN evidence leaves the affected NLRI
+opaque with range and hash evidence. No ADD-PATH evidence retains
 the legacy wire-shape hypothesis for compatibility. This context does not prove
 negotiation, actual session establishment, authenticity or endpoint behavior.
+Enhanced refresh marker layout is also directional: the opposite-side receiver
+must advertise capability 70 in the complete unambiguous OPEN context, as required
+by [RFC 7313 section 4](https://www.rfc-editor.org/rfc/rfc7313.html#section-4).
+`enhanced_refresh_senders` records those sender directions; `enhanced_refresh`
+remains the bilateral summary.
 With absent context the decoder retains both valid bounded AS_PATH interpretations.
 A unique wire interpretation, or identical values from both interpretations, may
 supply byte-derived values while width authority stays unresolved. Different valid
@@ -204,6 +211,17 @@ are evidence summaries. The producer enforces those summaries at its state seam:
 withdrawal, while `session_reset` suppresses every route action and retains each
 affected route range/hash as opaque evidence. A malformed UPDATE with path
 attributes but no reachable NLRI escalates from treat-as-withdraw to session reset.
+When the outer UPDATE lengths are consistent, a final short attribute header,
+short extended header, or attribute value overrun uses the Total Attribute Length
+to locate conventional NLRI and applies treat-as-withdraw, following
+[RFC 7606 section 4](https://www.rfc-editor.org/rfc/rfc7606.html#section-4).
+`malformed_attribute_envelope` retains that final fragment's reason, available type code, range, and
+hash separately from complete `attribute_ranges`; it is null when absent.
+Unrecoverable outer lengths and NLRI syntax remain decode errors. Incorrect
+or unparsed MP attribute envelopes retain the stronger session-reset disposition.
+Incorrect
+MP_REACH or MP_UNREACH Optional/Transitive flags require the stronger session-reset
+disposition under [RFC 7606 sections 3(j) and 5.3](https://www.rfc-editor.org/rfc/rfc7606.html#section-5.3).
 This models the required offline disposition without claiming that a NOTIFICATION
 was sent, a peer reset, or an endpoint route changed. COMMUNITIES,
 EXTENDED_COMMUNITIES and LARGE_COMMUNITY require nonzero correctly aligned values;
@@ -211,6 +229,25 @@ their malformed forms are treat-as-withdraw. Malformed AS4_PATH is attribute
 discard. MP_REACH/MP_UNREACH route semantics require the bilateral AFI/SAFI
 capability; otherwise the occurrence stays range/hash-visible and no route is
 emitted.
+
+For an explicitly configured internal peer, an announcement without LOCAL_PREF
+is incomplete under [RFC 4271 section 5.1.5](https://www.rfc-editor.org/rfc/rfc4271.html#section-5.1.5).
+The additive `internal_local_pref_missing` field reports this condition. In the
+absence of a stronger known malformed-attribute disposition, the product uses
+`internal_local_pref_missing`, retains route ranges/hashes in `opaque_nlri`, and
+quarantines route actions. This is a conservative offline completeness rule;
+LOCAL_PREF is discretionary and its absence is not classified as RFC 7606's
+missing well-known mandatory attribute or fabricated treat-as-withdraw. Explicit
+external and unknown peer contexts retain their existing behavior, and a decoded
+malformed LOCAL_PREF occurrence retains its existing RFC 7606 disposition.
+
+An accepted captured UPDATE with opaque route evidence is a continuity gap for
+the session observer and Adj-RIB-In consumer. Prior candidates and subsequent
+candidates in that generation become unresolved; the gap advances no generation
+and invents no per-prefix withdrawal. Exact record replay remains inert. A known
+session-reset disposition takes precedence and retains the existing generation
+transition. This includes conventional ADD-PATH uncertainty, opaque MP layout,
+and quarantined peer-relationship or internal LOCAL_PREF route evidence.
 
 The producer labels a conventional empty UPDATE and a negotiated empty
 MP_UNREACH as explicit End-of-RIB families. A NOTIFICATION or UPDATE whose

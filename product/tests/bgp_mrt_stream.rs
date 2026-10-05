@@ -71,6 +71,38 @@ fn rib() -> Vec<u8> {
     record(12, 13, 2, &b)
 }
 
+#[test]
+fn malformed_rib_as_path_value_streams_unsupported_occurrence_then_valid_neighbor() {
+    let attrs = [0x40, 1, 1, 0, 0x40, 2, 2, 2, 1, 0x40, 3, 4, 192, 0, 2, 9];
+    let mut body = vec![0, 0, 0, 7, 8, 10, 0, 1, 0, 0];
+    body.extend(10u32.to_be_bytes());
+    body.extend((attrs.len() as u16).to_be_bytes());
+    body.extend(attrs);
+    let malformed = record(12, 13, 2, &body);
+    let raw = [table(), malformed.clone(), rib()].concat();
+    let mut rows = Vec::new();
+    let receipt = visit(&raw, |e| {
+        rows.push((
+            e.record_ordinal,
+            e.entry_index,
+            e.record_sha256.to_owned(),
+            member(e.event, "kind").cloned(),
+            e.observation.is_some(),
+        ));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(receipt.sha256, sha256::hex(&sha256::digest(&raw)));
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1].0, 1);
+    assert_eq!(rows[1].1, Some(0));
+    assert_eq!(rows[1].2, sha256::hex(&sha256::digest(&malformed)));
+    assert_eq!(rows[1].3, Some(Json::from("unsupported_rib_entry")));
+    assert!(!rows[1].4);
+    assert_eq!(rows[2].3, Some(Json::from("rib_entry")));
+    assert!(rows[2].4);
+}
+
 struct Split<'a> {
     bytes: &'a [u8],
     at: usize,

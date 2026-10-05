@@ -924,12 +924,21 @@ fn all_truncation_prefixes_and_attribute_boundary_failures_are_atomic() {
         );
     }
     let malformed = changed_update(&[0x50, 1, 0], &[0, 0, 0]);
-    atomic_error(
-        &malformed,
+    let recovered = bgp::decode_pcap(
+        &evidence(&malformed, 3),
         metadata(Some(0), 3),
         &mut paired(),
         &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        get(get(&recovered, "message_detail"), "update_disposition"),
+        &Json::from("treat_as_withdraw")
     );
+    assert!(array(get(&recovered, "routes"))
+        .iter()
+        .all(|route| get(route, "action") == &Json::from("withdraw")));
+    Observation::from_normalized(&recovered, None, &Limits::default()).unwrap();
     let mut trailing = wire("keepalive");
     trailing.extend(wire("keepalive"));
     atomic_error(

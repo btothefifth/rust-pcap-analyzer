@@ -1081,9 +1081,15 @@ fn semantic_attributes(
             2 => {
                 let mut p = Cursor::new(value, 0);
                 while p.at < value.len() {
+                    // The attribute's outer extent is already checked. A
+                    // short inner segment is malformed value evidence, not
+                    // truncated MRT framing.
+                    if value.len() - p.at < 2 {
+                        return Ok(None);
+                    }
                     let kind = p.u8()?;
                     let count = usize::from(p.u8()?);
-                    if !matches!(kind, 1..=4) {
+                    if !matches!(kind, 1..=4) || count == 0 || count > (value.len() - p.at) / 4 {
                         return Ok(None);
                     }
                     if out.as_path.len() >= limits.elements

@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 import struct
+import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from scripts.product_fixtures import pcap,packet,examples,links,generate
 from tools.product import comparison,tlv,history
@@ -72,6 +74,20 @@ class ResearchTests(Temp):
         bundle.create(p,self.source,a,b,specifications=[dict(id='policy',section='1',requirement='Do not invent bytes',basis='project_invariant')])
         result=bundle.verify(p);self.assertEqual(result['status'],'PASS');self.assertFalse(result['semantic_correctness_proven'])
         with self.assertRaises(FileExistsError):bundle.create(p,self.source,a,b,specifications=[])
+    def test_bundle_expanded_budget_includes_manifest_at_exact_boundary(self):
+        a=self.snapshot();baseline=self.root/'baseline.zip';bundle.create(baseline,self.source,a,a,specifications=[])
+        with zipfile.ZipFile(baseline)as z:
+            expanded=sum(e.file_size for e in z.infolist())
+            payload=expanded-z.getinfo('manifest.json').file_size
+        accepted=self.root/'exact.zip'
+        with patch.object(bundle,'MAX_BUNDLE',expanded):
+            bundle.create(accepted,self.source,a,a,specifications=[])
+            self.assertEqual(bundle.verify(accepted)['status'],'PASS')
+        for limit in (expanded-1,payload):
+            rejected=self.root/f'rejected-{limit}.zip'
+            with patch.object(bundle,'MAX_BUNDLE',limit),self.assertRaisesRegex(ValueError,'expanded bundle limit'):
+                bundle.create(rejected,self.source,a,a,specifications=[])
+            self.assertFalse(rejected.exists())
     def test_bundle_detects_rehashed_forged_differential(self):
         a=self.snapshot();p=self.root/'case.zip';bundle.create(p,self.source,a,a,specifications=[])
         with zipfile.ZipFile(p)as z:members={n:z.read(n)for n in z.namelist()}
@@ -171,6 +187,30 @@ class HistoryTests(Temp):
     def test_archive_index_tamper(self):
         out=self.root/'archive';history.archive(self.source,out);(out/'chunks.ndjson').write_bytes(b'')
         with self.assertRaises(ValueError):history.verify_archive(out)
+    def test_archive_replay_rechecks_emitted_source_and_index_closure(self):
+        self.source.write_bytes(b'AA');out=self.root/'archive';history.archive(self.source,out)
+        good=io.BytesIO();proof=history.replay_archive(out,good)
+        self.assertEqual(good.getvalue(),b'AA');self.assertEqual(proof['source_sha256'],hashlib.sha256(good.getvalue()).hexdigest())
+        real_verify=history.verify_archive
+        def mutate_after_verify(directory):
+            proof=real_verify(directory)
+            raw=b'AB';(out/'0000000000000000.chunk').write_bytes(raw)
+            (out/'chunks.ndjson').write_bytes(history.canonical({'file':'0000000000000000.chunk','bytes':2,'sha256':hashlib.sha256(raw).hexdigest()})+b'\n')
+            return proof
+        partial=io.BytesIO()
+        with patch.object(history,'verify_archive',side_effect=mutate_after_verify),self.assertRaisesRegex(ValueError,'source/index identity mismatch'):
+            history.replay_archive(out,partial)
+        self.assertEqual(partial.getvalue(),b'AB')  # No passing proof is returned for partial/untrusted output.
+    def test_archive_replay_checks_manifest_pinned_before_preflight(self):
+        self.source.write_bytes(b'AA');out=self.root/'archive';history.archive(self.source,out)
+        real_verify=history.verify_archive
+        def replace_archive_after_verify(directory):
+            proof=real_verify(directory);raw=b'AB';chunk=out/'0000000000000000.chunk';chunk.write_bytes(raw)
+            line=history.canonical({'file':chunk.name,'bytes':2,'sha256':hashlib.sha256(raw).hexdigest()})+b'\n'
+            (out/'chunks.ndjson').write_bytes(line);m=json.loads((out/'manifest.json').read_bytes())
+            m.update(source_sha256=hashlib.sha256(raw).hexdigest(),index_sha256=hashlib.sha256(line).hexdigest(),index_bytes=str(len(line)))
+            (out/'manifest.json').write_bytes(history.canonical(m)+b'\n');return proof
+        with patch.object(history,'verify_archive',side_effect=replace_archive_after_verify),self.assertRaises(ValueError):history.replay_archive(out,io.BytesIO())
     def test_stream_conflict_policies_and_provenance(self):
         source=self.root/'bytes';source.write_bytes(b'abcXYZdef');db=history.StreamStore(self.root/'s.db',source,create=True)
         try:
@@ -192,6 +232,32 @@ class HistoryTests(Temp):
             with self.source.open('r+b')as f:f.write(b'xxx')
             with self.assertRaises(ValueError):list(db.reconstruct('one',0))
         finally:db.close()
+    def test_live_stream_source_mutation_before_append_is_rejected(self):
+        self.source.write_bytes(b'AA');db=history.StreamStore(self.root/'s.db',self.source,create=True)
+        try:
+            self.source.write_bytes(b'AB')
+            with self.assertRaisesRegex(ValueError,'source changed'):db.append('one',0,0,1,1)
+            self.assertEqual(db.db.execute('SELECT COUNT(*) FROM segments').fetchone()[0],0)
+        finally:db.close()
+    def test_live_stream_mutation_outside_selected_segment_is_rejected(self):
+        self.source.write_bytes(b'AA');db=history.StreamStore(self.root/'s.db',self.source,create=True)
+        try:
+            db.append('one',0,0,0,1);self.source.write_bytes(b'AB')
+            with self.assertRaisesRegex(ValueError,'source changed'):list(db.reconstruct('one',0))
+        finally:db.close()
+    def test_live_stream_mutation_between_pieces_is_rejected(self):
+        self.source.write_bytes(b'AA');db=history.StreamStore(self.root/'s.db',self.source,create=True)
+        try:
+            db.append('one',0,0,0,2);pieces=db.reconstruct('one',0,piece_bytes=1)
+            self.assertEqual(next(pieces)['bytes_hex'],'41');self.source.write_bytes(b'AB')
+            with self.assertRaisesRegex(ValueError,'source changed'):next(pieces)
+        finally:db.close()
+    def test_live_stream_same_path_replacement_is_rejected(self):
+        self.source.write_bytes(b'AA');db=history.StreamStore(self.root/'s.db',self.source,create=True)
+        try:
+            replacement=self.root/'replacement';replacement.write_bytes(b'AA');os.replace(replacement,self.source)
+            with self.assertRaisesRegex(ValueError,'source changed'):db.append('one',0,0,0,1)
+        finally:db.close()
     def test_stream_work_budget(self):
         db=history.StreamStore(self.root/'s.db',self.source,create=True)
         try:
@@ -208,6 +274,18 @@ class DesktopStoreTests(Temp):
         page=store.query(self.database,{'limit':1});second=store.query(self.database,{'limit':1,'after':page['next']});self.assertNotEqual(page['rows'][0]['sequence'],second['rows'][0]['sequence'])
     def test_protocol_filters_do_not_invent_decoding(self):self.assertEqual(store.query(self.database,{'protocol':'dns'})['rows'],[])
     def test_query_injection_is_not_sql(self):self.assertEqual(store.query(self.database,{'protocol':"dns' OR 1=1 --"})['rows'],[])
+    def test_tuple_filter_keeps_ip_and_port_on_same_endpoint(self):
+        db=sqlite3.connect(self.database)
+        try:
+            sequence=store.query(self.database,{'kind':'packet.observed'})['rows'][0]['sequence']
+            db.execute("INSERT INTO sessions(session,transport,source_ip,source_port,destination_ip,destination_port,key_json) VALUES ('test-flow','tcp','192.0.2.1',40000,'192.0.2.2',179,'{}')")
+            db.execute("UPDATE events SET session='test-flow' WHERE seq=?",(sequence,));db.commit()
+        finally:db.close()
+        for address,port,expected in [('192.0.2.1',40000,True),('192.0.2.2',179,True),('192.0.2.1',179,False),('192.0.2.2',40000,False)]:
+            self.assertEqual(bool(store.query(self.database,{'ip':address,'port':port})['rows']),expected)
+        self.assertTrue(store.query(self.database,{'ip':'192.0.2.1'})['rows'])
+        self.assertTrue(store.query(self.database,{'port':179})['rows'])
+        self.assertFalse(store.query(self.database,{'port':0})['rows'])
     def test_page_limit(self):
         with self.assertRaises(ValueError):store.query(self.database,{'limit':99999})
     def test_unknown_filter(self):

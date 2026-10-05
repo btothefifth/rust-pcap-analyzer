@@ -686,6 +686,51 @@ fn mrt_identity_obeys_flag_duplicate_and_nonempty_set_rules() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn complete_rib_malformed_as_path_values_preserve_raw_records_without_conversion() {
+    // Each outer attribute length is exact. The AS_PATH value alone is short:
+    // missing count, absent ASN, partial ASN, or short second segment.
+    for value in [
+        vec![2],
+        vec![2, 1],
+        vec![2, 1, 0, 1, 0],
+        vec![2, 1, 0, 1, 0, 15, 1],
+        vec![2, 0],
+    ] {
+        let mut attributes = attr(0x40, 1, &[0]);
+        attributes.extend(attr(0x40, 2, &value));
+        attributes.extend(attr(0x40, 3, &[192, 0, 2, 9]));
+        let record = rib_v4_with_attributes(&attributes);
+        let bytes = [table(), record.clone(), rib_v4()].concat();
+        let batch = parse(&bytes);
+        let MrtBody::Rib(rib) = &batch.records[1].body else {
+            panic!("typed RIB")
+        };
+        assert_eq!(rib.entries[0].attributes, attributes);
+        assert_eq!(
+            batch.records[1].sha256,
+            sha256::hex(&sha256::digest(&record))
+        );
+        assert_eq!(batch.sha256, sha256::hex(&sha256::digest(&bytes)));
+        assert!(batch
+            .normalize_rib_entry(1, 0, &Limits::default())
+            .unwrap()
+            .is_none());
+        assert!(batch
+            .normalize_rib_entry(2, 0, &Limits::default())
+            .unwrap()
+            .is_some());
+    }
+    // A genuinely short outer attribute cannot be disguised as value evidence.
+    let bad_framing = [0x40, 1, 1, 0, 0x40, 2, 6, 2, 1];
+    assert!(MrtBatch::parse(
+        &[table(), rib_v4_with_attributes(&bad_framing)].concat(),
+        source(),
+        &MrtLimits::default(),
+    )
+    .is_err());
+}
 #[test]
 fn identical_route_bytes_from_distinct_collectors_keep_distinct_partitions() {
     let bytes = [table(), rib_v4()].concat();

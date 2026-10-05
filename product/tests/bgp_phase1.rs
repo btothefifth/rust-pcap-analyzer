@@ -703,7 +703,7 @@ fn confederation_prefix_survives_equal_length_as4_suffix_replacement() {
 }
 
 #[test]
-fn enhanced_route_refresh_markers_require_bilateral_layout_context() {
+fn enhanced_route_refresh_markers_require_complete_receiver_layout_context() {
     let refresh = message(5, &[0, 1, 1, 1]);
     let mut state = SessionState::default();
     decode(
@@ -739,6 +739,42 @@ fn enhanced_route_refresh_markers_require_bilateral_layout_context() {
         get(&bilateral, "negotiation_established"),
         &Json::Bool(false)
     );
+}
+
+#[test]
+fn enhanced_route_refresh_unilateral_complete_open_context_is_receiver_directional() {
+    for advertising_side in 0..=1u8 {
+        let mut state = SessionState::default();
+        for side in 0..=1u8 {
+            let caps = if side == advertising_side {
+                vec![capability(70, &[])]
+            } else {
+                Vec::new()
+            };
+            decode(
+                &opened(65000 + u16::from(side), &caps),
+                Some(side),
+                u64::from(side) + 1,
+                &mut state,
+            );
+        }
+        for subtype in [1, 2] {
+            let refresh = message(5, &[0, 1, subtype, 1]);
+            for sender in 0..=1u8 {
+                let value = decode(
+                    &refresh,
+                    Some(sender),
+                    10 + u64::from(subtype) * 2 + u64::from(sender),
+                    &mut state,
+                );
+                assert_eq!(
+                    get(get(&value, "message_detail"), "enhanced_layout_context"),
+                    &Json::Bool(sender != advertising_side)
+                );
+                assert_eq!(get(&value, "negotiation_established"), &Json::Bool(false));
+            }
+        }
+    }
 }
 
 #[test]

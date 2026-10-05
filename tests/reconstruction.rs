@@ -273,6 +273,7 @@ fn fragment(start: usize, more: bool, data: &[u8], frame: u64, ipv6: bool) -> Da
         }),
         payload: evidence(data, frame),
         ip_checksum: Checksum::Valid,
+        checksum_context: pcap_evidence::wire::ChecksumContext::BaseAddresses,
     }
 }
 #[test]

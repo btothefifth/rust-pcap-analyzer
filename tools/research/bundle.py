@@ -93,6 +93,9 @@ def create(path, source, left, right, *, specifications, artifacts=None, case=No
               "canonical_engine_modified":False,"software_dependencies_are_not_independent_votes":True,
               "files":{name:{"bytes":len(raw),"sha256":digest(raw)} for name,raw in sorted(members.items())}}
     members["manifest.json"]=canonical(manifest)+b"\n"
+    # Verification charges the manifest and every expanded member. Creation
+    # must admit the same final representation before any publication.
+    if sum(map(len,members.values()))>MAX_BUNDLE:raise InvalidResearch("expanded bundle limit")
     destination.parent.mkdir(parents=True,exist_ok=True)
     fd,temp=tempfile.mkstemp(prefix=".research-",dir=destination.parent)
     try:

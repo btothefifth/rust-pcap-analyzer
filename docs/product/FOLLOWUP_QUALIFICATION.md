@@ -23,6 +23,36 @@ feature matrix too; its scope is not replaced by the new driver. The driver exit
 2/BLOCKED when required tools are unavailable and 1/FAIL on real failures. NOT_RUN
 classes are explicitly listed, not converted into success.
 
+Both repeatable drivers now require `native-semantic-cases` after the root
+all-target release build. They resolve `examples/semantic_probe` from the actual
+Cargo target directory, including `CARGO_TARGET_DIR`, and retain the case runner's
+18-case receipt beside the gate logs. The ordered root validator also builds all
+targets and runs the independent case gate with its debug artifact. Portable
+semantic tool tests and product NDJSON/TLV parity each retain their own scope;
+neither substitutes for execution of the independent native field/witness cases.
+
+The shared subprocess owner drains both pipes under one aggregate byte budget
+and checks the terminal output condition before a zero exit can become PASS.
+Trusted POSIX children run in a new session. Timeout, output overflow,
+interruption, partial pipe-reader startup failure, and ordinary completion all
+stop the owned process group and reap the direct child before returning.
+Nested runners inherit the exact outer group ID through a small exec shim and
+keep their children inside that group; their local cleanup reaps the direct child
+while the outer owner retains final descendant cleanup. This prevents a nested
+semantic/research runner from escaping a timed-out qualification driver. Detached
+children that deliberately create a new session remain outside this lifecycle
+contract; it is not an OS sandbox. Qualification logs are capped at 64 MiB per
+attempt, and timeout/interruption rows retain their logs and adverse status.
+Windows tree termination uses `taskkill`; an unconfirmed stop is adverse and
+does not supply POSIX containment proof. Linux execution cannot qualify Windows
+or macOS cleanup behavior.
+
+The cheap regression owner is `python scripts/test_owned_process.py -v`. Its
+fixtures use tiny Python parent/child sleepers and at most 4 KiB burst output to
+exercise terminal caps, two-stream accounting, interruption and partial startup
+cleanup, recursive fuzz source membership, and source drift before a campaign
+can claim PASS. The fixture tests execute no Rust or fuzz campaigns.
+
 The integrated Windows run on 2026-09-19 recorded 26 required PASS gates,
 including the real linked C ABI harness after preparing the x64 MSVC developer
 environment. Six independent classes (browser-to-native, sustained fuzz, 50-500 GiB scale,

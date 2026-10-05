@@ -91,6 +91,7 @@ fn all_layer_adversarial_inputs() {
             let scope = Scope {
                 section: 0,
                 interface: 0,
+                link_interface: None,
                 vlans: Vec::new(),
             };
             let a = network::decode(link, &input, scope.clone());

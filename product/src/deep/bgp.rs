@@ -378,6 +378,8 @@ pub(super) struct LayoutContext {
     /// Convenience bilateral summary for existing output consumers.
     pub extended_messages: bool,
     pub enhanced_refresh: bool,
+    /// Directions whose opposite-side receiver advertised capability 70.
+    pub enhanced_refresh_senders: BTreeSet<u8>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct OpenState {
@@ -997,6 +999,8 @@ struct ParsedUpdate {
     as4_reconstruction: Json,
     opaque_nlri: Vec<Json>,
     missing_mandatory: Vec<u8>,
+    malformed_attribute_envelope: Option<Json>,
+    internal_local_pref_missing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1043,6 +1047,7 @@ type AttributeParse = (
     Vec<PrefixSpan>,
     Vec<PrefixSpan>,
     Vec<&'static str>,
+    Option<Json>,
 );
 
 pub(crate) fn attribute_flags(code: u8) -> Option<u8> {
@@ -1265,7 +1270,14 @@ fn parse_update(
         .checked_add(attribute_len)
         .ok_or_else(|| Error::limit("bgp_attributes"))?;
     need(b, attributes_end, "bgp_attributes")?;
-    let (mut attributes, mut ranges, mp_withdrawn, mp_announced, mut issues) = parse_attributes(
+    let (
+        mut attributes,
+        mut ranges,
+        mp_withdrawn,
+        mp_announced,
+        mut issues,
+        malformed_attribute_envelope,
+    ) = parse_attributes(
         b,
         attributes_start,
         attributes_end,
@@ -1292,7 +1304,20 @@ fn parse_update(
     let peer_relationship_unresolved = ranges
         .iter()
         .any(|range| range.peer_relationship_unresolved);
-    let mut known_action = UpdateAction::AcceptEvidenceOnly;
+    let incomplete_mp = malformed_attribute_envelope
+        .as_ref()
+        .is_some_and(|fragment| {
+            matches!(fragment, Json::Object(fields) if fields.iter().any(|(key, value)|
+            *key == "type" && (value == &Json::from(14u8) || value == &Json::from(15u8))))
+        });
+    let mut known_action = if incomplete_mp {
+        // A conventional NLRI boundary cannot certify an unparsed MP payload.
+        UpdateAction::SessionReset
+    } else if malformed_attribute_envelope.is_some() {
+        UpdateAction::TreatAsWithdraw
+    } else {
+        UpdateAction::AcceptEvidenceOnly
+    };
     for range in &ranges {
         if let Some(action) = range.action {
             known_action = strongest(known_action, action);
@@ -1319,12 +1344,20 @@ fn parse_update(
         }
     }
     let mut missing_mandatory = Vec::new();
+    let mut internal_local_pref_missing = false;
     if !announced.is_empty() || !mp_announced.is_empty() {
         let present: BTreeSet<_> = ranges
             .iter()
             .filter(|r| r.action == Some(UpdateAction::AcceptEvidenceOnly))
             .map(|r| r.code)
             .collect();
+        // RFC 4271 requires LOCAL_PREF on internal announcements, but it is
+        // discretionary, so absence is not RFC 7606's mandatory-attribute TAW.
+        internal_local_pref_missing = context.peer_relationship == PeerRelationship::Internal
+            && !ranges.iter().any(|range| range.code == 5);
+        if internal_local_pref_missing {
+            issues.push("internal_announcement_missing_local_pref_quarantined");
+        }
         let mandatory = if announced.is_empty() {
             &[1u8, 2][..]
         } else {
@@ -1344,6 +1377,18 @@ fn parse_update(
         }
     }
     let mut opaque_nlri = Vec::new();
+    for range in &ranges {
+        if matches!(range.code, 14 | 15)
+            && range.interpretation == "opaque_family_capability_or_add_path_layout"
+        {
+            opaque_nlri.push(Json::object([
+                ("kind", "multiprotocol_layout_unresolved".into()),
+                ("start", range.value_start.into()),
+                ("end", range.end.into()),
+                ("sha256", range.sha256.clone().into()),
+            ]));
+        }
+    }
     if base_unknown {
         issues.push("add_path_layout_unresolved_opaque_nlri");
         for (start, end, kind) in [
@@ -1452,10 +1497,20 @@ fn parse_update(
         }
         UpdateAction::AcceptEvidenceOnly | UpdateAction::AttributeDiscard => {}
     }
-    if peer_relationship_unresolved {
+    let quarantine_local_pref =
+        internal_local_pref_missing && known_action.rank() < UpdateAction::TreatAsWithdraw.rank();
+    if peer_relationship_unresolved || quarantine_local_pref {
         for record in &records {
             let mut fields = vec![
-                ("kind", "peer_relationship_unresolved_route".into()),
+                (
+                    "kind",
+                    if internal_local_pref_missing {
+                        "internal_local_pref_missing_route"
+                    } else {
+                        "peer_relationship_unresolved_route"
+                    }
+                    .into(),
+                ),
                 ("action", record.action.as_str().into()),
                 ("start", record.start.into()),
                 ("end", record.end.into()),
@@ -1471,7 +1526,12 @@ fn parse_update(
             opaque_nlri.push(Json::Object(fields));
         }
         records.clear();
-        issues.push("peer_relationship_context_unresolved_route_actions_quarantined");
+        if peer_relationship_unresolved {
+            issues.push("peer_relationship_context_unresolved_route_actions_quarantined");
+        }
+    }
+    if quarantine_local_pref {
+        disposition = "internal_local_pref_missing";
     }
     if asn_width == 2 {
         issues.push("asn_width_derived_from_two_octet_default_or_open");
@@ -1489,6 +1549,8 @@ fn parse_update(
         as4_reconstruction,
         opaque_nlri,
         missing_mandatory,
+        malformed_attribute_envelope,
+        internal_local_pref_missing,
     })
 }
 
@@ -1508,17 +1570,21 @@ fn parse_attributes(
     let mut mp_announced = Vec::new();
     let mut issues = Vec::new();
     let mut seen_codes = BTreeSet::new();
+    let mut malformed_attribute_envelope = None;
     while p < end {
         if ranges.len() >= limits.elements {
             return Err(Error::limit("bgp_attributes"));
         }
         let start = p;
         if p.checked_add(3).is_none_or(|n| n > end) {
-            return Err(bad(
-                "bgp_attribute_header",
+            malformed_attribute_envelope = Some(attribute_envelope_fragment(
+                b,
                 p,
-                "header exceeds attribute block",
-            ));
+                end,
+                "short_header",
+                budget,
+            )?);
+            break;
         }
         need(b, p + 3, "bgp_attribute_header")?;
         let flags = b[p];
@@ -1526,11 +1592,14 @@ fn parse_attributes(
         let extended = flags & 0x10 != 0;
         let header = if extended { 4 } else { 3 };
         if p.checked_add(header).is_none_or(|n| n > end) {
-            return Err(bad(
-                "bgp_attribute_header",
+            malformed_attribute_envelope = Some(attribute_envelope_fragment(
+                b,
                 p,
-                "extended header exceeds attribute block",
-            ));
+                end,
+                "short_extended_header",
+                budget,
+            )?);
+            break;
         }
         need(b, p + header, "bgp_attribute_header")?;
         let length = if extended {
@@ -1543,7 +1612,14 @@ fn parse_attributes(
             .checked_add(length)
             .ok_or_else(|| Error::limit("bgp_attribute"))?;
         if value_end > end {
-            return Err(bad("bgp_attribute", start, "attribute exceeds UPDATE"));
+            malformed_attribute_envelope = Some(attribute_envelope_fragment(
+                b,
+                p,
+                end,
+                "value_overrun",
+                budget,
+            )?);
+            break;
         }
         budget.charge(
             ranges
@@ -1982,6 +2058,8 @@ fn parse_attributes(
             }
         } else if asn_width == 4 && matches!(code, 17 | 18) {
             "attribute_discard"
+        } else if matches!(code, 14 | 15) && !flags_valid {
+            "session_reset"
         } else if peer_dependent && !flags_valid {
             "treat_as_withdraw"
         } else if peer_dependent {
@@ -2057,7 +2135,47 @@ fn parse_attributes(
         }
         p = value_end;
     }
-    Ok((attrs, ranges, mp_withdrawn, mp_announced, issues))
+    if malformed_attribute_envelope.is_some() {
+        issues.push("malformed_final_attribute_envelope_retained");
+    }
+    Ok((
+        attrs,
+        ranges,
+        mp_withdrawn,
+        mp_announced,
+        issues,
+        malformed_attribute_envelope,
+    ))
+}
+
+// A truncated final attribute is not a complete AttributeRange. Retain its
+// exact bounded bytes separately and locate conventional NLRI by outer lengths.
+fn attribute_envelope_fragment(
+    b: &[u8],
+    start: usize,
+    end: usize,
+    reason: &'static str,
+    budget: &mut producer::Budget<'_>,
+) -> Result<Json> {
+    budget.charge(
+        end.saturating_sub(start)
+            .saturating_mul(16)
+            .saturating_add(256),
+    )?;
+    Ok(Json::object([
+        ("reason", reason.into()),
+        (
+            "type",
+            if end - start >= 2 {
+                b[start + 1].into()
+            } else {
+                Json::Null
+            },
+        ),
+        ("start", start.into()),
+        ("end", end.into()),
+        ("sha256", payload_sha256(&b[start..end]).into()),
+    ]))
 }
 
 pub(crate) fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<Vec<AsPathSegment>> {

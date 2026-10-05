@@ -27,6 +27,7 @@ pub fn scope() -> Scope {
     Scope {
         section: 0,
         interface: 0,
+        link_interface: None,
         vlans: vec![],
     }
 }

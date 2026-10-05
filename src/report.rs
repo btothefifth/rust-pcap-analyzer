@@ -350,6 +350,10 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                             ("section", flow.key.scope.section.into()),
                             ("interface", flow.key.scope.interface.into()),
                             (
+                                "link_interface",
+                                optional_u32(flow.key.scope.link_interface),
+                            ),
+                            (
                                 "vlans",
                                 J::array(flow.key.scope.vlans.iter().map(|v| J::from(*v))),
                             ),
@@ -458,6 +462,7 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                         J::object([
                             ("section", app.scope.section.into()),
                             ("interface", app.scope.interface.into()),
+                            ("link_interface", optional_u32(app.scope.link_interface)),
                             (
                                 "vlans",
                                 J::array(app.scope.vlans.iter().map(|v| J::from(*v))),

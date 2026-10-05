@@ -33,7 +33,7 @@ pub struct Parser {
     ua: BTreeMap<(u32, u32), UaAssembly>,
     ua_last: BTreeMap<u32, u32>,
     last_frame: u64,
-    dnp_poisoned: bool,
+    requires_cut: bool,
 }
 impl Parser {
     pub fn new(protocol: &str, limits: Limits, context: Context) -> Result<Self> {
@@ -54,7 +54,7 @@ impl Parser {
             ua: BTreeMap::new(),
             ua_last: BTreeMap::new(),
             last_frame: 0,
-            dnp_poisoned: false,
+            requires_cut: false,
         })
     }
     fn length(&self) -> Result<Option<usize>> {
@@ -138,8 +138,13 @@ impl Parser {
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
         let result = self.feed_inner(offset, bytes, emit);
-        if self.protocol == "dnp3" && result.is_err() {
-            self.dnp_poisoned = true;
+        if result.is_err() {
+            self.requires_cut = true;
+            // Rejected continuation cannot retain an assembly for a later feed.
+            // DNP keeps its rejected witnesses for its existing cut report.
+            self.cotp = EvidenceBytes::default();
+            self.ua.clear();
+            self.ua_last.clear();
         }
         result
     }
@@ -149,9 +154,13 @@ impl Parser {
         bytes: &EvidenceBytes,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
-        if self.dnp_poisoned {
+        if self.requires_cut {
             return Err(bad(
-                "dnp_continuation_requires_cut",
+                if self.protocol == "dnp3" {
+                    "dnp_continuation_requires_cut"
+                } else {
+                    "continuation_requires_cut"
+                },
                 0,
                 "explicit cut required after rejected evidence",
             ));
@@ -181,7 +190,7 @@ impl Parser {
             while let Some(n) = match self.length() {
                 Ok(n) => n,
                 Err(e) => {
-                    self.dnp_poisoned = self.protocol == "dnp3";
+                    self.requires_cut = true;
                     return Err(e);
                 }
             } {
@@ -198,7 +207,7 @@ impl Parser {
                     Ok(report) => report,
                     Err(e) => {
                         if self.protocol == "dnp3" {
-                            self.dnp_poisoned = true;
+                            self.requires_cut = true;
                             let mut rejected = Report::new("dnp3.rejected", &raw, &self.limits)?;
                             rejected.note(
                                 match e.code {
@@ -483,6 +492,7 @@ impl Parser {
                 if self.cotp.spans().len().saturating_add(part.spans().len()) > self.limits.spans {
                     return Err(Error::limit("cotp_spans"));
                 }
+                self.check_retained(part.len(), "cotp_retained_bytes")?;
                 self.cotp.append(&part, self.limits.input_bytes)?;
                 if !c.eot {
                     return Ok(None);
@@ -499,11 +509,7 @@ impl Parser {
                 let b = raw.data();
                 need(b, 24, "ua_message")?;
                 let key = (le32(b, 8)?, le32(b, 20)?);
-                if b[3] == b'A' {
-                    self.ua.remove(&key);
-                    return Ok(Some(super::opcua::decode(raw, true, &self.limits)?));
-                }
-                if !matches!(b[3], b'C' | b'F') {
+                if !matches!(b[3], b'A' | b'C' | b'F') {
                     return Err(bad("ua_chunk", 3, "unknown chunk flag"));
                 }
                 let sequence = le32(b, 16)?;
@@ -523,9 +529,18 @@ impl Parser {
                     ));
                 }
                 self.ua_last.insert(key.0, sequence);
+                if b[3] == b'A' {
+                    if self.ua.get(&key).is_some_and(|s| s.token != token) {
+                        return Err(bad("ua_token", 12, "token changed inside chunked message"));
+                    }
+                    self.ua.remove(&key);
+                    return Ok(Some(super::opcua::decode(raw, true, &self.limits)?));
+                }
                 if !self.ua.contains_key(&key) && self.ua.len() >= self.limits.active {
                     return Err(Error::limit("ua_messages"));
                 }
+                let part = raw.slice(24..raw.len())?;
+                self.check_retained(part.len(), "ua_retained_bytes")?;
                 let assembly = self.ua.entry(key).or_insert_with(|| UaAssembly {
                     token,
                     pending: EvidenceBytes::default(),
@@ -534,7 +549,6 @@ impl Parser {
                     return Err(bad("ua_token", 12, "token changed inside chunked message"));
                 }
                 let pending = &mut assembly.pending;
-                let part = raw.slice(24..raw.len())?;
                 if pending.spans().len().saturating_add(part.spans().len()) > self.limits.spans {
                     return Err(Error::limit("ua_spans"));
                 }
@@ -555,6 +569,21 @@ impl Parser {
                 &self.limits,
             )?)),
         }
+    }
+    /// Logical retained payload across all concurrently open assemblies. Final
+    /// removal, abort, cut and rejected-feed cleanup release this budget.
+    fn check_retained(&self, additional: usize, field: &'static str) -> Result<()> {
+        let retained = self.ua.values().try_fold(self.cotp.len(), |n, assembly| {
+            n.checked_add(assembly.pending.len())
+                .ok_or_else(|| Error::limit(field))
+        })?;
+        if retained
+            .checked_add(additional)
+            .is_none_or(|n| n > self.limits.retained_bytes)
+        {
+            return Err(Error::limit(field));
+        }
+        Ok(())
     }
     fn dnp_semantic_limits(&self) -> pcap_evidence::semantics::Limits {
         let d = pcap_evidence::semantics::Limits::default();
@@ -589,14 +618,14 @@ impl Parser {
         )?;
         self.cotp = EvidenceBytes::default();
         self.dnp.clear();
-        self.dnp_poisoned = false;
+        self.requires_cut = false;
         self.ua.clear();
         self.ua_last.clear();
         r.note(Status::Incomplete, reason, 0, pending.len())?;
         Ok(r)
     }
     pub fn finish(&mut self) -> Result<Option<Report>> {
-        if self.dnp_poisoned
+        if self.requires_cut
             || !self.buffer.bytes().is_empty()
             || !self.cotp.is_empty()
             || !self.dnp.is_empty()

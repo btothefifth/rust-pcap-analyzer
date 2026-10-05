@@ -666,3 +666,139 @@ fn workflow_json_is_deterministic_and_does_not_infer_time_or_effects() {
     assert!(text.contains("\"device_effect_established\":false"));
     assert!(!text.contains("latency_ms"));
 }
+
+#[test]
+fn complete_message_pairing_rejects_duplicate_frame_refs_and_post_fin_clones() {
+    for repeated_index in [true, false] {
+        let mut request = application(&["class_scan_15"], 0);
+        let ApplicationData::Dnp3(result) = &mut request.data else {
+            unreachable!()
+        };
+        let extra = if repeated_index {
+            0
+        } else {
+            result.frames.push(result.frames[0].clone());
+            1
+        };
+        result.fragments[0].frames.push(extra);
+        let rows = correlate::transactions(
+            &[request, application(&["event_response_15"], 1)],
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(rows.iter().all(|row| row.status != "candidate_pair"));
+        assert!(rows.iter().any(|row| row.status == "unclassified"));
+    }
+}
+
+#[test]
+fn complete_message_pairing_preserves_in_assembly_transport_retransmissions() {
+    let response = application(
+        &[
+            "transport_first",
+            "transport_middle",
+            "transport_first",
+            "transport_final",
+        ],
+        1,
+    );
+    let ApplicationData::Dnp3(result) = &response.data else {
+        unreachable!()
+    };
+    assert_eq!(result.messages.len(), 1);
+    assert_eq!(result.messages[0].packets.len(), 4);
+    let mut work = 0;
+    assert!(!workflow::verified_message_direction(
+        result,
+        &result.messages[0],
+        &Limits::default(),
+        &mut work
+    )
+    .unwrap());
+    let rows = correlate::transactions(&[response], &Limits::default()).unwrap();
+    assert_eq!(rows[0].status, "orphan_response");
+}
+
+fn application_from_capture(
+    names: &[&str],
+    direction: usize,
+    capture: [u8; 32],
+) -> ApplicationAnalysis {
+    let parts: Vec<_> = names.iter().map(|name| wire(name)).collect();
+    let mut all = EvidenceBytes::default();
+    for (ordinal, bytes) in parts.iter().enumerate() {
+        all.append(
+            &EvidenceBytes::from_packet(
+                bytes,
+                PacketId {
+                    capture,
+                    frame: ordinal as u64 + 1,
+                    record_offset: 100 * (ordinal as u64 + 1),
+                },
+                54,
+            ),
+            1024 * 1024,
+        )
+        .unwrap();
+    }
+    let mut input = stream(&[]);
+    input.chunks[0].bytes = all;
+    ApplicationAnalysis {
+        flow: 0,
+        direction,
+        protocol: "dnp3",
+        data: ApplicationData::Dnp3(dnp3::decode(&input, &Limits::default()).unwrap()),
+    }
+}
+
+#[test]
+fn transaction_keys_separate_capture_hashes_even_with_identical_numeric_flows() {
+    let request_a = application_from_capture(&["class_scan_15"], 0, [7; 32]);
+    let response_a = application_from_capture(&["event_response_15"], 1, [7; 32]);
+    let request_b = application_from_capture(&["class_scan_15"], 0, [8; 32]);
+    let response_b = application_from_capture(&["event_response_15"], 1, [8; 32]);
+    let mismatch =
+        correlate::transactions(&[request_a.clone(), response_b.clone()], &Limits::default())
+            .unwrap();
+    assert_eq!(mismatch.len(), 2);
+    assert!(mismatch.iter().all(|row| row.status != "candidate_pair"));
+    let complete = correlate::transactions(
+        &[request_a, response_a, request_b, response_b],
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(complete.len(), 2);
+    assert!(complete.iter().all(|row| row.status == "candidate_pair"));
+}
+
+#[test]
+fn one_complete_message_cannot_merge_fragments_from_different_captures() {
+    let first = wire("application_first");
+    let final_fragment = wire("application_final");
+    let mut all = evidence(&first, 1);
+    all.append(
+        &EvidenceBytes::from_packet(
+            &final_fragment,
+            PacketId {
+                capture: [8; 32],
+                frame: 2,
+                record_offset: 200,
+            },
+            54,
+        ),
+        1024 * 1024,
+    )
+    .unwrap();
+    let mut input = stream(&[]);
+    input.chunks[0].bytes = all;
+    let result = dnp3::decode(&input, &Limits::default()).unwrap();
+    assert_eq!(result.messages.len(), 1);
+    let mut work = 0;
+    assert!(workflow::verified_message_direction(
+        &result,
+        &result.messages[0],
+        &Limits::default(),
+        &mut work
+    )
+    .is_err());
+}

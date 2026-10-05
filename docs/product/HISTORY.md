@@ -23,8 +23,12 @@ with open('/new/replayed.pcap', 'xb') as output:
     replay_archive('/new/source-archive', output)
 ```
 
-Replay verifies the archive, then rechecks chunks as it writes. Generic output may
-be partial on I/O failure and must be discarded; no source bytes are repaired.
+Replay pins the completion manifest before preflight verification, then hashes
+each emitted chunk and the exact streamed index. It returns a passing proof only
+after the emitted whole-source hash, byte count, index hash/size, chunk count and
+unchanged manifest all agree. Replacing a chunk and rebuilding its index digest
+cannot reuse the earlier proof. Generic output may be partial on I/O or identity
+failure and must be discarded; no source bytes are repaired.
 Source identity is not capture authorship, chain of custody or semantic correctness.
 
 ## Disk-backed interval reconstruction
@@ -34,6 +38,15 @@ analysis hypothesis and direction. Its caller supplies unwrapped sequence positi
 source offsets and an independently justified scope; the store does not guess TCP
 connection generations. It checks source identity, detects overlap alternatives,
 retains conflicts and emits bounded pieces or gaps according to an explicit policy.
+The store retains one source descriptor until `close()`, hashes that descriptor
+incrementally at open, and checks its file identity, size, modification time and
+change time against the original generation before admission and before each
+published piece. A write elsewhere in the source or same-path replacement rejects
+the live store even if selected segment bytes still match. Admission rolls back
+when the post-read identity check fails. This contract requires a trusted local
+filesystem that reliably exposes writes through those metadata fields; it does
+not attest hostile filesystems or concurrent writers that can forge metadata.
+No whole-capture copy or per-segment whole-capture rescan is created.
 
 Read `tools/product/history.py` for exact methods and `HistoryTests` for executable
 usage. Do not identify an upstream bounded window as a complete endpoint connection

@@ -369,6 +369,7 @@ struct RouteRow {
     checkpoint: Option<String>,
     clock: ObservationClock,
     observed_at_ns: Option<i64>,
+    rejection: Option<Json>,
 }
 impl RouteRow {
     fn status_name(&self) -> &'static str {
@@ -455,6 +456,7 @@ impl RouteRow {
                 },
             ),
             ("native_current", self.current.into()),
+            ("rejection", self.rejection.clone().unwrap_or(Json::Null)),
             (
                 "captured_lifecycle",
                 self.lifecycle.map_or(Json::Null, Json::from),
@@ -504,7 +506,7 @@ impl VerifiedStore {
         drop(f);
         let mut captured_entry_evidence = Vec::new();
         let mut captured_observation_evidence = Vec::new();
-        let (receipt, digest, namespace, entries, observations, collector) =
+        let (receipt, digest, namespace, entries, rejections, observations, collector) =
             if &magic == bgp_store::MAGIC {
                 if options.peer_relationship.is_some() {
                     return Err(bad(
@@ -526,6 +528,7 @@ impl VerifiedStore {
                     digest,
                     namespace,
                     a.route_entries,
+                    Vec::new(),
                     a.observations,
                     Vec::new(),
                 )
@@ -598,6 +601,7 @@ impl VerifiedStore {
                         checkpoint: Some(c.checkpoint_id.clone()),
                         clock: o.import_context().expect("checked context").clock.clone(),
                         observed_at_ns: c.observed_at_ns,
+                        rejection: None,
                     });
                 }
                 let digest = sha256::hex(&a.receipt.terminal_sha256);
@@ -611,6 +615,7 @@ impl VerifiedStore {
                     digest,
                     namespace,
                     a.bgp4mp_rib.entries().values().cloned().collect(),
+                    a.bgp4mp_rib.rejections().to_vec(),
                     a.state.observations().to_vec(),
                     collector,
                 )
@@ -637,6 +642,7 @@ impl VerifiedStore {
                     digest,
                     namespace,
                     a.bmp_rib.entries().values().cloned().collect(),
+                    a.bmp_rib.rejections().to_vec(),
                     a.state.observations().to_vec(),
                     Vec::new(),
                 )
@@ -752,6 +758,65 @@ impl VerifiedStore {
                 checkpoint: context.map(|c| c.checkpoint_id.clone()),
                 clock: context.map(|c| c.clock.clone()).unwrap_or_default(),
                 observed_at_ns: observation.and_then(|o| o.source().observed_at_ns),
+                rejection: None,
+            });
+        }
+        // A rejection is an occurrence, separate from accepted route versions.
+        // It cannot replace or become a current native route with the same key.
+        for (index, rejection) in rejections.iter().enumerate() {
+            if rows.len() >= limits.elements {
+                return Err(Error::limit("bgp_persisted_routes"));
+            }
+            materialized_bytes = materialized_bytes
+                .checked_add(rejection_charge(rejection).saturating_mul(6))
+                .ok_or_else(|| Error::limit("bgp_persisted_rows"))?;
+            if materialized_bytes > limits.retained_bytes || materialized_bytes > limits.work {
+                return Err(Error::limit("bgp_persisted_rows"));
+            }
+            let observation = observations
+                .iter()
+                .find(|o| {
+                    o.source().source_id == rejection.key.scope.source.source_id
+                        && o.source().session.as_deref() == Some(&rejection.key.scope.session)
+                        && o.source().generation == Some(rejection.key.scope.generation)
+                        && o.source().direction == rejection.key.scope.direction
+                        && o.source().peer == rejection.key.scope.peer
+                        && o.source().record_id == rejection.record_id
+                })
+                .ok_or_else(|| bad("bgp_persisted_rejection", 0, "source observation missing"))?;
+            let context = observation
+                .import_context()
+                .ok_or_else(|| bad("bgp_persisted_rejection", 0, "import context missing"))?;
+            if super::bgp_session::SourcePartition::from_import_context(context, &limits)?
+                != rejection.key.scope.source
+            {
+                return Err(bad(
+                    "bgp_persisted_rejection",
+                    0,
+                    "source partition mismatch",
+                ));
+            }
+            let digest = sha256::hex(&observation.sha256());
+            rows.push(RouteRow {
+                id: format!("rejected:{index}"),
+                key: rejection.key.clone(),
+                status: RouteStatus::Rejected,
+                collector: false,
+                current: false,
+                lifecycle: None,
+                original_partition: None,
+                alternatives: Json::array([]),
+                attributes: None,
+                witnesses: vec![digest.clone()],
+                checkpoint: Some(context.checkpoint_id.clone()),
+                clock: context.clock.clone(),
+                observed_at_ns: observation.source().observed_at_ns,
+                rejection: Some(Json::object([
+                    ("reason", rejection.reason.clone().into()),
+                    ("record_id", rejection.record_id.clone().into()),
+                    ("observation_sha256", digest.clone().into()),
+                    ("occurrence_id", format!("observation:{digest}").into()),
+                ])),
             });
         }
         let result = Self {
@@ -963,7 +1028,7 @@ impl VerifiedStore {
                     id: row.id.clone(),
                     key: row.key.clone(),
                     comparison_context: profile.config.comparison_context.clone(),
-                    status: if row.current {
+                    status: if row.current || row.status == RouteStatus::Rejected {
                         row.status
                     } else {
                         RouteStatus::Unresolved
@@ -1478,6 +1543,9 @@ fn preflight_native_clone(
     limits: &Limits,
 ) -> Result<()> {
     let mut charge = 0usize;
+    if rib.entries().len().saturating_add(rib.rejections().len()) > limits.elements {
+        return Err(Error::limit("bgp_persisted_routes"));
+    }
     for entry in rib.entries().values() {
         charge = charge
             .checked_add(entry_charge(entry, limits)?.saturating_mul(6))
@@ -1492,8 +1560,29 @@ fn preflight_native_clone(
             )
             .ok_or_else(|| Error::limit("bgp_persisted_clone"))?;
     }
+    for rejection in rib.rejections() {
+        charge = charge
+            .checked_add(rejection_charge(rejection).saturating_mul(8))
+            .ok_or_else(|| Error::limit("bgp_persisted_clone"))?;
+    }
     if charge > limits.retained_bytes || charge > limits.work {
         return Err(Error::limit("bgp_persisted_clone"));
     }
     Ok(())
+}
+
+fn rejection_charge(rejection: &super::bgp_rib::RejectedRecord) -> usize {
+    rejection
+        .key
+        .scope
+        .source
+        .source_id
+        .len()
+        .saturating_add(rejection.key.scope.source.partition_id.len())
+        .saturating_add(rejection.key.scope.session.len())
+        .saturating_add(rejection.key.scope.peer.as_ref().map_or(0, String::len))
+        .saturating_add(rejection.key.prefix.address.len())
+        .saturating_add(rejection.record_id.len())
+        .saturating_add(rejection.reason.len())
+        .saturating_add(2048)
 }

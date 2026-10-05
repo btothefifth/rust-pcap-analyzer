@@ -11,6 +11,7 @@ fn key() -> Key {
     Key {
         section: 0,
         interface: 0,
+        link_interface: None,
         vlans: vec![8],
         tunnels: vec![],
         a: Endpoint {
@@ -50,6 +51,35 @@ fn packet(frame: u64, seq: u32, flags: u8, payload: &[u8]) -> TcpInput {
         &Config::default(),
     )
     .unwrap()
+}
+#[test]
+fn link_header_interface_identity_round_trips_without_container_collision() {
+    let base = key();
+    let mut zero = base.clone();
+    zero.link_interface = Some(0);
+    let mut first = base.clone();
+    first.link_interface = Some(1);
+    let mut other_container = first.clone();
+    other_container.interface = 1;
+    let keys = [base, zero, first, other_container];
+    for (i, key) in keys.iter().enumerate() {
+        let encoded = key.encode().unwrap();
+        assert_eq!(&Key::decode(&encoded).unwrap(), key);
+        for other in &keys[..i] {
+            assert_ne!(key.digest().unwrap(), other.digest().unwrap());
+        }
+    }
+}
+#[test]
+fn earlier_history_engine_requires_rebuild_from_original_capture() {
+    let mut encoded = Config::default().encode().unwrap();
+    let legacy = b"pcap-evidence-history/1;state-policy/1";
+    encoded[4..4 + legacy.len()].copy_from_slice(legacy);
+    let error = Config::decode(&encoded).unwrap_err();
+    assert_eq!(error.field, "history_engine");
+    assert!(error
+        .to_string()
+        .contains("rebuild a new workspace from the immutable original capture"));
 }
 #[test]
 fn known_serial_aliases() {

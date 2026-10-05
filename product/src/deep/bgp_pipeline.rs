@@ -539,6 +539,10 @@ fn session_event(
                     next_generation: decoder_generation,
                     kind: ProtocolResetKind::UpdateError,
                 }
+            } else if !bgp_state::array(bgp_state::member(detail, "opaque_nlri")?)?.is_empty() {
+                EventKind::Gap {
+                    reason: "decoded_update_opaque_route_evidence".into(),
+                }
             } else if let Some(family) = end_of_rib(detail)? {
                 EventKind::EndOfRib(family)
             } else {
@@ -633,6 +637,9 @@ fn rib_event(
             reason: "decoded_protocol_session_reset".into(),
         },
         EventKind::EndOfRib(family) => RibEventKind::EndOfRib(*family),
+        EventKind::Gap { reason } => RibEventKind::Gap {
+            reason: reason.clone(),
+        },
         EventKind::Update => {
             let mut actions = Vec::with_capacity(observation.routes().len());
             for route in observation.routes() {
@@ -677,7 +684,6 @@ fn rib_event(
         | EventKind::Notification
         | EventKind::RouteRefresh { .. }
         | EventKind::Stale { .. }
-        | EventKind::Gap { .. }
         | EventKind::Reset { .. } => return Ok(None),
     };
     let generation = match &session.kind {

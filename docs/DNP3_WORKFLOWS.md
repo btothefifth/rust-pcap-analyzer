@@ -14,9 +14,10 @@ open and are not inferred from Windows results.
 list separately in `Analysis::dnp3_confirmation_candidates`; a typed failure is
 stored in `Analysis::dnp3_confirmation_error`, makes `has_diagnostics()` true, and
 leaves the new list empty. JSON uses the same two top-level field names. Existing
-`transaction_candidates`, transaction statuses/reasons and the ordinary
-request/response verifier are unchanged. In particular, its historical CONFIRM
-reason `fragment_confirmation_observed_pairing_not_implemented` still refers to
+`transaction_candidates` retains its existing report shape. The ordinary
+request/response verifier now uses the same fragment witness checks, including
+unique frame references, post-FIN rejection and capture consistency. Its historical
+CONFIRM reason `fragment_confirmation_observed_pairing_not_implemented` still refers to
 that old transaction path; it does not describe this new, separate report.
 
 A row is one bounded identifier group, not a selected device acknowledgement.
@@ -38,7 +39,7 @@ silently dropping the malformed bytes. The row status/reason is one of:
 |---|---|
 | `candidate_confirmation` | `unique_verified_fragment_identifiers_not_receipt_or_causality`: exactly one confirm and eligible target, without conflicting alternatives |
 | `unmatched_confirmation` | `no_verified_response_fragment_matches_all_confirmation_fields`: one verified confirm, no eligible target; excluded alternatives remain visible |
-| `ambiguous` | `duplicate_or_reused_confirmation_identifier`, `duplicate_or_reused_response_identifier`, or `unverified_fragment_identifier_in_same_flow`; never select a winner |
+| `ambiguous` | `duplicate_or_reused_confirmation_identifier`, `duplicate_or_reused_response_identifier`, `unverified_fragment_identifier_in_same_flow`, or `unverified_fragment_capture_scope_unknown_in_same_flow`; never select a winner |
 | `unclassified` | Exact verifier error field/code; original references retained, no verified identifiers invented |
 
 Multiple confirms in one group and their possible targets are alternatives, not
@@ -70,11 +71,14 @@ CRC/length failures and inadmissible addresses cannot authorize a witness.
 
 All DNP3 fragments are verified **before filtering by function** so a forged public
 APDU role cannot hide an original duplicate CONFIRM. An unverifiable or unsupported
-fragment blocks a unique positive candidate in that same supplied flow, because
-assigning its untrusted identifier to just one group could hide a conflict. This
+fragment blocks a unique positive candidate in that same source capture and
+supplied flow, because assigning its untrusted identifier to just one group could hide a conflict. This
 is deliberately conservative: even a supported pair sharing a flow with an opaque
-secure-function fragment remains ambiguous. Other flows are not tainted. Link
-failures which never produced an application fragment retain their existing root
+secure-function fragment remains ambiguous. Other captures and flows are not
+tainted when source scope is coherent. Absent or mixed source scope is retained
+as `UnknownCapture(flow)` and conservatively blocks that numeric flow with
+`unverified_fragment_capture_scope_unknown_in_same_flow`; it never becomes an
+invented capture hash. Link failures which never produced an application fragment retain their existing root
 rejected ranges/issues; missing transport data is not invented as a candidate.
 
 Callers establish capture provenance, flow identity and captured direction before
@@ -169,6 +173,32 @@ public [DNP Users Group validation bulletin](https://www.dnp.org/Portals/0/Publi
 is a useful primary implementation reference for these object widths; it is a
 technical bulletin, not a claim that this bounded slice implements or is
 certified against the complete/current IEEE 1815 standard.
+
+### Additional semantic and source-scope guards
+
+The object-layout table uses exact group/variation pairs: g3v3/v4, g11v3,
+g13v3, g20v9/v10 and g80v2 remain unsupported tails. Valid g4v2, g2v3,
+g21v9/v10, g20v5/v6 and g1v2 siblings retain their declared layouts. An
+unsupported header never authorizes consumption of its values or a later sibling.
+The [DNP Users Group AN2013-004b validation bulletin](https://www.dnp.org/Portals/0/Public%20Documents/DNP3%20AN2013-004b%20Validation%20of%20Incoming%20DNP3%20Data.pdf)
+Table 3 and the [Step Function variation reference](https://docs.stepfunc.io/dnp3/1.6.0/rust/dnp3/app/enum.Variation.html)
+supply independent layout cross-checks for this bounded repair.
+
+Table 2 requires objects for READ and SELECT/OPERATE/DIRECT_OPERATE requests;
+empty object regions for functions 1 and 3--6 are rejected by the owning semantic
+decoder. Empty responses, CONFIRM, DELAY_MEASURE and RECORD_CURRENT_TIME keep
+their supported shapes. Function 31 is named `activate_configuration` and remains
+a typed unsupported workflow, rather than being mislabeled reserved.
+
+Both DNP3 and Modbus transaction keys include capture identity in addition to
+the numeric flow. A verified complete DNP3 message requires all fragments to
+share one capture; a Modbus ADU with absent or mixed capture spans is explicitly
+unclassified. This protects callers that concatenate independently decoded
+application lists, while ordinary single-capture engine input preserves its
+existing candidate behavior. The owning regressions are in
+`tests/dnp3_semantic_guards.rs`, `tests/dnp3_workflow.rs`,
+`tests/dnp3_confirmations.rs` and `tests/correlation_capture_scope.rs`.
+These authored cases carry no execution or broader conformance claim by themselves.
 
 ## Inherited workflow baseline
 

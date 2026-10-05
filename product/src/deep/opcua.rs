@@ -187,11 +187,13 @@ impl<'a> Binary<'a> {
             return Err(bad("ua_diagnostic", self.at - 1, "reserved bit"));
         }
         let mut fields = vec![("mask", m.into())];
+        // Part 6 Table 22 encodes Locale before LocalizedText even though its
+        // presence bit (0x08) follows the LocalizedText bit (0x04).
         for (bit, name) in [
             (1, "symbolic_id"),
             (2, "namespace_uri"),
-            (4, "locale"),
-            (8, "localized_text"),
+            (8, "locale"),
+            (4, "localized_text"),
         ] {
             if m & bit != 0 {
                 fields.push((name, self.i32()?.to_string().into()));

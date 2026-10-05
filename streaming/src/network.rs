@@ -53,6 +53,7 @@ pub fn decode(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
         }
         276 => {
             need(b, 20, "sll2")?;
+            scoped.link_interface = Some(u32be(b, 4));
             Some((20, u16be(b, 0)))
         }
         _ => None,
@@ -317,6 +318,9 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
             (usize::from(b[p + 1]) + 1) * 8
         };
         need(b, p + n, "ipv6_extension")?;
+        if wire::ipv6_checksum_context(next, &b[p..p + n])? == wire::ChecksumContext::Unsupported {
+            d.checksum_context = wire::ChecksumContext::Unsupported;
+        }
         next = b[p];
         p += n;
     }

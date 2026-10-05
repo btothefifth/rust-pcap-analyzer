@@ -602,8 +602,57 @@ fn every_update_reports_relationship_and_provenance_without_dependent_attributes
             3,
             "the UPDATE intentionally has no attributes 5, 9, or 10"
         );
-        assert_eq!(route_action(&result), Some(&Json::from("announce")));
+        if *expected == PeerRelationship::Internal {
+            assert_eq!(route_action(&result), None);
+            assert_eq!(
+                get(detail, "update_disposition"),
+                &Json::from("internal_local_pref_missing")
+            );
+            assert!(array(get(detail, "missing_mandatory")).is_empty());
+        } else {
+            assert_eq!(route_action(&result), Some(&Json::from("announce")));
+        }
     }
+}
+
+#[test]
+fn missing_internal_local_pref_is_typed_incompleteness_not_mandatory_treat_as_withdraw() {
+    let mut state = semantic_state();
+    state.set_peer_relationship(PeerRelationship::Internal);
+    let incomplete = decode_with_attributes(&mandatory_attributes(), &mut state, 40);
+    let detail = get(&incomplete, "message_detail");
+    assert_eq!(
+        get(detail, "internal_local_pref_missing"),
+        &Json::Bool(true)
+    );
+    assert_eq!(
+        get(detail, "update_disposition"),
+        &Json::from("internal_local_pref_missing")
+    );
+    assert_eq!(
+        get(detail, "known_update_disposition"),
+        &Json::from("accept_evidence_only")
+    );
+    assert!(array(get(detail, "missing_mandatory")).is_empty());
+    assert!(array(get(&incomplete, "routes")).is_empty());
+    assert!(!array(get(detail, "opaque_nlri")).is_empty());
+    Observation::from_normalized(&incomplete, None, &Limits::default()).unwrap();
+    assert_eq!(state.generation(), 0);
+
+    let complete = decode(
+        &update_with_attribute(0x40, 5, &[0, 0, 0, 100]),
+        &mut state,
+        41,
+    );
+    assert_eq!(route_action(&complete), Some(&Json::from("announce")));
+    assert_eq!(
+        get(
+            get(&complete, "message_detail"),
+            "internal_local_pref_missing"
+        ),
+        &Json::Bool(false)
+    );
+    Observation::from_normalized(&complete, None, &Limits::default()).unwrap();
 }
 
 #[test]
@@ -627,8 +676,17 @@ fn valid_peer_dependent_attributes_follow_explicit_relationship() {
         ] {
             let mut state = SessionState::default();
             state.set_peer_relationship(relationship);
-            let result = decode(
-                &update_with_attribute(if *code == 5 { 0x40 } else { 0x80 }, *code, payload),
+            let mut attributes = mandatory_attributes();
+            attributes.extend(attribute(
+                if *code == 5 { 0x40 } else { 0x80 },
+                *code,
+                payload,
+            ));
+            if *code != 5 && relationship == PeerRelationship::Internal {
+                attributes.extend(attribute(0x40, 5, &[0, 0, 0, 100]));
+            }
+            let result = decode_with_attributes(
+                &attributes,
                 &mut state,
                 10 + index as u64 * 3 + relationship as u64,
             );

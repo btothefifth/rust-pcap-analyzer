@@ -230,7 +230,7 @@ pub fn header(raw: &EvidenceBytes) -> Result<Header> {
             "dnp3_authentication_workflow_opaque",
         ));
     }
-    if !matches!(h.function, 0..=0x1e | 0x81 | 0x82) {
+    if !matches!(h.function, 0..=0x1f | 0x81 | 0x82) {
         return Err(fail(
             ErrorCode::UnsupportedTransport,
             1,
@@ -460,7 +460,7 @@ pub fn verified_message_direction(
     work: &mut usize,
 ) -> Result<bool> {
     use crate::dnp3::MessageClass;
-    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     let mismatch = || fail(ErrorCode::Invariant, 0, "dnp3_pairing_witness_mismatch");
     if !message.complete || message.fragments.is_empty() {
         return Err(fail(
@@ -486,111 +486,50 @@ pub fn verified_message_direction(
     let mut objects = EvidenceBytes::default();
     let mut packets = Vec::new();
     let mut expected_app_sequence = message.first_sequence;
+    let mut fragment_indices = BTreeSet::new();
+    let mut frame_indices = BTreeSet::new();
+    let mut capture = None;
     for (ordinal, &index) in message.fragments.iter().enumerate() {
         charge(work, 1, limits.max_correlation_checks)?;
+        if !fragment_indices.insert(index) {
+            return Err(mismatch());
+        }
         let fragment = result.fragments.get(index).ok_or_else(mismatch)?;
-        let h = header(&fragment.raw)?;
-        let class = match h.function {
-            0 => MessageClass::Confirm,
-            1..=30 => MessageClass::Request,
-            0x81 => MessageClass::Response,
-            0x82 => MessageClass::Unsolicited,
-            _ => return Err(mismatch()),
-        };
+        // One canonical transport verifier owns duplicate, post-FIN, link-field,
+        // CRC and same-capture checks for both transactions and confirmations.
+        let witness = verified_fragment_witness(result, fragment, limits, work)?;
+        let h = witness.header;
+        let observed_capture = witness.packets[0].capture;
         if fragment.source != message.source
             || fragment.destination != message.destination
             || h.function != message.function
-            || class != message.class
+            || fragment.class != message.class
+            || witness.link_direction != direction
             || h.first() != (ordinal == 0)
             || h.final_fragment() != (ordinal + 1 == message.fragments.len())
             || h.sequence() != expected_app_sequence
-            || fragment.control != h.control
-            || fragment.function != h.function
-            || fragment.sequence != h.sequence()
-            || fragment.class != class
-            || fragment.first != h.first()
-            || fragment.final_fragment != h.final_fragment()
-            || fragment.confirmation_requested != h.confirm_requested()
-            || fragment.iin != (h.length == 4).then(|| uint(fragment.raw.data(), 2, 2, true) as u16)
-            || fragment.frames.is_empty()
+            || capture.is_some_and(|c| c != observed_capture)
         {
             return Err(mismatch());
         }
+        capture = Some(observed_capture);
+        for link in &witness.links {
+            charge(work, 1, limits.max_correlation_checks)?;
+            if !frame_indices.insert(link.frame) {
+                return Err(mismatch());
+            }
+        }
         expected_app_sequence = (h.sequence() + 1) & 15;
-        let object_slice = fragment.raw.slice(h.length..fragment.raw.len())?;
-        if object_slice != fragment.objects {
-            return Err(mismatch());
-        }
-        let mut transport = EvidenceBytes::default();
-        let mut previous = None;
-        let mut final_seen = false;
-        // At most 64 transport sequence slots. Overwrite only at a contiguous
-        // rollover; retained duplicates never supply the assembled byte value.
-        let mut seen: BTreeMap<u8, Vec<u8>> = BTreeMap::new();
-        for &frame_index in &fragment.frames {
-            let frame = result.frames.get(frame_index).ok_or_else(mismatch)?;
-            charge(
-                work,
-                frame.raw.len().saturating_add(frame.raw.spans().len()),
-                limits.max_correlation_checks,
-            )?;
-            let (parsed, used) = parse_link(&frame.raw, 0, frame.stream_offset)?;
-            if used != frame.raw.len()
-                || frame.control != parsed.control
-                || frame.link_control != parsed.link_control
-                || frame.source != parsed.source
-                || frame.destination != parsed.destination
-                || frame.user_data != parsed.user_data
-                || frame.broadcast != parsed.broadcast
-                || parsed.source != message.source
-                || parsed.destination != message.destination
-                || parsed.link_control.direction != direction
-                || !parsed.link_control.primary
-                || !matches!(parsed.link_control.function, 3 | 4)
-                || link_issue(
-                    parsed.control,
-                    parsed.source,
-                    parsed.destination,
-                    parsed.user_data.len(),
-                )
-                .is_some()
-            {
-                return Err(mismatch());
-            }
-            let b = parsed.user_data.data();
-            let seq = b[0] & 63; // nonempty was established by link_issue
-            let expected = previous.map(|last: u8| (last + 1) & 63);
-            if expected != Some(seq) && seen.get(&seq).is_some_and(|v| v.as_slice() == b) {
-                packets.extend(parsed.raw.packets());
-                continue;
-            }
-            if final_seen
-                || (previous.is_none() != (b[0] & 64 != 0))
-                || previous.is_some() && expected != Some(seq)
-            {
-                return Err(mismatch());
-            }
-            transport.append(
-                &parsed.user_data.slice(1..b.len())?,
-                limits.max_application_bytes,
-            )?;
-            previous = Some(seq);
-            final_seen = b[0] & 128 != 0;
-            seen.insert(seq, b.to_vec());
-            packets.extend(parsed.raw.packets());
-        }
-        if !final_seen || transport != fragment.raw {
-            return Err(mismatch());
-        }
-        charge(
-            work,
-            object_slice
-                .len()
-                .saturating_add(object_slice.spans().len()),
-            limits.max_correlation_checks,
-        )?;
-        objects.append(&object_slice, limits.max_application_bytes)?;
+        packets.extend(witness.packets);
+        objects.append(&fragment.objects, limits.max_application_bytes)?;
     }
+    charge(work, message.objects.len(), limits.max_correlation_checks)?;
+    charge(
+        work,
+        message.objects.spans().len(),
+        limits.max_correlation_checks,
+    )?;
+    charge(work, message.packets.len(), limits.max_correlation_checks)?;
     packets.sort();
     packets.dedup();
     if objects != message.objects || packets != message.packets {
@@ -666,6 +605,13 @@ pub fn verified_fragment_witness(
     let class = match h.function {
         0 => MessageClass::Confirm,
         1..=30 => MessageClass::Request,
+        31 => {
+            return Err(fail(
+                ErrorCode::UnsupportedTransport,
+                1,
+                "dnp3_workflow_outside_subset",
+            ))
+        }
         0x81 => MessageClass::Response,
         0x82 => MessageClass::Unsolicited,
         _ => return Err(mismatch()),

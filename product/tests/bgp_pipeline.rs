@@ -250,6 +250,194 @@ fn treat_as_withdraw_reaches_rib_as_withdrawal_not_rejection() {
 }
 
 #[test]
+fn recoverable_final_attribute_envelopes_withdraw_only_identified_routes() {
+    for fragment in [&[0x40][..], &[0x50, 1, 0][..], &[0xc0, 8, 4, 0][..]] {
+        let mut pipeline = pipeline();
+        establish(&mut pipeline);
+        let mut attrs = attribute(0x40, 1, &[0]);
+        attrs.extend(attribute(0x40, 2, &[2, 1, 0, 0, 0xfd, 0xe8]));
+        attrs.extend(attribute(0x40, 3, &[192, 0, 2, 9]));
+        let initial = update(&attrs, &[24, 203, 0, 113, 24, 198, 51, 100]);
+        pipeline
+            .apply_message(&evidence(&initial, 3), metadata(Some(0), 3))
+            .unwrap();
+        attrs.extend_from_slice(fragment);
+        let malformed = update(&attrs, &[24, 203, 0, 113]);
+        let receipt = pipeline
+            .apply_message(&evidence(&malformed, 4), metadata(Some(0), 4))
+            .unwrap();
+        assert!(!receipt.protocol_reset);
+        assert_eq!(pipeline.wire_state().generation(), 0);
+        let entries: Vec<_> = pipeline.rib().entries().values().collect();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.status == RouteStatus::Withdrawn)
+                .count(),
+            1
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.status == RouteStatus::Active)
+                .count(),
+            1
+        );
+        assert!(pipeline.rib().gaps().is_empty());
+        assert!(
+            pipeline
+                .apply_message(&evidence(&malformed, 4), metadata(Some(0), 4))
+                .unwrap()
+                .replayed
+        );
+    }
+}
+
+#[test]
+fn opaque_withdrawal_after_conflicting_open_breaks_rib_continuity_and_replays_inertly() {
+    let mut pipeline = pipeline();
+    establish(&mut pipeline);
+    pipeline
+        .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+        .unwrap();
+    let conflicting = opened(
+        65000,
+        &[
+            capability(65, &65000u32.to_be_bytes()),
+            capability(69, &[0, 1, 1, 2]),
+        ],
+    );
+    pipeline
+        .apply_message(&evidence(&conflicting, 4), metadata(Some(0), 4))
+        .unwrap();
+    let withdrawal = message(2, &[0, 4, 24, 203, 0, 113, 0, 0]);
+    let receipt = pipeline
+        .apply_message(&evidence(&withdrawal, 5), metadata(Some(0), 5))
+        .unwrap();
+    assert!(!receipt.protocol_reset);
+    assert_eq!(pipeline.wire_state().generation(), 0);
+    assert_eq!(pipeline.rib().gaps().len(), 1);
+    assert_eq!(pipeline.observer().view().unwrap().gaps, ["record-5"]);
+    assert!(pipeline
+        .rib()
+        .entries()
+        .values()
+        .all(|entry| entry.status == RouteStatus::Unresolved));
+    let event_count = pipeline.rib().events().len();
+    assert!(
+        pipeline
+            .apply_message(&evidence(&withdrawal, 5), metadata(Some(0), 5))
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(pipeline.rib().events().len(), event_count);
+}
+
+#[test]
+fn ordinary_layout_survives_unilateral_add_path_with_two_complete_opens() {
+    for advertising_sender in [false, true] {
+        let mut pipeline = pipeline();
+        for (frame, direction, asn) in [(1, 0, 65000), (2, 1, 65001)] {
+            let mut caps = vec![capability(65, &u32::from(asn).to_be_bytes())];
+            if (direction == 0) == advertising_sender {
+                caps.push(capability(69, &[0, 1, 1, 3]));
+            }
+            let open = opened(asn, &caps);
+            pipeline
+                .apply_message(&evidence(&open, frame), metadata(Some(direction), frame))
+                .unwrap();
+        }
+        pipeline
+            .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+            .unwrap();
+        assert_eq!(pipeline.rib().entries().len(), 1);
+        assert_eq!(
+            pipeline.rib().entries().values().next().unwrap().status,
+            RouteStatus::Active
+        );
+        let withdrawal = message(2, &[0, 4, 24, 203, 0, 113, 0, 0]);
+        pipeline
+            .apply_message(&evidence(&withdrawal, 4), metadata(Some(0), 4))
+            .unwrap();
+        assert_eq!(
+            pipeline.rib().entries().values().next().unwrap().status,
+            RouteStatus::Withdrawn
+        );
+        assert!(pipeline.rib().gaps().is_empty());
+    }
+}
+
+#[test]
+fn multiprotocol_wrong_flags_reset_even_with_identified_conventional_nlri() {
+    for (code, value) in [
+        (14, vec![0, 1, 1, 4, 192, 0, 2, 1, 0, 24, 203, 0, 113]),
+        (15, vec![0, 1, 1, 24, 203, 0, 113]),
+    ] {
+        let mut pipeline = pipeline();
+        establish(&mut pipeline);
+        pipeline
+            .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+            .unwrap();
+        let mut attrs = attribute(0x40, 1, &[0]);
+        attrs.extend(attribute(0x40, 2, &[2, 1, 0, 0, 0xfd, 0xe8]));
+        attrs.extend(attribute(0x40, 3, &[192, 0, 2, 9]));
+        attrs.extend(attribute(0x40, code, &value));
+        let malformed = update(&attrs, &[24, 198, 51, 100]);
+        assert!(
+            pipeline
+                .apply_message(&evidence(&malformed, 4), metadata(Some(0), 4))
+                .unwrap()
+                .protocol_reset
+        );
+        assert!(pipeline
+            .rib()
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Superseded));
+    }
+}
+
+#[test]
+fn unparsed_final_mp_attribute_cannot_borrow_conventional_nlri_recovery() {
+    for code in [14, 15] {
+        let mut pipeline = pipeline();
+        establish(&mut pipeline);
+        pipeline
+            .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+            .unwrap();
+        let malformed = update(&[0x80, code, 20, 0, 1, 1], &[24, 203, 0, 113]);
+        let receipt = pipeline
+            .apply_message(&evidence(&malformed, 4), metadata(Some(0), 4))
+            .unwrap();
+        assert!(receipt.protocol_reset);
+        assert!(pipeline
+            .rib()
+            .entries()
+            .values()
+            .all(|entry| entry.status == RouteStatus::Superseded));
+    }
+}
+
+#[test]
+fn opaque_mp_withdrawal_breaks_continuity_without_inventing_withdrawals() {
+    let mut pipeline = pipeline();
+    establish(&mut pipeline);
+    pipeline
+        .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+        .unwrap();
+    let unsupported = update(&attribute(0x80, 15, &[0, 1, 1, 24, 203, 0, 113]), &[]);
+    let receipt = pipeline
+        .apply_message(&evidence(&unsupported, 4), metadata(Some(0), 4))
+        .unwrap();
+    assert!(!receipt.protocol_reset);
+    assert_eq!(pipeline.rib().gaps().len(), 1);
+    assert_eq!(
+        pipeline.rib().entries().values().next().unwrap().status,
+        RouteStatus::Unresolved
+    );
+}
+
+#[test]
 fn unresolved_attribute_layout_is_rejected_not_promoted_to_active_state() {
     fn hex(value: &str) -> Vec<u8> {
         value

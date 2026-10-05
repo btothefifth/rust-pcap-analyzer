@@ -324,6 +324,7 @@ impl Session {
     pub fn gap(&mut self) {
         self.next = [None, None];
         self.ack = [None, None];
+        self.start_requested = [false, false];
         self.active = None;
         self.tainted = true;
     }

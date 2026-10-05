@@ -1,6 +1,6 @@
 //! Bounded IP fragment reconstruction. Missing bytes are never synthesized.
 use crate::provenance::{EvidenceBytes, PacketId};
-use crate::wire::{Checksum, Datagram, Scope};
+use crate::wire::{Checksum, ChecksumContext, Datagram, Scope};
 use crate::{Error, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -157,6 +157,7 @@ impl FragmentReassembler {
                 fragment: datagram.fragment.clone(),
                 payload: EvidenceBytes::default(),
                 ip_checksum: datagram.ip_checksum,
+                checksum_context: datagram.checksum_context,
             };
             if let Some(deadline) = frame
                 .checked_add(self.limits.fragment_frame_lifetime)
@@ -193,6 +194,9 @@ impl FragmentReassembler {
             }
             if datagram.ip_checksum == Checksum::Invalid {
                 set.template.ip_checksum = Checksum::Invalid;
+            }
+            if datagram.checksum_context == ChecksumContext::Unsupported {
+                set.template.checksum_context = ChecksumContext::Unsupported;
             }
             if info.offset == 0 {
                 // RFC 8200 4.5: IPv6 nonzero fragments may advertise different

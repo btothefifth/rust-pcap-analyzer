@@ -14,7 +14,7 @@ from tools.evidence.containers import Reader as CaptureReader
 
 MAGIC = b"PCHIST01"
 DOMAIN = b"pcap-evidence/history-record/v1\0"
-ENGINE = b"pcap-evidence-history/1;state-policy/1"
+ENGINE = b"pcap-evidence-history/2;state-policy/1"
 MAX_RECORD = 16 * 1024 * 1024
 
 class InvalidHistory(ValueError): pass
@@ -68,7 +68,8 @@ def header(file):
     body=exact(file,n);digest=exact(file,32)
     if hashlib.sha256(prefix+body).digest()!=digest:raise InvalidHistory("header hash mismatch")
     d=Cursor(body);source={"sha256":d.take(32).hex(),"bytes":d.integer("Q")};config=Cursor(d.blob(2048));d.end()
-    if config.blob(128)!=ENGINE:raise InvalidHistory("unknown engine/policy version")
+    if config.blob(128)!=ENGINE:
+        raise InvalidHistory("unknown engine/policy version; rebuild a new workspace from the immutable original capture")
     limits=config.unpack("Q"*15);policy=config.integer("B");config.end()
     v=limits
     if (policy not in (0,1) or not 0<v[0]<=((1<<64)-1)//8 or v[1]<1024
@@ -94,7 +95,9 @@ def records(file,h):
         yield kind,seq,payload[9:],offset,digest
 
 def decode_key(raw):
-    d=Cursor(raw);section,interface=d.unpack("II");n=d.integer("B")
+    d=Cursor(raw);section,interface=d.unpack("II")
+    link_interface=d.integer("I") if d.boolean() else None
+    n=d.integer("B")
     if n>8:raise InvalidHistory("VLAN budget")
     vlans=d.unpack("H"*n)
     if any(x>4095 for x in vlans):raise InvalidHistory("VLAN ID")
@@ -109,7 +112,8 @@ def decode_key(raw):
     d.end()
     if endpoints[0]>endpoints[1] or any(any(ord(c)<32 or 127<=ord(c)<=159 for c in p) for p in tunnels):
         raise InvalidHistory("noncanonical tuple")
-    return dict(section=section,interface=interface,vlans=vlans,tunnels=tunnels,endpoints=endpoints)
+    return dict(section=section,interface=interface,link_interface=link_interface,
+                vlans=vlans,tunnels=tunnels,endpoints=endpoints)
 
 def decode_tcp(body,h):
     outer=Cursor(body);d=Cursor(outer.blob(h["limits"][3]));decision=Cursor(outer.blob(h["limits"][3]));outer.end()
@@ -133,7 +137,7 @@ def decode_tcp(body,h):
     n=decision.integer("I")
     if n>32:raise InvalidHistory("reason budget")
     reasons=[decision.blob(256).decode("utf-8") for _ in range(n)];decision.end()
-    return dict(raw=raw,payload=raw[(raw[12]>>4)*4:],witnesses=witnesses,placements=placements,
+    return dict(key=key,raw=raw,payload=raw[(raw[12]>>4)*4:],witnesses=witnesses,placements=placements,
                 before=before,after=after,policy_assumption=assumption,reasons=reasons)
 
 def packet_row(raw):

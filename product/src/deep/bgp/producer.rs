@@ -456,6 +456,12 @@ pub(super) fn layout_evidence(state: &SessionState, scoped: bool) -> (LayoutCont
         context.extended_message_senders.insert(1);
     }
     context.enhanced_refresh = a.enhanced_refresh && b.enhanced_refresh;
+    if b.enhanced_refresh {
+        context.enhanced_refresh_senders.insert(0);
+    }
+    if a.enhanced_refresh {
+        context.enhanced_refresh_senders.insert(1);
+    }
     let advertised: BTreeSet<_> = a
         .add_path
         .keys()
@@ -474,10 +480,9 @@ pub(super) fn layout_evidence(state: &SessionState, scoped: bool) -> (LayoutCont
                     context.add_path.insert((1, afi, safi));
                 }
             }
-            _ => {
-                context.unresolved_add_path.insert((0, afi, safi));
-                context.unresolved_add_path.insert((1, afi, safi));
-            }
+            // With two complete valid OPENs, absence is definite: the
+            // sender/receiver pair cannot support ADD-PATH for this family.
+            _ => {}
         }
     }
     let basis = if context.asn_width == 4 {
@@ -540,6 +545,15 @@ fn session_json(state: &SessionState, scoped: bool) -> Json {
                     ),
                 ),
                 ("enhanced_refresh", context.enhanced_refresh.into()),
+                (
+                    "enhanced_refresh_senders",
+                    Json::array(
+                        context
+                            .enhanced_refresh_senders
+                            .iter()
+                            .map(|direction| (*direction).into()),
+                    ),
+                ),
                 ("basis", basis.into()),
             ]),
         ),
@@ -745,6 +759,17 @@ pub(super) fn decode(
                 ("update_disposition", parsed.disposition.into()),
                 ("known_update_disposition", parsed.known_disposition.into()),
                 (
+                    "internal_local_pref_missing",
+                    parsed.internal_local_pref_missing.into(),
+                ),
+                (
+                    "malformed_attribute_envelope",
+                    parsed
+                        .malformed_attribute_envelope
+                        .clone()
+                        .unwrap_or(Json::Null),
+                ),
+                (
                     "peer_relationship",
                     parsed.peer_relationship.as_str().into(),
                 ),
@@ -811,7 +836,12 @@ pub(super) fn decode(
                     field("safi", 22, 23),
                 ]),
             );
-            let enhanced_layout = layout_evidence(&next, scoped).0.enhanced_refresh;
+            let enhanced_layout = metadata.direction.is_some_and(|sender| {
+                layout_evidence(&next, scoped)
+                    .0
+                    .enhanced_refresh_senders
+                    .contains(&sender)
+            });
             set(
                 &mut detail,
                 "enhanced_layout_context",

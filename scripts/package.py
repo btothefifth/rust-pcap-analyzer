@@ -34,7 +34,7 @@ CORE_SCRIPTS = {'__init__.py', 'package.py', 'validate.py', 'static_check.py',
                 'make_fixtures.py', 'reference_verify.py', 'test_oracle.py',
                 'check_cli.py', 'check_hardening_cli.py', 'build_hardening_corpus.py',
                 'mutation_check.py', 'validation_frontier.py', 'update_test_manifest.py', 'benchmark_cli.py',
-                'differential_tshark.py'}
+                'differential_tshark.py', 'owned_process.py', 'semantic_case_runner.py'}
 # Newly authored files must be explicit until the integrator indexes them.
 NEW_SOURCES = ('scripts/validation_frontier.py', 'scripts/test_validation_frontier.py',
                'scripts/test_package_contract.py', 'scripts/requirements-qualification.txt')

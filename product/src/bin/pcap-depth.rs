@@ -926,7 +926,25 @@ fn bgp(v: &[String]) -> Result<()> {
     }
 }
 fn main() {
-    let v: Vec<String> = std::env::args().skip(1).collect();
+    let v: Vec<String> = match std::env::args_os()
+        .skip(1)
+        .map(|value| value.into_string())
+        .collect()
+    {
+        Ok(values) => values,
+        Err(_) => {
+            eprintln!(
+                "{}",
+                Json::object([
+                    ("error", "usage".into()),
+                    ("field", "arguments".into()),
+                    ("detail", "command arguments must be valid UTF-8".into()),
+                ])
+                .encode()
+            );
+            std::process::exit(2);
+        }
+    };
     if v.is_empty() || v == ["--help"] {
         println!("{}", usage().detail);
         return;

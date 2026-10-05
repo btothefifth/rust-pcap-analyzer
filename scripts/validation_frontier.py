@@ -36,6 +36,7 @@ def portable_commands(python):
         ('opcua-transforms', [python, '-m', 'unittest', 'tools.depth.test_opcua_crypto', '-v']),
         ('validation-frontier', [python, 'scripts/test_validation_frontier.py', '-v']),
         ('package-contract', [python, 'scripts/test_package_contract.py', '-v']),
+        ('owned-process', [python, 'scripts/test_owned_process.py', '-v']),
     )
 
 
@@ -64,6 +65,13 @@ def native_artifact(root, manifest, filename, profile='release'):
     if not directory.is_absolute():
         directory = Path(root) / directory
     return directory / profile / filename
+
+
+def semantic_case_command(root, python, output, profile='release'):
+    probe = 'semantic_probe.exe' if os.name == 'nt' else 'semantic_probe'
+    artifact = native_artifact(root, 'Cargo.toml', 'examples/' + probe, profile=profile)
+    return [python, 'scripts/semantic_case_runner.py', '--probe', str(artifact),
+            '--output', str(Path(output) / 'native-semantic-cases.json')]
 
 
 def source_snapshot(root):

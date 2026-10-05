@@ -52,8 +52,13 @@ successful parse authenticates the source.
   unknown, so this envelope cannot establish session or Adj-RIB-In state.
   Unsupported, malformed-value, or MRT-special attributes return
   `None` for semantic conversion while the versioned MRT record keeps the
-  original bytes. In particular, RIB AS_PATH uses four-byte ASN elements and
-  abbreviated RIB MP_REACH_NLRI cannot be decoded as an UPDATE attribute.
+  original bytes. RIB AS_PATH uses four-byte ASN elements. A complete outer
+  AS_PATH attribute with a short segment header, zero segment
+  count, or missing/partial ASN value remains unconverted raw evidence. The
+  streaming visitor emits `unsupported_rib_entry` for that exact occurrence
+  and continues to later valid entries. Invalid outer attribute lengths and
+  incomplete MRT records still fail framing validation.
+  Abbreviated RIB MP_REACH_NLRI cannot be decoded as an UPDATE attribute.
 - BGP4MP replay reuses the shared source-neutral OPEN and UPDATE decoder.
   Imported occurrences retain exact raw values, message-relative coordinates,
   and the embedded-message digest through the explicit imported occurrence

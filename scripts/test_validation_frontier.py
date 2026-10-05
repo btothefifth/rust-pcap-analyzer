@@ -122,7 +122,7 @@ class ValidationFrontier(unittest.TestCase):
             self.assertEqual(after_snapshot, frontier.source_snapshot(root))
 
     def test_red_portable_preflight_suppresses_native_in_both_drivers(self):
-        import subprocess
+        from owned_process import Result
         import tempfile
         import contextlib
         import io
@@ -133,11 +133,11 @@ class ValidationFrontier(unittest.TestCase):
             observed = []
             def execute(command, **kwargs):
                 observed.append(command)
-                return subprocess.CompletedProcess(command,1 if 'scripts/test_package_contract.py' in command else 0)
+                return Result(1 if 'scripts/test_package_contract.py' in command else 0,None,b'',b'',0,0)
             with tempfile.TemporaryDirectory(prefix='pcap-red-preflight-') as temporary:
                 output = Path(temporary)/'receipt'
                 terminal = io.StringIO()
-                with contextlib.redirect_stdout(terminal), mock.patch.object(driver.platform,'platform',return_value='test-platform'), mock.patch.object(driver.subprocess,'run',execute), mock.patch.object(driver.shutil,'which',side_effect=lambda name:'/unexecuted/'+name):
+                with contextlib.redirect_stdout(terminal), mock.patch.object(driver.platform,'platform',return_value='test-platform'), mock.patch.object(driver,'run_owned',execute), mock.patch.object(driver.shutil,'which',side_effect=lambda name:'/unexecuted/'+name):
                     result = driver.main(['--output',str(output)]) if driver is validate_product else driver.run(output)
                 self.assertEqual(result,1)
                 self.assertTrue(any('scripts/test_package_contract.py' in command for command in observed))
@@ -147,6 +147,59 @@ class ValidationFrontier(unittest.TestCase):
                     failures = __import__('json').loads(terminal.getvalue())['failed_gates']
                     gate = next(row for row in failures if row['name']=='package-contract')
                     self.assertEqual((gate['status'],gate['returncode'],gate['log']),('FAIL',1,'package-contract.log'))
+
+    def test_native_semantic_gate_uses_actual_root_all_target_artifact(self):
+        import os
+        import tempfile
+        from unittest import mock
+        from owned_process import Result
+        import contextlib
+        import io
+        import validate_product
+        import validate_followup
+        with tempfile.TemporaryDirectory(prefix='pcap-native-semantic-gate-') as temporary:
+            shared=Path(temporary)/'target'
+            for index,driver in enumerate((validate_product,validate_followup)):
+                commands=[]
+                def execute(argv,**kwargs):
+                    commands.append(argv)
+                    return Result(0,None,b'',b'',0,0)
+                output=Path(temporary)/str(index)
+                with mock.patch.dict(os.environ,{'CARGO_TARGET_DIR':str(shared)}), mock.patch.object(driver,'run_owned',execute), mock.patch.object(driver.shutil,'which',side_effect=lambda name:'/unused/'+name), contextlib.redirect_stdout(io.StringIO()):
+                    result=driver.main(['--output',str(output)]) if driver is validate_product else driver.run(output)
+                # Fake live-denial exit 0 must remain adverse (expected 3).
+                self.assertEqual(result,1 if sys.platform.startswith('linux') else 0)
+                cases=next(argv for argv in commands if 'scripts/semantic_case_runner.py' in argv)
+                suffix='.exe' if os.name=='nt' else ''
+                self.assertEqual(cases[cases.index('--probe')+1],str(shared/'release/examples'/('semantic_probe'+suffix)))
+                root_build=next(argv for argv in commands if argv[1:4]==['build','--manifest-path','Cargo.toml'])
+                self.assertIn('--all-targets',root_build)
+                self.assertLess(commands.index(root_build),commands.index(cases))
+
+    def test_interrupted_driver_persists_adverse_attempt_and_logs(self):
+        import tempfile
+        import contextlib
+        import io
+        import json
+        from unittest import mock
+        import validate_product
+        import validate_followup
+        for driver,receipt_name,key in ((validate_product,'summary.json','results'),(validate_followup,'receipt.json','gates')):
+            with tempfile.TemporaryDirectory(prefix='pcap-interrupted-validator-') as temporary:
+                output=Path(temporary)/'receipt'
+                def interrupted(argv,**kwargs):
+                    kwargs['stdout'].write(b'attempt began\n')
+                    raise KeyboardInterrupt()
+                with mock.patch.object(driver,'run_owned',interrupted),contextlib.redirect_stdout(io.StringIO()):
+                    result=driver.main(['--output',str(output)]) if driver is validate_product else driver.run(output)
+                self.assertEqual(result,1)
+                report=json.loads((output/receipt_name).read_text())
+                self.assertEqual(report['status'],'FAIL')
+                attempts=[row for row in report[key] if row['status']=='FAIL']
+                self.assertEqual(len(attempts),1)
+                attempt=attempts[0]
+                log=attempt.get('log',attempt.get('stdout'))
+                self.assertEqual((output/log).read_bytes(),b'attempt began\n')
 
     def test_terminal_failure_tails_are_bounded_and_exclude_passing_logs(self):
         import tempfile

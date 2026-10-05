@@ -128,6 +128,10 @@ impl Key {
             ("section", self.scope.section.into()),
             ("interface", self.scope.interface.into()),
             (
+                "link_interface",
+                self.scope.link_interface.map_or(Json::Null, Json::from),
+            ),
+            (
                 "vlans",
                 Json::array(self.scope.vlans.iter().copied().map(Json::from)),
             ),
@@ -481,6 +485,7 @@ impl State<'_> {
         let scope = Scope {
             section: meta.section,
             interface: meta.interface,
+            link_interface: None,
             vlans: vec![],
         };
         let decoded = match network::decode(meta.link_type, &raw, scope) {
@@ -581,6 +586,11 @@ impl State<'_> {
                     "invalid_outer_udp_checksum_observed",
                     contributors.clone(),
                     EvidenceStatus::Incomplete,
+                )?,
+                Ok(Transport::Udp(u)) if u.checksum == Checksum::NotChecked => self.diagnostic(
+                    "unsupported_outer_udp_checksum_operands",
+                    contributors.clone(),
+                    EvidenceStatus::Unsupported,
                 )?,
                 Err(e) => {
                     self.diagnostic(e.to_string(), contributors, EvidenceStatus::Rejected)?;
@@ -701,6 +711,12 @@ impl State<'_> {
                 "invalid_transport_checksum_observed",
                 packets.clone(),
                 EvidenceStatus::Incomplete,
+            )?;
+        } else if checksum == Checksum::NotChecked {
+            self.diagnostic(
+                "unsupported_transport_checksum_operands",
+                packets.clone(),
+                EvidenceStatus::Unsupported,
             )?;
         }
         if bytes > self.c.window_payload || packets.len() > self.c.window_packets {

@@ -164,6 +164,10 @@ fn text(path: &Path) -> &str {
 // Independent source bytes: a valid IPv4 UPDATE carries LOCAL_PREF 200.
 // Neither ASN equality nor a producer projection supplies relationship truth.
 fn relationship_source(format: &str) -> Vec<u8> {
+    relationship_source_with_rejections(format, 0)
+}
+
+fn relationship_source_with_rejections(format: &str, rejection_count: usize) -> Vec<u8> {
     fn bgp(kind: u8, body: &[u8]) -> Vec<u8> {
         let mut v = vec![255; 16];
         v.extend_from_slice(&((19 + body.len()) as u16).to_be_bytes());
@@ -188,9 +192,20 @@ fn relationship_source(format: &str) -> Vec<u8> {
     attrs.extend_from_slice(&200u32.to_be_bytes());
     let mut body = vec![0, 0];
     body.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
-    body.extend(attrs);
+    body.extend_from_slice(&attrs);
     body.extend_from_slice(&[24, 198, 51, 100]);
     let update = bgp(2, &body);
+    let mut updates = vec![update];
+    // A Partial Large Communities value has valid framing but incomplete
+    // announcement identity. Every appended message is a distinct occurrence.
+    attrs.extend_from_slice(&[0xe0, 32, 12, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3]);
+    let mut incomplete = vec![0, 0];
+    incomplete.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+    incomplete.extend(attrs);
+    incomplete.extend_from_slice(&[24, 198, 51, 100]);
+    for _ in 0..rejection_count {
+        updates.push(bgp(2, &incomplete));
+    }
     if format == "mrt" {
         let record = |subtype: u16, payload: &[u8]| {
             let mut body = vec![0xfd, 0xe9, 0xfd, 0xe8, 0, 7, 0, 1];
@@ -203,15 +218,15 @@ fn relationship_source(format: &str) -> Vec<u8> {
             v.extend(body);
             v
         };
-        [
+        let mut records = vec![
             record(0, &[0, 3, 0, 4]),
             record(1, &open(65001, 1)),
             record(6, &open(65000, 254)),
             record(0, &[0, 4, 0, 5]),
             record(0, &[0, 5, 0, 6]),
-            record(1, &update),
-        ]
-        .concat()
+        ];
+        records.extend(updates.iter().map(|update| record(1, update)));
+        records.concat()
     } else {
         let mut peer = vec![0, 0];
         peer.extend_from_slice(&[0; 20]);
@@ -232,8 +247,228 @@ fn relationship_source(format: &str) -> Vec<u8> {
         up.extend_from_slice(&[192, 0, 2, 254, 0, 179, 0x9c, 0x40]);
         up.extend(open(65000, 254));
         up.extend(open(65001, 1));
-        peer.extend(update);
-        [record(3, &up), record(0, &peer)].concat()
+        let mut records = vec![record(3, &up)];
+        for update in updates {
+            let mut monitoring = peer.clone();
+            monitoring.extend(update);
+            records.push(record(0, &monitoring));
+        }
+        records.concat()
+    }
+}
+
+#[test]
+fn imported_rejections_reach_rich_query_and_policy_without_replacing_active_routes() {
+    use pcap_evidence_product::deep::{bgp_bmp_store, bgp_mrt_store, bgp_rib::RouteStatus};
+    for format in ["mrt", "bmp"] {
+        let scratch = Scratch::new();
+        let raw = relationship_source_with_rejections(format, 2);
+        let input = scratch.path(&format!("input.{format}"));
+        fs::write(&input, &raw).unwrap();
+        let workspace = scratch.path("import");
+        let import_command = format!("import-{format}");
+        let imported = cli(&[
+            "bgp",
+            &import_command,
+            text(&input),
+            "--workspace",
+            text(&workspace),
+            "--source-id",
+            "rejection-source",
+            "--checkpoint",
+            "rejection-checkpoint",
+            "--peer-relationship",
+            "internal",
+        ]);
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        let path = workspace.join(format!("bgp.{format}"));
+        let options = MrtReplayOptions {
+            peer_relationship: Some(pcap_evidence_product::deep::bgp::PeerRelationship::Internal),
+        };
+        let (entries, rejected, observations) = if format == "mrt" {
+            let replay = bgp_mrt_store::replay_with_options(
+                &path,
+                1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options.clone(),
+            )
+            .unwrap();
+            (
+                replay
+                    .bgp4mp_rib
+                    .entries()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                replay.bgp4mp_rib.rejections().to_vec(),
+                replay.state.observations().to_vec(),
+            )
+        } else {
+            let replay = bgp_bmp_store::replay_with_options(
+                &path,
+                1024 * 1024,
+                Default::default(),
+                Limits::default(),
+                bgp_bmp_store::BmpReplayOptions {
+                    peer_relationship: options.peer_relationship,
+                },
+            )
+            .unwrap();
+            (
+                replay
+                    .bmp_rib
+                    .entries()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                replay.bmp_rib.rejections().to_vec(),
+                replay.state.observations().to_vec(),
+            )
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, RouteStatus::Active);
+        assert_eq!(rejected.len(), 2);
+        assert!(rejected
+            .iter()
+            .all(|r| r.reason == "ambiguous_attribute_context"));
+        assert_eq!(rejected[0].key, entries[0].key);
+        assert_eq!(rejected[1].key, entries[0].key);
+        assert_ne!(rejected[0].record_id, rejected[1].record_id);
+        let store = VerifiedStore::load(
+            &path,
+            1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        let query = Query {
+            status: Some("rejected".into()),
+            source: Some("rejection-source".into()),
+            checkpoint: Some("rejection-checkpoint".into()),
+            prefix: Some("198.51.100.0/24".into()),
+            ..Query::default()
+        };
+        let result = store.query(&query, &Limits::default()).unwrap();
+        assert_eq!(
+            result.matches("\"native_current\":false").count(),
+            2,
+            "{result}"
+        );
+        assert_eq!(
+            result.matches("\"status\":\"rejected\"").count(),
+            2,
+            "{result}"
+        );
+        assert_eq!(result.matches("\"alternatives\":[]").count(), 2, "{result}");
+        for rejection in &rejected {
+            let observation = observations
+                .iter()
+                .find(|o| o.source().record_id == rejection.record_id)
+                .unwrap();
+            assert!(observation
+                .routes()
+                .iter()
+                .any(|r| r.ambiguous_attributes()));
+            assert!(result.contains(&format!("\"record_id\":\"{}\"", rejection.record_id)));
+            let digest = sha256::hex(&observation.sha256());
+            assert!(result.contains(&format!("\"observation_sha256\":\"{digest}\"")));
+            assert!(result.contains(&format!("\"occurrence_id\":\"observation:{digest}\"")));
+        }
+        let exact = Limits {
+            output_bytes: result.len(),
+            ..Limits::default()
+        };
+        assert_eq!(store.query(&query, &exact).unwrap(), result);
+        assert!(store
+            .query(
+                &query,
+                &Limits {
+                    output_bytes: result.len() - 1,
+                    ..Limits::default()
+                }
+            )
+            .is_err());
+        assert!(store
+            .query(
+                &Query::default(),
+                &Limits {
+                    elements: 2,
+                    ..Limits::default()
+                }
+            )
+            .is_err());
+        let absent = Query {
+            source: Some("other-source".into()),
+            ..query.clone()
+        };
+        assert!(store
+            .query(&absent, &Limits::default())
+            .unwrap()
+            .contains("\"routes\":[]"));
+        let active = store
+            .query(
+                &Query {
+                    status: Some("active".into()),
+                    ..Query::default()
+                },
+                &Limits::default(),
+            )
+            .unwrap();
+        assert_eq!(active.matches("\"native_current\":true").count(), 1);
+        assert!(active.contains("\"rejection\":null"));
+        let profile = PolicyProfile::parse(
+            profile("skip", "skip", false).as_bytes(),
+            &Limits::default(),
+        )
+        .unwrap();
+        let policy = store
+            .policy(&Query::default(), &profile, &Limits::default())
+            .unwrap();
+        assert!(policy.contains("\"selected\":\"rib:0\""), "{policy}");
+        assert_eq!(
+            policy
+                .matches("\"reason\":\"ambiguous_attribute_context\"")
+                .count(),
+            2
+        );
+        for index in 0..2 {
+            assert!(
+                policy.contains(&format!(
+                    "\"id\":\"rejected:{index}\",\"status\":\"rejected\""
+                )),
+                "{policy}"
+            );
+        }
+        let output = scratch.path("query.json");
+        let queried = cli(&[
+            "bgp",
+            "query",
+            text(&path),
+            "--status",
+            "rejected",
+            "--source",
+            "rejection-source",
+            "--checkpoint",
+            "rejection-checkpoint",
+            "--prefix",
+            "198.51.100.0/24",
+            "--peer-relationship",
+            "internal",
+            "--output",
+            text(&output),
+        ]);
+        assert!(
+            queried.status.success(),
+            "{}",
+            String::from_utf8_lossy(&queried.stderr)
+        );
+        assert_eq!(fs::read_to_string(output).unwrap().trim_end(), result);
     }
 }
 

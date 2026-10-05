@@ -6,6 +6,7 @@ use super::{
     reassembly::{Outcome, Segment, Segments},
 };
 use pcap_evidence::{json::Json, provenance::EvidenceBytes, Error, Result};
+use std::collections::BTreeMap;
 
 pub struct Cotp {
     pub kind: u8,
@@ -126,13 +127,13 @@ pub fn tpkt(bytes: &EvidenceBytes, l: &Limits) -> Result<Report> {
 /// transport generation/direction. A complete TSDU is not a complete association.
 pub struct CotpSession {
     parts: Segments,
-    ordinal: u64,
+    ordinals: BTreeMap<String, u64>,
 }
 impl CotpSession {
     pub fn new(l: Limits) -> Result<Self> {
         Ok(Self {
             parts: Segments::new(l)?,
-            ordinal: 0,
+            ordinals: BTreeMap::new(),
         })
     }
     pub fn push(&mut self, scope: &str, bytes: &EvidenceBytes, frame: u64) -> Result<Outcome> {
@@ -140,29 +141,33 @@ impl CotpSession {
         if c.kind != 0xf0 {
             return Err(bad("cotp_session", 0, "not ordinary DT"));
         }
+        let ordinal = self.ordinals.get(scope).copied().unwrap_or(0);
+        let next = ordinal
+            .checked_add(1)
+            .ok_or_else(|| Error::limit("cotp_ordinal"))?;
         let out = self.parts.push(
             scope,
             Segment {
-                ordinal: self.ordinal,
-                first: self.ordinal == 0,
+                ordinal,
+                first: ordinal == 0,
                 final_segment: c.eot,
                 bytes: bytes.slice(c.payload)?,
                 frame,
             },
         )?;
-        self.ordinal = self
-            .ordinal
-            .checked_add(1)
-            .ok_or_else(|| Error::limit("cotp_ordinal"))?;
         if out.completed.is_some() {
             self.parts.cut(scope, "tsdu_complete");
-            self.ordinal = 0;
+            self.ordinals.remove(scope);
+        } else {
+            // Segments admitted this scope under its active/byte limits. Keep
+            // the matching counter only after that admission succeeds.
+            self.ordinals.insert(scope.into(), next);
         }
         Ok(out)
     }
     pub fn gap(&mut self, scope: &str) {
         self.parts.cut(scope, "transport_gap");
-        self.ordinal = 0;
+        self.ordinals.remove(scope);
     }
 }
 pub fn session_presentation(bytes: &EvidenceBytes, l: &Limits) -> Result<Report> {
