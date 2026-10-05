@@ -649,6 +649,23 @@ impl State<'_> {
         }
         match network::transport_metadata(&datagram) {
             Ok(Some((protocol, data))) => {
+                let unchecked = datagram.protocol == 58
+                    && datagram.checksum_context == wire::ChecksumContext::Unsupported;
+                if unchecked {
+                    let strict = self.c.base.checksum_policy == ChecksumPolicy::RequireValid;
+                    self.diagnostic(
+                        "unsupported_transport_checksum_operands",
+                        contributors.clone(),
+                        if strict {
+                            EvidenceStatus::Rejected
+                        } else {
+                            EvidenceStatus::Unsupported
+                        },
+                    )?;
+                    if strict {
+                        return Ok(());
+                    }
+                }
                 let invalid = match &data {
                     Json::Object(fields) => fields.iter().any(|(key, value)| {
                         ["checksum_valid", "crc32c_valid"].contains(key)
@@ -656,14 +673,15 @@ impl State<'_> {
                     }),
                     _ => false,
                 };
-                let status =
-                    if invalid && self.c.base.checksum_policy == ChecksumPolicy::RequireValid {
-                        EvidenceStatus::Rejected
-                    } else if invalid {
-                        EvidenceStatus::Incomplete
-                    } else {
-                        EvidenceStatus::Observed
-                    };
+                let status = if unchecked {
+                    EvidenceStatus::Unsupported
+                } else if invalid && self.c.base.checksum_policy == ChecksumPolicy::RequireValid {
+                    EvidenceStatus::Rejected
+                } else if invalid {
+                    EvidenceStatus::Incomplete
+                } else {
+                    EvidenceStatus::Observed
+                };
                 let mut e = Event::new(
                     EventKind::Network,
                     status,

@@ -379,8 +379,17 @@ def _native_observation(row):
         routes = observation.get("routes")
         if type(routes) is list and all(type(route) is dict for route in routes):
             identities = [route.get("semantic_identity") for route in routes]
-            complete = all(type(identity) is dict and identity.get("schema") == NATIVE_PROFILE
-                           and identity.get("completeness") == "complete" for identity in identities)
+            detail = observation.get("message_detail")
+            detail = detail if type(detail) is dict else {}
+            # An explicit false also covers a family-header-only EOR with
+            # opaque family metadata but no undecoded route payload. Older
+            # carriers without the flag must preserve opaque NLRI uncertainty.
+            projection_incomplete = (detail["route_projection_incomplete"] is not False
+                                     if "route_projection_incomplete" in detail
+                                     else bool(detail.get("opaque_nlri")))
+            complete = not projection_incomplete and all(
+                type(identity) is dict and identity.get("schema") == NATIVE_PROFILE
+                and identity.get("completeness") == "complete" for identity in identities)
             semantic_status = "observed" if complete else "incomplete"
             fields["nlri"] = {"routes": _field(
                 [{key: route.get(key) for key in ("action", "prefix")} for route in routes], semantic_status),

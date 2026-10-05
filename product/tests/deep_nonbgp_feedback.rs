@@ -18,6 +18,44 @@ fn evidence(bytes: &[u8], frame: u64) -> EvidenceBytes {
 }
 
 #[test]
+fn iec104_failed_report_preserves_session_state_in_both_directions() {
+    let limits = Limits::default();
+    let mut short = limits.clone();
+    short.fields = 1;
+    for direction in 0..=1 {
+        let request = evidence(&[0x68, 4, 7, 0, 0, 0], 1);
+        let confirmation = evidence(&[0x68, 4, 11, 0, 0, 0], 2);
+        let mut session = iec104::Session::default();
+        let before = session.json();
+        assert!(session.observe(direction, &request, &short).is_err());
+        assert_eq!(session.json(), before);
+        let report = session
+            .observe(1 - direction, &confirmation, &limits)
+            .unwrap();
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.code == "start_confirmation_without_request"));
+
+        session.observe(direction, &request, &limits).unwrap();
+        let report = session
+            .observe(1 - direction, &confirmation, &limits)
+            .unwrap();
+        assert!(!report
+            .notes
+            .iter()
+            .any(|n| n.code == "start_confirmation_without_request"));
+        assert_eq!(session.active, Some(true));
+        let before = session.json();
+        let stop = evidence(&[0x68, 4, 19, 0, 0, 0], 3);
+        assert!(session.observe(direction, &stop, &short).is_err());
+        assert_eq!(session.json(), before);
+        session.observe(direction, &stop, &limits).unwrap();
+        assert_eq!(session.active, Some(false));
+    }
+}
+
+#[test]
 fn iec104_gap_invalidates_pending_start_requests_in_both_directions() {
     let limits = Limits::default();
     for direction in 0..=1 {

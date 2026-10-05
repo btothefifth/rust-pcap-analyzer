@@ -17,7 +17,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 sys.path.insert(0,str(ROOT))
-import owned_process
+from scripts import owned_process
 import fuzz_campaign
 from tools.evidence import process as evidence_process
 from tools.research import adapters
@@ -29,13 +29,37 @@ def gone(pid):
     stat=Path('/proc')/str(pid)/'stat'
     if stat.is_file():
         try:return stat.read_text().rsplit(')',1)[1].split()[0]=='Z'
-        except FileNotFoundError:return True
+        except (FileNotFoundError, ProcessLookupError):return True
     try:os.kill(pid,0)
     except ProcessLookupError:return True
     return False
 
 
 class OwnedProcess(unittest.TestCase):
+    def setUp(self):
+        # Each lifecycle fixture owns its own outer runner. Nested runner calls
+        # still inherit the marker created by that runner's real exec boundary.
+        environment = dict(os.environ)
+        environment.pop(owned_process._GROUP_ENV, None)
+        owner = mock.patch.dict(os.environ, environment, clear=True)
+        owner.start()
+        self.addCleanup(owner.stop)
+
+    @unittest.skipUnless(os.name == 'posix', 'outer runner ownership is POSIX')
+    def test_lifecycle_fixtures_pass_inside_the_real_outer_runner(self):
+        cases = (
+            'test_timeout_kills_descendant_after_leader_exit_and_drains',
+            'test_outer_validator_timeout_owns_nested_runner_child',
+            'test_clean_leader_cannot_leave_child_without_inherited_pipes',
+            'test_adapter_keyboard_interrupt_reaps_child_and_descendant',
+        )
+        command = [sys.executable, '-m', 'unittest',
+                   *('scripts.test_owned_process.OwnedProcess.' + case for case in cases)]
+        result = owned_process.run(command, cwd=ROOT, timeout=20, max_output_bytes=32768)
+        self.assertIsNone(result.reason)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        self.assertIn(b'Ran 4 tests', result.stderr)
+
     def test_exact_terminal_output_cap_and_fast_exit(self):
         with tempfile.TemporaryDirectory(prefix='pcap-terminal-cap-') as temporary:
             for count in (1,2,4096):
@@ -102,12 +126,17 @@ class OwnedProcess(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='pcap-interrupted-adapter-') as temporary:
             marker=Path(temporary)/'child.pid';parents=[]
             real_popen=owned_process.subprocess.Popen;real_sleep=time.sleep
+            interrupted = False
             def create(*args,**kwargs):
                 proc=real_popen(*args,**kwargs);parents.append(proc);return proc
             def interrupt(_):
+                nonlocal interrupted
+                if interrupted:
+                    return real_sleep(_)
                 deadline=time.monotonic()+3
                 while not marker.is_file() and time.monotonic()<deadline:real_sleep(.005)
                 self.assertTrue(marker.is_file(),'child must reach the owning boundary')
+                interrupted = True
                 raise KeyboardInterrupt()
             code='import subprocess,sys,pathlib,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"]);pathlib.Path(sys.argv[1]).write_text(str(p.pid));time.sleep(30)'
             with mock.patch.object(owned_process.subprocess,'Popen',create),mock.patch.object(owned_process.time,'sleep',interrupt):

@@ -428,6 +428,45 @@ class NativeConversionTests(unittest.TestCase):
             else:
                 self.assertEqual(bgp.from_native(raw, manifest)["native_evidence"]["window"], window)
 
+    def test_empty_route_projection_uncertainty_reaches_comparison(self):
+        for detail in ({"route_projection_incomplete": True, "opaque_nlri": []},
+                       {"opaque_nlri": [{"kind": "layout_unresolved"}]},
+                       {"route_projection_incomplete": True,
+                        "opaque_nlri": [{"kind": "layout_unresolved"}]}):
+            row, _, manifest = native_export()
+            row["event"] = {"parse_status": "opaque_update_continuity_gap", "issues": []}
+            row["observation"].update(message_type=2, message_detail=detail, routes=[])
+            manifest["coverage"].update(route_free="1", opaque="1")
+            document = bgp.from_native(rebind_rows(row, manifest), manifest)
+            converted = document["observations"][0]
+            with self.subTest(detail=detail):
+                for group in ("nlri", "attributes"):
+                    self.assertEqual(converted["coverage"][group], "partial")
+                    self.assertTrue(all(field["status"] == "incomplete"
+                                        for field in converted["fields"][group].values()))
+                    results = [item for item in bgp.compare(document, document)["rows"]
+                               if item["group"] == group]
+                    self.assertTrue(results)
+                    self.assertTrue(all(item["result"] == "not_comparable" for item in results))
+
+    def test_valid_empty_update_preserves_route_free_completeness(self):
+        for detail in ({"opaque_nlri": []},
+                       {"route_projection_incomplete": False, "opaque_nlri": []},
+                       {"route_projection_incomplete": False,
+                        "opaque_nlri": [{"kind": "multiprotocol_layout_unresolved"}]}):
+            row, _, manifest = native_export()
+            row["event"] = {"parse_status": "decoded_update_candidate", "issues": []}
+            row["observation"].update(message_type=2, message_detail=detail, routes=[])
+            manifest["coverage"].update(route_free="1")
+            document = bgp.from_native(rebind_rows(row, manifest), manifest)
+            with self.subTest(detail=detail):
+                for group in ("nlri", "attributes"):
+                    self.assertEqual(document["observations"][0]["coverage"][group], "complete")
+                    results = [item for item in bgp.compare(document, document)["rows"]
+                               if item["group"] == group]
+                    self.assertTrue(results)
+                    self.assertTrue(all(item["result"] == "agreement" for item in results))
+
     def test_native_semantic_uncertainty_survives_conversion_and_comparison(self):
         for completeness in ("complete", "incomplete", "unresolved", None):
             row, _, manifest = native_export()

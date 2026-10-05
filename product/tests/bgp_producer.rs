@@ -149,6 +149,7 @@ fn required_attributes_except(code: u8) -> Vec<u8> {
         (1, 0x40, &[0][..]),
         (2, 0x40, &[2, 1, 0, 1][..]),
         (3, 0x40, &[192, 0, 2, 1][..]),
+        (5, 0x40, &[0, 0, 0, 100][..]),
     ] {
         if required_code != code {
             values.extend(wire_attribute(flags, required_code, payload));

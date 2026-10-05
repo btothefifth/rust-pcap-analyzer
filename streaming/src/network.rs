@@ -465,7 +465,9 @@ pub fn transport_metadata(d: &Datagram) -> Result<Option<(&'static str, Json)>> 
         1 | 58 => {
             need(b, 4, "icmp")?;
             let valid = if d.protocol == 1 {
-                wire::internet_checksum(b) == 0
+                Json::Bool(wire::internet_checksum(b) == 0)
+            } else if d.checksum_context == wire::ChecksumContext::Unsupported {
+                Json::Null
             } else {
                 let mut c = pcap_evidence::checksum::InternetChecksum::new();
                 match (d.source, d.destination) {
@@ -478,7 +480,7 @@ pub fn transport_metadata(d: &Datagram) -> Result<Option<(&'static str, Json)>> 
                 c.update(&(b.len() as u32).to_be_bytes());
                 c.update(&[0, 0, 0, 58]);
                 c.update(b);
-                c.finish() == 0
+                Json::Bool(c.finish() == 0)
             };
             let echo = if (d.protocol == 1 && [0, 8].contains(&b[0]))
                 || (d.protocol == 58 && [128, 129].contains(&b[0]))
@@ -496,7 +498,7 @@ pub fn transport_metadata(d: &Datagram) -> Result<Option<(&'static str, Json)>> 
                 Json::object([
                     ("type", b[0].into()),
                     ("code", b[1].into()),
-                    ("checksum_valid", valid.into()),
+                    ("checksum_valid", valid),
                     ("echo", echo),
                 ]),
             )))

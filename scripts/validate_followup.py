@@ -58,7 +58,7 @@ def run(output,portable_only=False):
         gates.append(entry)
     try:
         for name, argv in portable_commands(sys.executable):command(name,argv)
-        node=shutil.which('node');command('gui-model',[node or 'node','--test','desktop/web/model.test.mjs'],reason=None if node else 'Node unavailable')
+        node=shutil.which('node');command('gui-model',[node or 'node','--test','desktop/web/model.test.mjs','desktop/web/app.test.mjs'],reason=None if node else 'Node unavailable')
         command('catalog',[sys.executable,'-m','tools.research','audit'])
         preflight_ok=all(gate['status']=='PASS' for gate in gates)
         if not portable_only and preflight_ok:

@@ -1973,3 +1973,243 @@ fn unknown_peer_down_reason_six_blocks_first_update_until_fresh_peer_up() {
         .all(|entry| entry.status == RouteStatus::Active && entry.key.scope.generation == 1));
     assert_fresh_bmp_replay(&scratch, &recovered);
 }
+
+fn continuity_rm(peer_id: u8, flags: u8, local_pref: bool) -> Vec<u8> {
+    let mut update = update(4, true);
+    if local_pref {
+        let attrs = u16::from_be_bytes([update[21], update[22]]) as usize;
+        update.splice(23 + attrs..23 + attrs, [0x40, 5, 4, 0, 0, 0, 100]);
+        update[21..23].copy_from_slice(&((attrs + 7) as u16).to_be_bytes());
+        let length = update.len() as u16;
+        update[16..18].copy_from_slice(&length.to_be_bytes());
+    }
+    let mut body = peer(peer_id, flags, 2);
+    body.extend(update);
+    message(0, &body)
+}
+
+#[test]
+fn opaque_internal_update_gaps_only_its_stream_before_and_after_first_route() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_persisted::PolicyProfile};
+    let options = bgp_bmp_store::BmpReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for prior in [false, true] {
+        for recover in [false, true] {
+            let scratch = Scratch::new();
+            let path = scratch.file("opaque.bmp");
+            let mut parts = vec![up(1), up(2)];
+            if prior {
+                parts.push(continuity_rm(1, 0, true));
+            }
+            parts.extend([
+                continuity_rm(1, 0x40, true),
+                continuity_rm(2, 0, true),
+                continuity_rm(1, 0, false),
+                continuity_rm(1, 0, true),
+            ]);
+            if recover {
+                parts.extend([
+                    up(1),
+                    continuity_rm(1, 0, true),
+                    continuity_rm(1, 0x40, true),
+                ]);
+            }
+            let bytes = append(&parts);
+            let archive = bgp_bmp_store::create_with_options(
+                &path,
+                &bytes,
+                source("collector-a"),
+                1_000_000,
+                BmpLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(
+                archive.bmp_rib.gaps().len(),
+                1,
+                "prior={prior} recover={recover}"
+            );
+            assert_eq!(archive.bmp_rib.gaps()[0].0.session, "bmp:0:pre");
+            assert!(archive
+                .bmp_rib
+                .entries()
+                .values()
+                .all(|e| e.status != RouteStatus::Withdrawn));
+            let opaque = archive
+                .state
+                .observations()
+                .iter()
+                .find(|o| {
+                    o.normalized()
+                        .encode()
+                        .contains("internal_local_pref_missing_route")
+                })
+                .expect("opaque UPDATE remains journal evidence");
+            assert!(opaque.routes().is_empty());
+            assert_eq!(
+                field(
+                    field(opaque.normalized(), "message_detail"),
+                    "internal_local_pref_missing"
+                ),
+                &Json::Bool(true)
+            );
+            let replay = bgp_bmp_store::replay_with_options(
+                &path,
+                1_000_000,
+                BmpLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(archive.json(), replay.json());
+            let verified = VerifiedStore::load(
+                &path,
+                1_000_000,
+                MrtLimits::default(),
+                Limits::default(),
+                MrtReplayOptions {
+                    peer_relationship: options.peer_relationship,
+                },
+            )
+            .unwrap();
+            for (session, count) in [
+                ("bmp:0:pre", usize::from(recover)),
+                ("bmp:0:post", 1),
+                ("bmp:1:pre", 1),
+            ] {
+                let query = Query {
+                    session: Some(session.into()),
+                    status: Some("active".into()),
+                    ..Query::default()
+                };
+                let output = verified.query(&query, &Limits::default()).unwrap();
+                assert_eq!(
+                    output.matches("\"native_current\":true").count(),
+                    count,
+                    "{output}"
+                );
+            }
+            let profile = PolicyProfile::parse(b"schema=pcap-evidence.bgp.persisted-policy.v1\nprovenance=synthetic-owner\ncomparison_context=fixture\nmissing_local_preference=100\nmed_rule=skip\nage_rule=skip\n", &Limits::default()).unwrap();
+            let policy = verified
+                .policy(
+                    &Query {
+                        session: Some("bmp:0:pre".into()),
+                        ..Query::default()
+                    },
+                    &profile,
+                    &Limits::default(),
+                )
+                .unwrap();
+            assert_eq!(policy.contains("\"selected\":\""), recover, "{policy}");
+        }
+    }
+}
+
+#[test]
+fn opaque_multiprotocol_payload_gaps_but_empty_eor_and_treat_as_withdraw_preserve_progress() {
+    use pcap_evidence_product::deep::bgp::PeerRelationship;
+    let options = bgp_bmp_store::BmpReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for (payload, expected_gap, expected_status) in [
+        (
+            vec![0, 0, 0, 6, 0x80, 15, 3, 0, 25, 70],
+            0,
+            RouteStatus::Active,
+        ),
+        (
+            vec![0, 0, 0, 7, 0x80, 15, 4, 0, 25, 70, 0],
+            1,
+            RouteStatus::Unresolved,
+        ),
+    ] {
+        let scratch = Scratch::new();
+        let mut body = peer(1, 0, 2);
+        body.extend(bgp(2, &payload));
+        let bytes = append(&[
+            up(1),
+            continuity_rm(1, 0, true),
+            message(0, &body),
+            continuity_rm(1, 0, true),
+        ]);
+        let archive = bgp_bmp_store::create_with_options(
+            &scratch.file("mp.bmp"),
+            &bytes,
+            source("collector-a"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(archive.bmp_rib.gaps().len(), expected_gap);
+        assert_eq!(
+            archive.bmp_rib.entries().values().next().unwrap().status,
+            expected_status
+        );
+    }
+    for conventional in [false, true] {
+        let scratch = Scratch::new();
+        let mut body = peer(1, 0, 2);
+        body.extend(continuity_opaque_mp_reach(conventional));
+        let bytes = append(&[
+            up(1),
+            continuity_rm(1, 0, true),
+            message(0, &body),
+            continuity_rm(1, 0, true),
+        ]);
+        let archive = bgp_bmp_store::create_with_options(
+            &scratch.file("mixed.bmp"),
+            &bytes,
+            source("collector-a"),
+            1_000_000,
+            BmpLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(archive.bmp_rib.gaps().len(), 1);
+        assert_eq!(
+            archive.bmp_rib.entries().values().next().unwrap().status,
+            RouteStatus::Unresolved
+        );
+    }
+    let scratch = Scratch::new();
+    let mut malformed = update(4, true);
+    malformed[26] = 3; // Invalid ORIGIN, with known announcement NLRI: TAW wins.
+    let mut body = peer(1, 0, 2);
+    body.extend(malformed);
+    let bytes = append(&[up(1), continuity_rm(1, 0, true), message(0, &body)]);
+    let archive = bgp_bmp_store::create_with_options(
+        &scratch.file("taw.bmp"),
+        &bytes,
+        source("collector-a"),
+        1_000_000,
+        BmpLimits::default(),
+        Limits::default(),
+        options,
+    )
+    .unwrap();
+    assert!(archive.bmp_rib.gaps().is_empty());
+    assert_eq!(
+        archive.bmp_rib.entries().values().next().unwrap().status,
+        RouteStatus::Withdrawn
+    );
+}
+
+fn continuity_opaque_mp_reach(conventional: bool) -> Vec<u8> {
+    // Keep LOCAL_PREF present so only the unresolved MP payload owns this gap.
+    let mut wire = continuity_rm(1, 0, true)[48..].to_vec();
+    let attrs = u16::from_be_bytes([wire[21], wire[22]]) as usize;
+    let mp = [0x80, 14, 13, 0, 1, 1, 4, 192, 0, 2, 9, 0, 24, 198, 51, 100];
+    wire.splice(23 + attrs..23 + attrs, mp);
+    wire[21..23].copy_from_slice(&((attrs + mp.len()) as u16).to_be_bytes());
+    if !conventional {
+        wire.truncate(23 + attrs + mp.len());
+    }
+    let length = wire.len() as u16;
+    wire[16..18].copy_from_slice(&length.to_be_bytes());
+    wire
+}

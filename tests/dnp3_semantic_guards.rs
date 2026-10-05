@@ -21,6 +21,9 @@ fn evidence(bytes: &[u8]) -> EvidenceBytes {
 #[test]
 fn unsupported_group_variations_stop_before_values_or_a_following_sibling() {
     for invalid in [
+        vec![3, 3, 7],
+        vec![3, 3, 0],
+        vec![3, 3, 255],
         vec![3, 3, 7, 1, 128, 0, 0, 0, 0, 0, 0],
         vec![3, 4, 7, 1, 128, 0, 0],
         vec![11, 3, 7, 1, 128, 0, 0],
@@ -37,22 +40,48 @@ fn unsupported_group_variations_stop_before_values_or_a_following_sibling() {
         assert_eq!(report.status(), Status::Unsupported, "{invalid:?}");
         assert_eq!(
             report.consumed(),
-            4,
-            "only the unsupported header may be inspected"
+            0,
+            "an unsupported group/variation does not admit a header"
         );
-        assert!(report
-            .records()
-            .iter()
-            .all(|record| record.kind() != "object_value"));
+        assert!(report.records().is_empty());
         assert_eq!(
             report
                 .source()
                 .slice(report.consumed()..bytes.len())
                 .unwrap()
                 .data(),
-            &bytes[4..]
+            &bytes[..]
         );
     }
+}
+
+#[test]
+fn supported_prefix_survives_an_unsupported_tail_without_decoding_its_sibling() {
+    let supported = [1, 2, 7, 1, 129];
+    let tail = [3, 3, 7, 1, 128, 1, 2, 7, 1, 129];
+    let mut bytes = supported.to_vec();
+    bytes.extend_from_slice(&tail);
+    let raw = evidence(&bytes);
+    let report =
+        objects::decode(&raw, objects::Context::ResponseValues, Limits::default()).unwrap();
+    assert_eq!(report.status(), Status::Unsupported);
+    assert_eq!(report.consumed(), supported.len());
+    assert_eq!(
+        report
+            .records()
+            .iter()
+            .filter(|r| r.kind() == "object_value")
+            .count(),
+        1
+    );
+    assert_eq!(
+        report
+            .source()
+            .slice(report.consumed()..bytes.len())
+            .unwrap()
+            .data(),
+        &tail
+    );
 }
 
 #[test]

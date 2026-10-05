@@ -31,6 +31,14 @@ pub(crate) fn observation_event(
             previous_generation: boundary.previous_generation,
             reason: boundary.reason.clone(),
         }
+    } else if route_projection_incomplete(observation) {
+        // Retain the complete imported observation, including any decoded
+        // sibling routes, but publish no native actions from an incomplete
+        // UPDATE. Gap admission also establishes uncertainty before the first
+        // supported route and survives later messages in the same generation.
+        RibEventKind::Gap {
+            reason: "decoded_update_opaque_route_evidence".into(),
+        }
     } else {
         let mut actions = Vec::new();
         actions
@@ -81,6 +89,12 @@ pub(crate) fn observation_event(
         record_id: observation.source().record_id.clone(),
         kind,
     }))
+}
+
+pub(crate) fn route_projection_incomplete(observation: &Observation) -> bool {
+    event_value(observation.normalized(), "message_detail")
+        .and_then(|detail| event_value(detail, "route_projection_incomplete"))
+        == Some(&Json::Bool(true))
 }
 
 pub(crate) fn end_of_rib_family(

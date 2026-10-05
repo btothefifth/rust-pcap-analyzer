@@ -307,6 +307,8 @@ pub(crate) fn replay_record(
                                             "unsupported_session_capabilities_not_interpreted",
                                         );
                                     }
+                                    let projection_incomplete =
+                                        mrt::route_projection_incomplete(&parsed);
                                     details = update_details(&parsed, peer, basis, message);
                                     if parsed.known_disposition == "session_reset" {
                                         affected = Some(affected_scopes(
@@ -323,13 +325,10 @@ pub(crate) fn replay_record(
                                         )?);
                                         status = "quarantined_session_reset";
                                         issues.push("embedded_update_requires_context_reset");
-                                    } else if parsed.peer_relationship_unresolved {
-                                        status = "quarantined_peer_relationship";
-                                        issues.push("peer_relationship_context_unresolved");
-                                        gaps.extend(gap_contexts(
-                                            batch, record, peer, session, limits,
-                                        )?);
                                     } else {
+                                        if parsed.peer_relationship_unresolved {
+                                            issues.push("peer_relationship_context_unresolved");
+                                        }
                                         let mut routes = std::mem::take(&mut parsed.records);
                                         let inventory = mrt::imported_attribute_inventory(
                                             &parsed.attribute_ranges,
@@ -387,7 +386,11 @@ pub(crate) fn replay_record(
                                         )?;
                                         observations.push(normalized);
                                         session.used_streams[stream] = true;
-                                        status = "decoded_route_monitoring_candidate";
+                                        status = if projection_incomplete {
+                                            "opaque_route_monitoring_continuity_gap"
+                                        } else {
+                                            "decoded_route_monitoring_candidate"
+                                        };
                                     }
                                 }
                             }
@@ -643,6 +646,21 @@ fn update_details(parsed: &ParsedUpdate, peer: &BmpPeer, basis: &str, range: &So
         ),
         ("disposition", parsed.disposition.into()),
         ("known_disposition", parsed.known_disposition.into()),
+        (
+            "route_projection_incomplete",
+            mrt::route_projection_incomplete(parsed).into(),
+        ),
+        (
+            "internal_local_pref_missing",
+            parsed.internal_local_pref_missing.into(),
+        ),
+        (
+            "malformed_attribute_envelope",
+            parsed
+                .malformed_attribute_envelope
+                .clone()
+                .unwrap_or(Json::Null),
+        ),
         (
             "peer_relationship",
             parsed.peer_relationship.as_str().into(),

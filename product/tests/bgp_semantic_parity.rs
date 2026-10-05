@@ -178,6 +178,35 @@ fn metadata(frame: u64, direction: u8) -> PcapMetadata {
         local: Some("capture-local".into()),
     }
 }
+// These identity tests require admitted internal announcements. Supply their
+// common LOCAL_PREF prerequisite without duplicating the attribute when its
+// value is the semantic variable under test. Keep Unknown-source parity vectors
+// unchanged; they do not carry this explicitly configured internal relationship.
+fn internal_attributes(attributes: &[u8]) -> Vec<u8> {
+    let mut at = 0;
+    while at < attributes.len() {
+        let flags = attributes[at];
+        let code = attributes[at + 1];
+        let (header, length) = if flags & 0x10 == 0 {
+            (3, usize::from(attributes[at + 2]))
+        } else {
+            (
+                4,
+                usize::from(u16::from_be_bytes([attributes[at + 2], attributes[at + 3]])),
+            )
+        };
+        if code == 5 {
+            return attributes.to_vec();
+        }
+        at += header + length;
+        assert!(
+            at <= attributes.len(),
+            "fixture attribute envelope is complete"
+        );
+    }
+    [attribute(0x40, 5, &[0, 0, 0, 100]), attributes.to_vec()].concat()
+}
+
 fn decode_with(attributes: &[u8], four: bool, relationship: PeerRelationship) -> Json {
     let mut state = SessionState::default();
     state.set_peer_relationship(relationship);
@@ -191,7 +220,12 @@ fn decode_with(attributes: &[u8], four: bool, relationship: PeerRelationship) ->
         )
         .unwrap();
     }
-    let bytes = update(attributes);
+    let attributes = if relationship == PeerRelationship::Internal {
+        internal_attributes(attributes)
+    } else {
+        attributes.to_vec()
+    };
+    let bytes = update(&attributes);
     bgp::decode_pcap(
         &evidence(&bytes, 3),
         metadata(3, 0),
@@ -201,7 +235,14 @@ fn decode_with(attributes: &[u8], four: bool, relationship: PeerRelationship) ->
     .unwrap()
 }
 fn route(value: &Json) -> &Json {
-    &array(field(value, "routes"))[0]
+    let routes = array(field(value, "routes"));
+    assert_eq!(
+        routes.len(),
+        1,
+        "semantic fixture must reach route admission: {}",
+        field(value, "message_detail").encode()
+    );
+    &routes[0]
 }
 fn identity(value: &Json) -> &Json {
     field(route(value), "semantic_identity")
@@ -566,7 +607,7 @@ fn every_complete_scalar_or_set_profile_attribute_changes_meaning_when_its_value
     let baseline = decode_with(&ordinary_attributes(), false, PeerRelationship::Internal);
     let vectors = [
         (4, 0x80, vec![0, 0, 0, 9]),
-        (5, 0x40, vec![0, 0, 0, 100]),
+        (5, 0x40, vec![0, 0, 0, 200]),
         (6, 0x40, vec![]),
         (7, 0xc0, vec![0xfd, 0xe8, 192, 0, 2, 7]),
         (8, 0xc0, vec![0xfd, 0xe8, 0, 7]),
@@ -693,7 +734,7 @@ fn set_order_duplicates_and_encoding_lengths_preserve_semantics_and_source_occur
         field(route(&left), "attribute_ranges"),
         field(route(&right), "attribute_ranges")
     );
-    assert_eq!(array(field(route(&right), "attribute_ranges")).len(), 6);
+    assert_eq!(array(field(route(&right), "attribute_ranges")).len(), 7);
     assert_eq!(
         field(
             array(field(route(&right), "attribute_ranges"))
@@ -849,13 +890,17 @@ fn as4_discard_boundaries_are_complete_and_later_duplicates_keep_their_own_dispo
             PeerRelationship::Internal
         ))
     );
-    let ranges = array(field(route(&decoded), "attribute_ranges"));
+    let ranges: Vec<_> = array(field(route(&decoded), "attribute_ranges"))
+        .iter()
+        .filter(|range| field(range, "type") == &Json::from(17u8))
+        .collect();
+    assert_eq!(ranges.len(), 2);
     assert_eq!(
-        field(&ranges[3], "disposition"),
+        field(ranges[0], "disposition"),
         &Json::from("attribute_discard")
     );
     assert_eq!(
-        field(&ranges[4], "disposition"),
+        field(ranges[1], "disposition"),
         &Json::from("discard_later_occurrence")
     );
     Observation::from_normalized(&decoded, None, &Limits::default()).unwrap();

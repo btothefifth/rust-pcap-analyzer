@@ -923,7 +923,10 @@ fn build_archive(
                     )?;
                     if let Some(normalized) = replay.observation {
                         let observation = Observation::from_normalized(&normalized, None, &limits)?;
+                        // Route-free opaque UPDATEs must reach the native
+                        // reducer as gaps and remain in the immutable journal.
                         if !observation.routes().is_empty()
+                            || rib_support::route_projection_incomplete(&observation)
                             || rib_support::end_of_rib_family(&observation)?.is_some()
                         {
                             observations_work = observations_work

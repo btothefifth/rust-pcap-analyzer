@@ -669,3 +669,148 @@ fn exact_notification_replay_is_inert_across_the_generation_boundary() {
     assert_eq!(pipeline.rib().events().len(), rib_events);
     assert!(!pipeline.tainted());
 }
+
+#[test]
+fn mixed_next_hop_diagnostic_cannot_erase_unresolved_mp_reach_continuity() {
+    use pcap_evidence::json::Json;
+    use pcap_evidence_product::deep::bgp;
+    for reverse in [false, true] {
+        for conventional in [false, true] {
+            let mut pipeline = pipeline();
+            establish(&mut pipeline);
+            pipeline
+                .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+                .unwrap();
+            let mut attributes = attribute(0x40, 1, &[0]);
+            attributes.extend(attribute(0x40, 2, &[2, 1, 0, 0, 0xfd, 0xe8]));
+            let next_hop = attribute(0x40, 3, &[192, 0, 2, 9]);
+            let mp = attribute(0x80, 14, &[0, 1, 1, 4, 192, 0, 2, 9, 0, 24, 198, 51, 100]);
+            if reverse {
+                attributes.extend(mp);
+                attributes.extend(next_hop);
+            } else {
+                attributes.extend(next_hop);
+                attributes.extend(mp);
+            }
+            let wire = update(
+                &attributes,
+                if conventional {
+                    &[24, 203, 0, 113]
+                } else {
+                    &[]
+                },
+            );
+            let mut wire_state = pipeline.wire_state().clone();
+            let decoded = bgp::decode_pcap(
+                &evidence(&wire, 4),
+                metadata(Some(0), 4),
+                &mut wire_state,
+                &Limits::default(),
+            )
+            .unwrap();
+            pipeline
+                .apply_message(&evidence(&wire, 4), metadata(Some(0), 4))
+                .unwrap();
+            assert_eq!(
+                pipeline.rib().gaps().len(),
+                1,
+                "reverse={reverse} conventional={conventional}"
+            );
+            assert!(pipeline
+                .rib()
+                .entries()
+                .values()
+                .all(|entry| entry.status == RouteStatus::Unresolved));
+            assert!(!pipeline
+                .rib()
+                .entries()
+                .values()
+                .any(|entry| entry.status == RouteStatus::Withdrawn));
+            let Json::Object(top) = &decoded else {
+                panic!("decoded object")
+            };
+            let Json::Object(detail) = &top
+                .iter()
+                .find(|(key, _)| *key == "message_detail")
+                .unwrap()
+                .1
+            else {
+                panic!("message detail")
+            };
+            let Json::Array(opaque) = &detail
+                .iter()
+                .find(|(key, _)| *key == "opaque_nlri")
+                .unwrap()
+                .1
+            else {
+                panic!("opaque array")
+            };
+            assert_eq!(opaque.len(), 1);
+            assert!(decoded
+                .encode()
+                .contains("next_hop_family_context_unresolved"));
+            let events = pipeline.rib().events().len();
+            pipeline
+                .apply_message(&evidence(&wire, 4), metadata(Some(0), 4))
+                .unwrap();
+            assert_eq!(
+                pipeline.rib().events().len(),
+                events,
+                "exact replay remains inert"
+            );
+            assert_eq!(pipeline.rib().gaps().len(), 1);
+            pipeline
+                .apply_message(&evidence(&announcement(), 5), metadata(Some(0), 5))
+                .unwrap();
+            assert!(pipeline
+                .rib()
+                .entries()
+                .values()
+                .all(|entry| entry.status == RouteStatus::Unresolved));
+        }
+    }
+    // Ordinary routes and bilateral MP layout remain decoded. Mixed next-hop
+    // ambiguity is retained, but known MP bytes do not become a source gap.
+    let mut known = pipeline();
+    for (frame, direction, asn) in [(1, 0, 65000), (2, 1, 65001)] {
+        let open = opened(
+            asn,
+            &[
+                capability(65, &u32::from(asn).to_be_bytes()),
+                capability(1, &[0, 1, 0, 1]),
+            ],
+        );
+        known
+            .apply_message(&evidence(&open, frame), metadata(Some(direction), frame))
+            .unwrap();
+    }
+    known
+        .apply_message(&evidence(&announcement(), 3), metadata(Some(0), 3))
+        .unwrap();
+    assert_eq!(
+        known.rib().entries().values().next().unwrap().status,
+        RouteStatus::Active
+    );
+    let mut attrs = attribute(0x40, 1, &[0]);
+    attrs.extend(attribute(0x40, 2, &[2, 1, 0, 0, 0xfd, 0xe8]));
+    attrs.extend(attribute(0x40, 3, &[192, 0, 2, 9]));
+    attrs.extend(attribute(
+        0x80,
+        14,
+        &[0, 1, 1, 4, 192, 0, 2, 9, 0, 24, 198, 51, 100],
+    ));
+    let wire = update(&attrs, &[24, 203, 0, 113]);
+    let mut state = known.wire_state().clone();
+    let decoded = bgp::decode_pcap(
+        &evidence(&wire, 4),
+        metadata(Some(0), 4),
+        &mut state,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert!(decoded.encode().contains("\"opaque_nlri\":[]"));
+    known
+        .apply_message(&evidence(&wire, 4), metadata(Some(0), 4))
+        .unwrap();
+    assert!(known.rib().gaps().is_empty());
+}

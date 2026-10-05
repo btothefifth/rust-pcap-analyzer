@@ -1080,20 +1080,33 @@ fn mrt_unknown_relationship_never_admits_an_update_candidate() {
     let update_event = archive.bgp4mp_events.last().expect("UPDATE replay event");
     assert_eq!(
         string_field(update_event, "parse_status"),
-        Some("quarantined_peer_relationship_unresolved")
+        Some("opaque_update_continuity_gap")
     );
     assert!(update_event
         .encode()
         .contains("peer_relationship_context_unresolved_update_not_admitted"));
-    assert!(update_event
-        .encode()
-        .contains("peer_relationship_unresolved"));
-    assert!(update_event
-        .encode()
-        .contains("\"peer_relationship\":\"unknown\""));
-    assert!(update_event
-        .encode()
-        .contains("\"peer_relationship_basis\":\"default_unknown\""));
+    assert_eq!(archive.bgp4mp_rib.gaps().len(), 1);
+    assert!(archive.bgp4mp_rib.entries().is_empty());
+    let observation = archive
+        .state
+        .observations()
+        .last()
+        .expect("opaque UPDATE journal evidence");
+    assert!(observation.routes().is_empty());
+    let detail = get(observation.normalized(), "message_detail");
+    assert_eq!(
+        get(detail, "route_projection_incomplete"),
+        &Json::Bool(true)
+    );
+    assert_eq!(
+        get(detail, "peer_relationship_unresolved"),
+        &Json::Bool(true)
+    );
+    assert_eq!(string_field(detail, "peer_relationship"), Some("unknown"));
+    assert_eq!(
+        string_field(detail, "peer_relationship_basis"),
+        Some("default_unknown")
+    );
 }
 
 #[test]

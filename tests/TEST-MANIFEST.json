@@ -70,6 +70,7 @@
     "dnp3_confirmations::invalid_fragment_taints_only_its_capture_and_numeric_flow",
     "dnp3_confirmations::invalid_fragment_with_unknown_capture_scope_is_explicit_and_conservative",
     "dnp3_semantic_guards::unsupported_group_variations_stop_before_values_or_a_following_sibling",
+    "dnp3_semantic_guards::supported_prefix_survives_an_unsupported_tail_without_decoding_its_sibling",
     "dnp3_semantic_guards::valid_event_frozen_counter_binary_and_iin_siblings_remain_decoded",
     "dnp3_semantic_guards::read_and_control_functions_require_objects_but_header_only_workflows_remain_valid",
     "dnp3_semantic_guards::activate_configuration_is_defined_but_semantically_outside_the_profile",

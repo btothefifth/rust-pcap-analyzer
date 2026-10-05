@@ -650,24 +650,7 @@ pub(crate) fn replay_message_record(
             }
 
             if parsed.peer_relationship_unresolved {
-                issues.extend(parsed.issues.iter().copied());
                 issues.push("peer_relationship_context_unresolved_update_not_admitted");
-                return Ok(ReplayRecord {
-                    event: event_json(
-                        source.event(&key, Some(direction), generation),
-                        "message",
-                        "quarantined_peer_relationship_unresolved",
-                        issues,
-                        Some(update_detail(
-                            &parsed,
-                            outer,
-                            capability_basis,
-                            &message_range,
-                        )),
-                        Some(message_range),
-                    ),
-                    observation: None,
-                });
             }
 
             issues.extend(parsed.issues.iter().copied());
@@ -730,7 +713,11 @@ pub(crate) fn replay_message_record(
                 event: event_json(
                     source.event(&key, Some(direction), generation),
                     "message",
-                    "decoded_update_candidate",
+                    if route_projection_incomplete(&parsed) {
+                        "opaque_update_continuity_gap"
+                    } else {
+                        "decoded_update_candidate"
+                    },
                     event_issues,
                     Some(Json::object([
                         ("capability_context_basis", capability_basis.into()),
@@ -1611,6 +1598,30 @@ fn rejected_message_event(
     )
 }
 
+/// Opaque route payloads cannot establish continuity of native candidates.
+/// A family-header-only MP_UNREACH contains no NLRI, even when the family is
+/// unsupported; retain that journal boundary without poisoning native routes.
+/// The shared parser emits exactly one multiprotocol opaque item per unresolved
+/// attribute, so the range census also distinguishes mixed/partial updates.
+pub(super) fn route_projection_incomplete(parsed: &super::ParsedUpdate) -> bool {
+    if parsed.opaque_nlri.is_empty() {
+        return false;
+    }
+    let only_multiprotocol = parsed.opaque_nlri.iter().all(|item| {
+        matches!(item, Json::Object(fields) if fields.iter().any(|(name, value)|
+            *name == "kind" && matches!(value, Json::String(kind) if kind == "multiprotocol_layout_unresolved")))
+    });
+    let only_empty_unreach = parsed
+        .attribute_ranges
+        .iter()
+        .filter(|range| {
+            matches!(range.code, 14 | 15)
+                && range.interpretation == "opaque_family_capability_or_add_path_layout"
+        })
+        .all(|range| range.code == 15 && range.end - range.value_start == 3);
+    !(only_multiprotocol && only_empty_unreach)
+}
+
 fn update_detail(
     parsed: &super::ParsedUpdate,
     outer: &Bgp4mp,
@@ -1624,6 +1635,21 @@ fn update_detail(
         ),
         ("disposition", parsed.disposition.into()),
         ("known_disposition", parsed.known_disposition.into()),
+        (
+            "route_projection_incomplete",
+            route_projection_incomplete(parsed).into(),
+        ),
+        (
+            "internal_local_pref_missing",
+            parsed.internal_local_pref_missing.into(),
+        ),
+        (
+            "malformed_attribute_envelope",
+            parsed
+                .malformed_attribute_envelope
+                .clone()
+                .unwrap_or(Json::Null),
+        ),
         (
             "peer_relationship",
             parsed.peer_relationship.as_str().into(),

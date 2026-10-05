@@ -269,6 +269,17 @@ pub struct Session {
 }
 impl Session {
     pub fn observe(&mut self, direction: u8, bytes: &EvidenceBytes, l: &Limits) -> Result<Report> {
+        let mut staged = self.clone();
+        let report = staged.observe_staged(direction, bytes, l)?;
+        *self = staged;
+        Ok(report)
+    }
+    fn observe_staged(
+        &mut self,
+        direction: u8,
+        bytes: &EvidenceBytes,
+        l: &Limits,
+    ) -> Result<Report> {
         if direction > 1 {
             return Err(bad("iec104_direction", 0, "direction outside pair"));
         }

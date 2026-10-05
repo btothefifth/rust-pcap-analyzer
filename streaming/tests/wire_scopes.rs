@@ -75,6 +75,25 @@ fn ipv6_routed_udp() -> Vec<u8> {
     ip.extend_from_slice(&[0, 1, 0, 2, 0, 8, 0xa4, 0x65]);
     ip
 }
+fn ipv6_icmp(routed: bool) -> Vec<u8> {
+    let mut ip = ipv6_routed_udp();
+    ip[40] = 58;
+    ip[64..72].copy_from_slice(&[128, 0, 0, 0, 0, 1, 0, 1]);
+    let mut pseudo = ip[8..40].to_vec();
+    pseudo.extend_from_slice(&8u32.to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0, 58]);
+    pseudo.extend_from_slice(&ip[64..72]);
+    let checksum = wire::internet_checksum(&pseudo);
+    ip[66..68].copy_from_slice(&checksum.to_be_bytes());
+    if !routed {
+        let message = ip[64..72].to_vec();
+        ip.truncate(40);
+        ip[6] = 58;
+        ip[4..6].copy_from_slice(&8u16.to_be_bytes());
+        ip.extend(message);
+    }
+    ip
+}
 fn capture(link: u32, packets: &[Vec<u8>]) -> Vec<u8> {
     let mut bytes = vec![];
     bytes.extend_from_slice(&0xa1b2c3d4u32.to_le_bytes());
@@ -226,4 +245,52 @@ fn stream_checksum_diagnostics_distinguish_unsupported_operands_from_invalid_byt
         .any(|event| event.kind == EventKind::Diagnostic
             && event.status == EvidenceStatus::Rejected
             && event.data.encode().contains("transport_checksum_operands")));
+}
+
+#[test]
+fn icmpv6_metadata_does_not_validate_unsupported_checksum_operands() {
+    let plain = ipv6_icmp(false);
+    let routed = ipv6_icmp(true);
+    let decoded = wire::decode_packet(229, &routed, id(1), scope()).unwrap();
+    assert_eq!(decoded.checksum_context, ChecksumContext::Unsupported);
+    let (_, metadata) = network::transport_metadata(&decoded).unwrap().unwrap();
+    assert!(metadata.encode().contains("\"checksum_valid\":null"));
+    let decoded = wire::decode_packet(229, &plain, id(2), scope()).unwrap();
+    let (_, metadata) = network::transport_metadata(&decoded).unwrap().unwrap();
+    assert!(metadata.encode().contains("\"checksum_valid\":true"));
+
+    let bytes = capture(229, &[plain, routed]);
+    for strict in [false, true] {
+        let mut config = StreamConfig::default();
+        if strict {
+            config.base.checksum_policy = ChecksumPolicy::RequireValid;
+        }
+        let registry = Registry::builtins(&config).unwrap();
+        let mut output = Collect::default();
+        analyze_reader(bytes.as_slice(), config, &registry, &mut output).unwrap();
+        let metadata: Vec<_> = output
+            .0
+            .iter()
+            .filter(|e| e.protocol.as_deref() == Some("icmpv6"))
+            .collect();
+        assert_eq!(metadata.len(), if strict { 1 } else { 2 });
+        assert!(metadata[0]
+            .data
+            .encode()
+            .contains("\"checksum_valid\":true"));
+        assert_eq!(metadata[0].status, EvidenceStatus::Observed);
+        if !strict {
+            assert_eq!(metadata[1].status, EvidenceStatus::Unsupported);
+        }
+        assert!(output.0.iter().any(|e| e.kind == EventKind::Diagnostic
+            && e.data
+                .encode()
+                .contains("unsupported_transport_checksum_operands")
+            && e.status
+                == if strict {
+                    EvidenceStatus::Rejected
+                } else {
+                    EvidenceStatus::Unsupported
+                }));
+    }
 }

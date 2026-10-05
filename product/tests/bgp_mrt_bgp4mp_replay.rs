@@ -1928,7 +1928,7 @@ fn cli_import_fresh_replay_query_and_export_retain_bgp4mp_events_and_routes() {
     let scratch = Scratch::new();
     let source_path = scratch.file("source.mrt");
     let workspace = scratch.file("workspace");
-    let bytes = two_generation_fixture();
+    let bytes = continuity_internal_cli_fixture();
     let relationship_options = bgp_mrt_store::MrtReplayOptions {
         peer_relationship: Some(pcap_evidence_product::deep::bgp::PeerRelationship::Internal),
     };
@@ -2638,4 +2638,283 @@ fn cli_malformed_source_roundtrip_keeps_exact_ranges_and_quarantined_rib() {
             "{command} retains native session uncertainty"
         );
     }
+}
+
+fn continuity_internal_update(local_pref: bool) -> Vec<u8> {
+    let mut wire = update(4, false);
+    if local_pref {
+        let attrs = u16::from_be_bytes([wire[21], wire[22]]) as usize;
+        wire.splice(23 + attrs..23 + attrs, [0x40, 5, 4, 0, 0, 0, 100]);
+        wire[21..23].copy_from_slice(&((attrs + 7) as u16).to_be_bytes());
+        let length = wire.len() as u16;
+        wire[16..18].copy_from_slice(&length.to_be_bytes());
+    }
+    wire
+}
+fn continuity_internal_message(interface: u16, local_pref: bool) -> Vec<u8> {
+    message_record(
+        MessageRecordMetadata::new(
+            Bgp4mpMetadata::new(4, 65_551, 65_552, interface),
+            16,
+            4,
+            31,
+            None,
+            false,
+        ),
+        &continuity_internal_update(local_pref),
+    )
+}
+fn continuity_internal_flow(interface: u16, prior: bool) -> Vec<u8> {
+    let metadata = Bgp4mpMetadata::new(4, 65_551, 65_552, interface);
+    let mut bytes = state_record(metadata, 5, 1, 2, 4);
+    for local in [false, true] {
+        bytes.extend(message_record(
+            MessageRecordMetadata::new(metadata, 16, 4, 2, None, local),
+            &open(
+                if local { 65_552 } else { 65_551 },
+                true,
+                [198, 51, 100, if local { 2 } else { 1 }],
+            ),
+        ));
+    }
+    bytes.extend(state_record(metadata, 5, 3, 4, 5));
+    bytes.extend(state_record(metadata, 5, 4, 5, 6));
+    if prior {
+        bytes.extend(continuity_internal_message(interface, true));
+    }
+    bytes
+}
+
+#[test]
+fn opaque_internal_update_preserves_mrt_gap_evidence_and_fresh_policy_currency() {
+    use pcap_evidence_product::deep::{
+        bgp::PeerRelationship,
+        bgp_persisted::{PolicyProfile, Query, VerifiedStore},
+        bgp_rib::RouteStatus,
+    };
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    for prior in [false, true] {
+        for recover in [false, true] {
+            let scratch = Scratch::new();
+            let path = scratch.file("opaque.mrt");
+            let mut bytes = continuity_internal_flow(7, prior);
+            bytes.extend(continuity_internal_flow(8, true));
+            bytes.extend(continuity_internal_message(7, false));
+            bytes.extend(continuity_internal_message(7, true));
+            if recover {
+                bytes.extend(state_record(
+                    Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                    5,
+                    32,
+                    6,
+                    1,
+                ));
+                bytes.extend(state_record(
+                    Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                    5,
+                    33,
+                    1,
+                    2,
+                ));
+                bytes.extend(continuity_internal_flow(7, true));
+            }
+            let archive = bgp_mrt_store::create_with_options(
+                &path,
+                &bytes,
+                source("opaque-continuity"),
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(
+                archive.bgp4mp_rib.gaps().len(),
+                1,
+                "prior={prior} recover={recover}"
+            );
+            assert_eq!(
+                archive
+                    .bgp4mp_rib
+                    .entries()
+                    .values()
+                    .filter(|e| e.status == RouteStatus::Active)
+                    .count(),
+                1 + usize::from(recover)
+            );
+            assert!(archive
+                .bgp4mp_rib
+                .entries()
+                .values()
+                .all(|e| e.status != RouteStatus::Withdrawn));
+            let opaque = archive
+                .state
+                .observations()
+                .iter()
+                .find(|o| {
+                    o.normalized()
+                        .encode()
+                        .contains("internal_local_pref_missing_route")
+                })
+                .expect("opaque UPDATE remains journal evidence");
+            assert!(opaque.routes().is_empty());
+            assert!(opaque
+                .normalized()
+                .encode()
+                .contains("\"internal_local_pref_missing\":true"));
+            let session = opaque.source().session.clone().unwrap();
+            let replay = bgp_mrt_store::replay_with_options(
+                &path,
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            assert_eq!(archive.bgp4mp_rib_json(None), replay.bgp4mp_rib_json(None));
+            assert_eq!(archive.state.encode(), replay.state.encode());
+            let verified = VerifiedStore::load(
+                &path,
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+                options,
+            )
+            .unwrap();
+            let output = verified
+                .query(
+                    &Query {
+                        status: Some("active".into()),
+                        ..Query::default()
+                    },
+                    &Limits::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                output.matches("\"native_current\":true").count(),
+                1 + usize::from(recover),
+                "{output}"
+            );
+            let profile = PolicyProfile::parse(b"schema=pcap-evidence.bgp.persisted-policy.v1\nprovenance=synthetic-owner\ncomparison_context=fixture\nmissing_local_preference=100\nmed_rule=skip\nage_rule=skip\n", &Limits::default()).unwrap();
+            let policy = verified
+                .policy(
+                    &Query {
+                        session: Some(session),
+                        ..Query::default()
+                    },
+                    &profile,
+                    &Limits::default(),
+                )
+                .unwrap();
+            assert_eq!(policy.contains("\"selected\":\""), recover, "{policy}");
+        }
+    }
+}
+
+#[test]
+fn opaque_mrt_multiprotocol_payload_and_stronger_dispositions_keep_distinct_semantics() {
+    use pcap_evidence_product::deep::{bgp::PeerRelationship, bgp_rib::RouteStatus};
+    let options = bgp_mrt_store::MrtReplayOptions {
+        peer_relationship: Some(PeerRelationship::Internal),
+    };
+    let mut malformed = continuity_internal_update(false);
+    malformed[26] = 3; // Invalid ORIGIN plus known announcement: treat-as-withdraw.
+    for (wire, gap, status) in [
+        (
+            bgp_message(2, &[0, 0, 0, 6, 0x80, 15, 3, 0, 25, 70]),
+            0,
+            RouteStatus::Active,
+        ),
+        (
+            bgp_message(2, &[0, 0, 0, 7, 0x80, 15, 4, 0, 25, 70, 0]),
+            1,
+            RouteStatus::Unresolved,
+        ),
+        (
+            continuity_opaque_mp_reach(false),
+            1,
+            RouteStatus::Unresolved,
+        ),
+        (continuity_opaque_mp_reach(true), 1, RouteStatus::Unresolved),
+        (malformed, 0, RouteStatus::Withdrawn),
+    ] {
+        let scratch = Scratch::new();
+        let mut bytes = continuity_internal_flow(7, true);
+        bytes.extend(message_record(
+            MessageRecordMetadata::new(
+                Bgp4mpMetadata::new(4, 65_551, 65_552, 7),
+                16,
+                4,
+                31,
+                None,
+                false,
+            ),
+            &wire,
+        ));
+        let archive = bgp_mrt_store::create_with_options(
+            &scratch.file("dispositions.mrt"),
+            &bytes,
+            source("continuity"),
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(archive.bgp4mp_rib.gaps().len(), gap);
+        assert_eq!(
+            archive.bgp4mp_rib.entries().values().next().unwrap().status,
+            status
+        );
+    }
+}
+
+fn continuity_opaque_mp_reach(conventional: bool) -> Vec<u8> {
+    let mut wire = continuity_internal_update(true);
+    let attrs = u16::from_be_bytes([wire[21], wire[22]]) as usize;
+    let mp = [0x80, 14, 13, 0, 1, 1, 4, 192, 0, 2, 9, 0, 24, 198, 51, 100];
+    wire.splice(23 + attrs..23 + attrs, mp);
+    wire[21..23].copy_from_slice(&((attrs + mp.len()) as u16).to_be_bytes());
+    if !conventional {
+        wire.truncate(23 + attrs + mp.len());
+    }
+    let length = wire.len() as u16;
+    wire[16..18].copy_from_slice(&length.to_be_bytes());
+    wire
+}
+
+// This CLI witness explicitly requests internal replay and must therefore
+// supply LOCAL_PREF on both generations' valid announcements.
+fn continuity_internal_cli_fixture() -> Vec<u8> {
+    let mut bytes = two_generation_fixture();
+    let mut at = 0;
+    while at < bytes.len() {
+        let record_type = u16::from_be_bytes(bytes[at + 4..at + 6].try_into().unwrap());
+        let subtype = u16::from_be_bytes(bytes[at + 6..at + 8].try_into().unwrap());
+        let mut body_length =
+            u32::from_be_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+        if matches!(subtype, 4 | 7) {
+            let message = at + 12 + usize::from(record_type == 17) * 4 + 20;
+            if bytes[message + 18] == 2 {
+                let attrs =
+                    u16::from_be_bytes(bytes[message + 21..message + 23].try_into().unwrap())
+                        as usize;
+                bytes.splice(
+                    message + 23 + attrs..message + 23 + attrs,
+                    [0x40, 5, 4, 0, 0, 0, 100],
+                );
+                bytes[message + 21..message + 23]
+                    .copy_from_slice(&((attrs + 7) as u16).to_be_bytes());
+                let length =
+                    u16::from_be_bytes(bytes[message + 16..message + 18].try_into().unwrap());
+                bytes[message + 16..message + 18].copy_from_slice(&(length + 7).to_be_bytes());
+                body_length += 7;
+                bytes[at + 8..at + 12].copy_from_slice(&(body_length as u32).to_be_bytes());
+            }
+        }
+        at += 12 + body_length;
+    }
+    bytes
 }

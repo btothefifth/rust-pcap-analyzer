@@ -95,7 +95,7 @@ def main(argv=None):
             run(name, 'portable_contracts', command)
         run('catalog-audit','case_maintenance',[sys.executable,'-m','tools.research','audit','--root',str(root)])
         node=shutil.which('node')
-        cmd=[node or 'node','--test','desktop/web/model.test.mjs']
+        cmd=[node or 'node','--test','desktop/web/model.test.mjs','desktop/web/app.test.mjs']
         if node:run('gui-model-tests','javascript_models',cmd)
         else:blocked('gui-model-tests','javascript_models','Node is unavailable',cmd)
         if args.gui_render:

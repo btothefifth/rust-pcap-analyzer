@@ -141,6 +141,9 @@ class ValidationFrontier(unittest.TestCase):
                     result = driver.main(['--output',str(output)]) if driver is validate_product else driver.run(output)
                 self.assertEqual(result,1)
                 self.assertTrue(any('scripts/test_package_contract.py' in command for command in observed))
+                javascript = next(command for command in observed if '--test' in command)
+                self.assertIn('desktop/web/model.test.mjs', javascript)
+                self.assertIn('desktop/web/app.test.mjs', javascript)
                 self.assertFalse(any(Path(command[0]).name in {'cargo','cc','cl'} for command in observed))
                 self.assertFalse(any('scripts/validate_semantic_product.py' in command or 'scripts/check_linked_abi.py' in command for command in observed))
                 if driver is validate_product:

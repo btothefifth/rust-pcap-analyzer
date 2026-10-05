@@ -2030,7 +2030,13 @@ fn parse_attributes(
                 false
             }
         };
-        if matches!(code, 3 | 14) && seen_codes.contains(&3) && seen_codes.contains(&14) {
+        if matches!(code, 3 | 14)
+            && seen_codes.contains(&3)
+            && seen_codes.contains(&14)
+            && interpretation != "opaque_family_capability_or_add_path_layout"
+        {
+            // Mixed next-hop diagnostics must not erase the unresolved MP
+            // route layout consumed by UPDATE continuity admission.
             interpretation = "unresolved_next_hop_context";
         }
         let expected_flags = attribute_flags(code);
