@@ -456,17 +456,17 @@ fn build_archive(
             }
         };
         let container_index = source_events.len();
-        let container = ImportedSourceEvent {
-            source_id: batch.source.source_id.clone(),
-            checkpoint_id: batch.source.checkpoint_id.clone(),
-            native_continuity: Vec::new(),
-            source_record_index: index,
-            observation_index: None,
-            kind: container_kind,
-            context: None,
-            continuity_cuts: cuts,
-            reference: replay.event.clone(),
-        };
+        let container = ImportedSourceEvent::new(
+            batch.source.source_id.clone(),
+            batch.source.checkpoint_id.clone(),
+            index,
+            None,
+            container_kind,
+            None,
+            cuts,
+            Vec::new(),
+            replay.event.clone(),
+        )?;
         retain_imported_event(
             container,
             &mut source_events,
@@ -529,17 +529,17 @@ fn build_archive(
                 copy_work,
                 &limits,
             )?;
-            let source_event = ImportedSourceEvent {
-                source_id: batch.source.source_id.clone(),
-                checkpoint_id: batch.source.checkpoint_id.clone(),
-                native_continuity: Vec::new(),
-                source_record_index: index,
-                observation_index: Some(observations.len()),
-                kind: source_kind,
-                context: Some(context.clone()),
-                continuity_cuts: Vec::new(),
-                reference: replay.event.clone(),
-            };
+            let source_event = ImportedSourceEvent::new(
+                batch.source.source_id.clone(),
+                batch.source.checkpoint_id.clone(),
+                index,
+                Some(observations.len()),
+                source_kind,
+                Some(context.clone()),
+                Vec::new(),
+                Vec::new(),
+                replay.event.clone(),
+            )?;
             retain_imported_event(
                 source_event,
                 &mut source_events,
@@ -607,11 +607,12 @@ fn build_archive(
                 &limits,
             )?;
         }
-        let native_bytes = native_continuity
-            .iter()
-            .try_fold(0usize, |n, e| n.checked_add(e.retained_charge()))
-            .and_then(|n| n.checked_mul(6))
-            .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+        let native_bytes = super::bgp_import::native_continuity_charge(
+            &native_continuity,
+            "bmp_source_event_retained",
+        )?
+        .checked_mul(6)
+        .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
         // Move the admitted collector into its original container occurrence.
         retained = retained
             .checked_add(native_bytes)
@@ -684,11 +685,10 @@ fn imported_precopy_footprint(
     effects: &[super::bgp_import::ImportedNativeContinuity],
     native_work_before: usize,
 ) -> Result<(usize, usize)> {
-    let carrier = effects
-        .iter()
-        .try_fold(0usize, |n, e| n.checked_add(e.retained_charge()))
-        .and_then(|n| n.checked_mul(6))
-        .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
+    let carrier =
+        super::bgp_import::native_continuity_charge(effects, "bmp_source_event_retained")?
+            .checked_mul(6)
+            .ok_or_else(|| Error::limit("bmp_source_event_retained"))?;
     let retained = retained
         .checked_add(rib.retained_bytes())
         .and_then(|n| n.checked_add(carrier))
@@ -734,13 +734,10 @@ fn imported_event_charge(event: &super::bgp_import::ImportedSourceEvent) -> Resu
         context_bytes
             .saturating_add(event.source_id.len())
             .saturating_add(event.checkpoint_id.len())
-            .saturating_add(
-                event
-                    .native_continuity
-                    .iter()
-                    .map(|e| e.retained_charge())
-                    .sum::<usize>(),
-            ),
+            .saturating_add(super::bgp_import::native_continuity_charge(
+                &event.native_continuity,
+                "bmp_source_event_retained",
+            )?),
         cut_bytes,
     )
 }

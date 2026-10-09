@@ -173,15 +173,36 @@ impl ImportedNativeContinuity {
         ])
     }
     pub fn retained_charge(&self) -> usize {
-        std::mem::size_of::<Self>()
-            .saturating_add(self.scope.source.source_id.len())
-            .saturating_add(self.scope.source.partition_id.len())
-            .saturating_add(self.scope.session.len())
-            .saturating_add(self.scope.peer.as_ref().map_or(0, String::len))
-            .saturating_add(self.record_id.len())
-            .saturating_add(self.reason.len())
+        native_continuity_parts_charge(&self.scope, &self.record_id, &self.reason)
     }
 }
+
+// One logical carrier representation is shared by native preparation and both
+// source-store collectors. Format-specific escaping factors remain at callers.
+fn native_continuity_parts_charge(
+    scope: &super::bgp_rib::RibScope,
+    record_id: &str,
+    reason: &str,
+) -> usize {
+    std::mem::size_of::<ImportedNativeContinuity>()
+        .saturating_add(scope.source.source_id.len())
+        .saturating_add(scope.source.partition_id.len())
+        .saturating_add(scope.session.len())
+        .saturating_add(scope.peer.as_ref().map_or(0, String::len))
+        .saturating_add(record_id.len())
+        .saturating_add(reason.len())
+}
+
+pub(crate) fn native_continuity_charge(
+    effects: &[ImportedNativeContinuity],
+    field: &'static str,
+) -> Result<usize> {
+    effects
+        .iter()
+        .try_fold(0usize, |n, effect| n.checked_add(effect.retained_charge()))
+        .ok_or_else(|| Error::limit(field))
+}
+
 /// The native owner supplies the effect before commit. Admit the retained
 /// carrier against the complete prospective replay footprint before copying it.
 /// Admission is (external retained, total work including all committed native
@@ -202,17 +223,10 @@ pub(crate) fn apply_native_event(
     };
     let status = plan.status();
     let added = plan.continuity_effect().map_or(0, |effect| {
-        std::mem::size_of::<ImportedNativeContinuity>()
-            .saturating_add(effect.scope.source.source_id.len())
-            .saturating_add(effect.scope.source.partition_id.len())
-            .saturating_add(effect.scope.session.len())
-            .saturating_add(effect.scope.peer.as_ref().map_or(0, String::len))
-            .saturating_add(effect.record_id.len())
-            .saturating_add(effect.reason.len())
+        native_continuity_parts_charge(effect.scope, effect.record_id, effect.reason)
     });
-    let charge = effects
-        .iter()
-        .try_fold(added, |n, e| n.checked_add(e.retained_charge()))
+    let charge = native_continuity_charge(effects, "bgp_import_native_continuity")?
+        .checked_add(added)
         .ok_or_else(|| Error::limit("bgp_import_native_continuity"))?;
     if (added != 0 && effects.len() >= limits.elements)
         || charge
@@ -268,6 +282,68 @@ pub struct ImportedSourceEvent {
     pub reference: Json,
 }
 
+impl ImportedSourceEvent {
+    /// Construct one source occurrence from explicit producer-owned parts.
+    ///
+    /// This checks enclosing labels and attached source identity. It does not
+    /// equate context checkpoints with the enclosing checkpoint: collector
+    /// contexts may use a more specific partition. It does not infer a kind, bind an
+    /// observation ordinal, authenticate a source, or create native effects.
+    /// Contexts and native effects remain the checked producer's responsibility;
+    /// archive owners must admit any required copies before calling this method.
+    /// Public fields remain available for existing callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source_id: String,
+        checkpoint_id: String,
+        source_record_index: usize,
+        observation_index: Option<usize>,
+        kind: ImportedSourceEventKind,
+        context: Option<ImportContext>,
+        continuity_cuts: Vec<ImportContinuityCut>,
+        native_continuity: Vec<ImportedNativeContinuity>,
+        reference: Json,
+    ) -> Result<Self> {
+        // Raw-source labels use a fixed cap independent of the wire-input cap.
+        // A short opaque record can legitimately have a longer caller label.
+        identity_limit(&source_id, 1024)?;
+        identity_limit(&checkpoint_id, 1024)?;
+        for attached in context
+            .iter()
+            .chain(continuity_cuts.iter().map(|cut| &cut.context))
+        {
+            if attached.source_id != source_id {
+                return Err(bad(
+                    "bgp_import_source_event_identity",
+                    source_record_index,
+                    "source occurrence context differs from source identity",
+                ));
+            }
+        }
+        if native_continuity
+            .iter()
+            .any(|effect| effect.scope.source.source_id != source_id)
+        {
+            return Err(bad(
+                "bgp_import_source_event_identity",
+                source_record_index,
+                "native continuity differs from source identity",
+            ));
+        }
+        Ok(Self {
+            source_id,
+            checkpoint_id,
+            native_continuity,
+            source_record_index,
+            observation_index,
+            kind,
+            context,
+            continuity_cuts,
+            reference,
+        })
+    }
+}
+
 /// Separate checkpoint/batch namespaces never act as continuation of each other.
 /// Clock and record spans are record metadata, not partition selection inputs.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -300,7 +376,10 @@ fn optional_u64(v: &Json) -> Result<Option<u64>> {
     }
 }
 fn identity(s: &str, l: &Limits) -> Result<()> {
-    if s.len() > l.input_bytes.min(1024) {
+    identity_limit(s, l.input_bytes.min(1024))
+}
+fn identity_limit(s: &str, maximum: usize) -> Result<()> {
+    if s.len() > maximum {
         return Err(Error::limit("bgp_import_metadata"));
     }
     if s.trim().is_empty() || s.chars().any(char::is_control) {
@@ -1077,5 +1156,196 @@ mod native_continuity_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod source_event_construction_tests {
+    use super::*;
+
+    fn context() -> ImportContext {
+        ImportContext {
+            source_id: "collector-source".into(),
+            source_schema: "collector-schema".into(),
+            source_version: None,
+            clock: ObservationClock::default(),
+            batch: SourceBatch {
+                batch_id: Some("batch-a".into()),
+                sha256: None,
+                byte_length: None,
+            },
+            checkpoint_id: "checkpoint-a:24:7".into(),
+            session: "session-a".into(),
+            generation: 3,
+            direction: None,
+            peer: Some("peer-a".into()),
+            local: None,
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_inert_occurrence_preserves_refined_context_and_reference() {
+        let context = context();
+        let reference = Json::object([("record", "raw-source-witness".into())]);
+        let event = ImportedSourceEvent::new(
+            "collector-source".into(),
+            "checkpoint-a".into(),
+            5,
+            Some(9),
+            ImportedSourceEventKind::Update,
+            Some(context.clone()),
+            Vec::new(),
+            Vec::new(),
+            reference.clone(),
+        )
+        .unwrap();
+        assert_eq!(event.source_id, "collector-source");
+        assert_eq!(event.checkpoint_id, "checkpoint-a");
+        assert_eq!(event.source_record_index, 5);
+        assert_eq!(event.observation_index, Some(9));
+        assert_eq!(event.kind, ImportedSourceEventKind::Update);
+        assert_eq!(event.context, Some(context));
+        assert!(event.continuity_cuts.is_empty());
+        assert!(event.native_continuity.is_empty());
+        assert_eq!(event.reference, reference);
+    }
+
+    #[test]
+    fn enclosing_labels_use_raw_source_cap_and_refuse_invalid_identities() {
+        // Raw-source identity is independent of the wire-input budget.
+        let exact = "s".repeat(1024);
+        assert!(ImportedSourceEvent::new(
+            exact.clone(),
+            exact,
+            0,
+            None,
+            ImportedSourceEventKind::Opaque,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Json::Null,
+        )
+        .is_ok());
+        for label in [
+            String::new(),
+            " ".into(),
+            "bad\nlabel".into(),
+            "s".repeat(1025),
+        ] {
+            for source in [true, false] {
+                let (source_id, checkpoint_id) = if source {
+                    (label.clone(), "checkpoint-a".into())
+                } else {
+                    ("collector-source".into(), label.clone())
+                };
+                assert!(ImportedSourceEvent::new(
+                    source_id,
+                    checkpoint_id,
+                    0,
+                    None,
+                    ImportedSourceEventKind::Opaque,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    Json::Null,
+                )
+                .is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn contexts_and_cuts_cannot_cross_source_identity() {
+        let mut foreign = context();
+        foreign.source_id = "another-source".into();
+        for cut in [false, true] {
+            let (attached, cuts) = if cut {
+                (
+                    None,
+                    vec![ImportContinuityCut {
+                        context: foreign.clone(),
+                        record_id: "gap-a".into(),
+                        reason: "partial-source".into(),
+                    }],
+                )
+            } else {
+                (Some(foreign.clone()), Vec::new())
+            };
+            let error = ImportedSourceEvent::new(
+                "collector-source".into(),
+                "checkpoint-a".into(),
+                5,
+                None,
+                ImportedSourceEventKind::ContinuityGap,
+                attached,
+                cuts,
+                Vec::new(),
+                Json::Null,
+            )
+            .unwrap_err();
+            assert_eq!(error.field, "bgp_import_source_event_identity");
+        }
+    }
+
+    #[test]
+    fn native_effects_preserve_reducer_decision_and_refuse_foreign_source() {
+        use crate::deep::bgp_rib::{AdjRibIn, RibEvent, RibEventKind, RibScope};
+        use crate::deep::bgp_session::SourcePartition;
+        let limits = Limits::default();
+        let context = context();
+        let mut rib = AdjRibIn::for_embedded_projection(limits.clone()).unwrap();
+        let mut effects = Vec::new();
+        apply_native_event(
+            &mut rib,
+            RibEvent {
+                scope: RibScope {
+                    source: SourcePartition::from_import_context(&context, &limits).unwrap(),
+                    session: context.session.clone(),
+                    generation: context.generation,
+                    direction: context.direction,
+                    peer: context.peer.clone(),
+                },
+                record_id: "gap-a".into(),
+                kind: RibEventKind::Gap {
+                    reason: "partial-source".into(),
+                },
+            },
+            None,
+            &mut effects,
+            (0, 0, 1, 1),
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(effects.len(), 1);
+        let original = effects[0].clone();
+        let event = ImportedSourceEvent::new(
+            "collector-source".into(),
+            "checkpoint-a".into(),
+            5,
+            None,
+            ImportedSourceEventKind::ContinuityGap,
+            Some(context),
+            Vec::new(),
+            effects,
+            Json::Null,
+        )
+        .unwrap();
+        assert_eq!(event.native_continuity, vec![original]);
+        let mut foreign = event.native_continuity;
+        foreign[0].scope.source.source_id = "another-source".into();
+        let error = ImportedSourceEvent::new(
+            "collector-source".into(),
+            "checkpoint-a".into(),
+            5,
+            None,
+            ImportedSourceEventKind::ContinuityGap,
+            None,
+            Vec::new(),
+            foreign,
+            Json::Null,
+        )
+        .unwrap_err();
+        assert_eq!(error.field, "bgp_import_source_event_identity");
     }
 }

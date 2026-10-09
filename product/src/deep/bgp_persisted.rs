@@ -264,6 +264,7 @@ fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
 }
 
 pub mod query;
+mod replay;
 pub use query::*;
 pub mod analysis;
 #[derive(Clone, Debug)]
@@ -463,6 +464,86 @@ type NativePolicyScope = (
     Option<(String, u64, Option<String>)>,
     PrefixIdentity,
 );
+// Only an exact source/scope/occurrence binding may supply a rejection row.
+// Reused captured record labels require the journal and lifecycle occurrence;
+// imported labels additionally require the source partition from replay context.
+struct RejectionOccurrence<'a> {
+    observation: &'a Observation,
+    capture_evidence: Option<&'a bgp_store::CapturedObservationEvidence>,
+}
+fn rejection_scope_matches(o: &Observation, rejection: &super::bgp_rib::RejectedRecord) -> bool {
+    o.source().source_id == rejection.key.scope.source.source_id
+        && o.source().session.as_deref() == Some(&rejection.key.scope.session)
+        && o.source().generation == Some(rejection.key.scope.generation)
+        && o.source().direction == rejection.key.scope.direction
+        && o.source().peer == rejection.key.scope.peer
+        && o.source().record_id == rejection.record_id
+}
+fn bind_rejection_occurrence<'a>(
+    rejection: &super::bgp_rib::RejectedRecord,
+    captured: Option<&bgp_store::CapturedRejection>,
+    observations: &'a [Observation],
+    captured_observation_evidence: &'a [bgp_store::CapturedObservationEvidence],
+    namespace: &str,
+    limits: &Limits,
+) -> Result<RejectionOccurrence<'a>> {
+    let occurrence = if let Some(captured) = captured {
+        let observation = observations
+            .get(captured.observation_index)
+            .ok_or_else(|| bad("bgp_persisted_rejection", 0, "source observation missing"))?;
+        let evidence = captured_observation_evidence
+            .get(captured.observation_index)
+            .ok_or_else(|| bad("bgp_persisted_rejection", 0, "captured occurrence missing"))?;
+        if rejection.key.scope.source.kind != PartitionKind::Captured
+            || rejection.key.scope.source.partition_id != namespace
+            || !rejection_scope_matches(observation, rejection)
+            || !observation.routes().iter().any(|route| {
+                route.ambiguous_attributes()
+                    && route.prefix() == &rejection.key.prefix
+                    && route.prefix().afi == rejection.key.family.afi
+                    && route.prefix().safi == rejection.key.family.safi
+                    && match (route.path_id(), rejection.key.path_id) {
+                        (super::bgp_state::RoutePathId::Absent, PathId::Absent) => true,
+                        (super::bgp_state::RoutePathId::Present(a), PathId::Present(b)) => a == b,
+                        _ => false,
+                    }
+            })
+        {
+            return Err(bad(
+                "bgp_persisted_rejection",
+                0,
+                "captured source scope mismatch",
+            ));
+        }
+        RejectionOccurrence {
+            observation,
+            capture_evidence: Some(evidence),
+        }
+    } else {
+        let observation = observations
+            .iter()
+            .find(|o| rejection_scope_matches(o, rejection))
+            .ok_or_else(|| bad("bgp_persisted_rejection", 0, "source observation missing"))?;
+        let context = observation
+            .import_context()
+            .ok_or_else(|| bad("bgp_persisted_rejection", 0, "import context missing"))?;
+        if super::bgp_session::SourcePartition::from_import_context(context, limits)?
+            != rejection.key.scope.source
+        {
+            return Err(bad(
+                "bgp_persisted_rejection",
+                0,
+                "source partition mismatch",
+            ));
+        }
+        RejectionOccurrence {
+            observation,
+            capture_evidence: None,
+        }
+    };
+    Ok(occurrence)
+}
+
 impl VerifiedStore {
     pub fn load(
         path: &Path,
@@ -471,281 +552,21 @@ impl VerifiedStore {
         limits: Limits,
         options: bgp_mrt_store::MrtReplayOptions,
     ) -> Result<Self> {
-        limits.validate()?;
-        let mut f = File::open(path)?;
-        if !f.metadata()?.is_file() || f.metadata()?.len() > maximum {
-            return Err(Error::limit("bgp_store_disk"));
-        }
-        let mut magic = [0u8; 8];
-        f.read_exact(&mut magic)?;
-        drop(f);
-        let mut source_events = Vec::new();
-        let mut captured_source_events = Vec::new();
-        let mut imported_source_events = Vec::new();
-        let mut captured_rejections = Vec::new();
-        let mut captured_entry_evidence = Vec::new();
-        let mut captured_observation_evidence = Vec::new();
-        let (receipt, digest, namespace, entries, rejections, observations, collector) = if &magic
-            == bgp_store::MAGIC
-        {
-            if options.peer_relationship.is_some() {
-                return Err(bad(
-                    "bgp_persisted_options",
-                    0,
-                    "capture replay does not accept imported relationship override",
-                ));
-            }
-            let a = bgp_store::replay(path, maximum, limits.clone())?;
-            let mut event_bytes = 0usize;
-            let mut event_nodes = 0usize;
-            for event in &a.source_events {
-                if let Some(c) = &event.continuity {
-                    let o = a.observations.get(c.observation_index).ok_or_else(|| {
-                        bad("bgp_persisted_continuity", 0, "bound observation missing")
-                    })?;
-                    let evidence =
-                        a.observation_evidence
-                            .get(c.observation_index)
-                            .ok_or_else(|| {
-                                bad(
-                                    "bgp_persisted_continuity",
-                                    0,
-                                    "bound journal evidence missing",
-                                )
-                            })?;
-                    if o.sha256() != c.observation_sha256
-                        || evidence.source_record_index != event.source_record_index
-                        || evidence.journal_record_sha256 != event.journal_record_sha256
-                        || evidence.source_start != event.source_start
-                        || evidence.source_end != event.source_end
-                        || event.scopes.len() != 1
-                        || event.scopes[0].lifecycle != evidence.lifecycle
-                        || o.source().session.as_deref() != Some(c.decision.scope.session.as_str())
-                        || c.decision.scope.session != event.scopes[0].session.to_string()
-                        || c.decision.scope.source.source_id != o.source().source_id
-                        || c.decision.scope.source.partition_id
-                            != format!(
-                                "capture-namespace-sha256:{}",
-                                sha256::hex(&a.receipt.capture_namespace)
-                            )
-                    {
-                        return Err(bad(
-                            "bgp_persisted_continuity",
-                            0,
-                            "decoded boundary occurrence binding mismatch",
-                        ));
-                    }
-                }
-                // Typed archive bounds its own shape; admit consumer copy before serialization.
-                let size = event.retained_charge();
-                event_bytes = event_bytes
-                    .checked_add(size.saturating_mul(6))
-                    .ok_or_else(|| Error::limit("bgp_persisted_source_events"))?;
-                if event_bytes > limits.retained_bytes
-                    || event_bytes > limits.work
-                    || source_events.len() >= limits.elements
-                {
-                    return Err(Error::limit("bgp_persisted_source_events"));
-                }
-                event_nodes = event_nodes
-                    .checked_add(event.projection_nodes())
-                    .ok_or_else(|| Error::limit("bgp_persisted_source_events"))?;
-                if event_nodes > limits.fields || event.projection_depth() > limits.depth {
-                    return Err(Error::limit("bgp_persisted_source_events"));
-                }
-                source_events.push(event.json());
-            }
-            captured_source_events = a.source_events;
-            captured_rejections = a.route_rejections;
-            captured_entry_evidence = a.route_entry_evidence;
-            captured_observation_evidence = a.observation_evidence;
-            let digest = sha256::hex(&a.receipt.terminal_sha256);
-            let namespace = format!(
-                "capture-namespace-sha256:{}",
-                sha256::hex(&a.receipt.capture_namespace)
-            );
-            (
-                a.receipt.json(),
-                digest,
-                namespace,
-                a.route_entries,
-                Vec::new(),
-                a.observations,
-                Vec::new(),
-            )
-        } else if &magic == bgp_mrt_store::MAGIC {
-            let a = bgp_mrt_store::replay_with_options(
-                path,
-                maximum,
-                mrt_limits,
-                limits.clone(),
-                options,
-            )?;
-            preflight_native_clone(&a.bgp4mp_rib, a.state.observations(), &limits)?;
-            let mut collector = Vec::new();
-            let mut collector_bytes = 0usize;
-            for c in &a.candidates {
-                let o = a.candidate_observation(c)?;
-                let r = &o.routes()[c.route_index];
-                collector_bytes = collector_bytes
-                    .checked_add(
-                        r.attributes()
-                            .encoded_len_bounded(limits.retained_bytes)?
-                            .saturating_mul(3)
-                            .saturating_add(4096),
-                    )
-                    .ok_or_else(|| Error::limit("bgp_persisted_collector"))?;
-                if collector.len() >= limits.elements
-                    || collector_bytes > limits.retained_bytes
-                    || collector_bytes > limits.work
-                {
-                    return Err(Error::limit("bgp_persisted_collector"));
-                }
-                let p = super::bgp_session::SourcePartition::from_import_context(
-                    o.import_context()
-                        .ok_or_else(|| bad("bgp_persisted_import", 0, "context missing"))?,
-                    &limits,
-                )?;
-                let key = RouteKey {
-                    scope: super::bgp_rib::RibScope {
-                        source: p,
-                        session: c.session.clone(),
-                        generation: o.source().generation.unwrap_or(0),
-                        direction: None,
-                        peer: c.peer.clone(),
-                    },
-                    family: Family {
-                        afi: c.prefix.afi,
-                        safi: c.prefix.safi,
-                    },
-                    path_id: match c.path_id {
-                        super::bgp_state::RoutePathId::Absent => PathId::Absent,
-                        super::bgp_state::RoutePathId::Present(v) => PathId::Present(v),
-                    },
-                    prefix: c.prefix.clone(),
-                };
-                let imported_namespace = format!(
-                    "mrt-source-sha256:{}:checkpoint:{}",
-                    sha256::hex(&a.receipt.source_sha256),
-                    a.receipt.checkpoint_id
-                );
-                let occurrence_charge = o
-                    .normalized()
-                    .encoded_len_bounded(limits.retained_bytes)?
-                    .saturating_add(4096)
-                    .saturating_mul(8);
-                collector_bytes = collector_bytes
-                    .checked_add(occurrence_charge)
-                    .ok_or_else(|| Error::limit("bgp_persisted_collector"))?;
-                if collector_bytes > limits.retained_bytes || collector_bytes > limits.work {
-                    return Err(Error::limit("bgp_persisted_collector"));
-                }
-                let clock = o.import_context().expect("checked context").clock.clone();
-                let occurrence_ref =
-                    occurrence_reference(o, c.route_index, &key, None, &imported_namespace, &clock);
-                let encoded_identity = r.attribute_identity().encode_bounded(limits.input_bytes)?;
-                let attribute_identity = format!(
-                    "sha256:{}",
-                    sha256::hex(&sha256::digest(encoded_identity.as_bytes()))
-                );
-                let version_occurrences = Json::array([Json::object([
-                    ("attribute_identity", attribute_identity.clone().into()),
-                    ("disposition", "collector_candidate".into()),
-                    ("native_version_index", Json::Null),
-                    ("origin_binding", "unavailable_collector_candidate".into()),
-                    ("occurrences", Json::array([occurrence_ref.clone()])),
-                ])]);
-                let selector_versions = vec![SelectorVersion {
-                    native_version_index: None,
-                    attribute_identity,
-                    disposition: VersionDisposition::Conflicting,
-                    occurrences: vec![SelectorOccurrence {
-                        native_event_index: None,
-                        observation_index: c.observation_index,
-                        route_index: c.route_index,
-                        occurrence_ref,
-                        clock,
-                        observed_at_ns: c.observed_at_ns,
-                    }],
-                }];
-                collector.push(RouteRow {
-                    id: format!("collector:{}:{}", c.record_index, c.entry_index),
-                    key,
-                    status: RouteStatus::Unresolved,
-                    collector: true,
-                    current: false,
-                    lifecycle: None,
-                    original_partition: None,
-                    alternatives: Json::array([Json::object([
-                        ("attributes", r.attributes().clone()),
-                        ("observation_sha256", sha256::hex(&o.sha256()).into()),
-                        ("record_id", c.record_id.clone().into()),
-                    ])]),
-                    version_occurrences,
-                    selector_versions,
-                    attributes: None,
-                    witnesses: vec![c.record_id.clone()],
-                    checkpoint: Some(c.checkpoint_id.clone()),
-                    clock: o.import_context().expect("checked context").clock.clone(),
-                    observed_at_ns: c.observed_at_ns,
-                    rejection: None,
-                });
-            }
-            // Finish archive-owned candidate validation before moving its vectors.
-            imported_source_events = a.source_events;
-            source_events = a.bgp4mp_events;
-            let digest = sha256::hex(&a.receipt.terminal_sha256);
-            let namespace = format!(
-                "mrt-source-sha256:{}:checkpoint:{}",
-                sha256::hex(&a.receipt.source_sha256),
-                a.receipt.checkpoint_id
-            );
-            (
-                a.receipt.json(),
-                digest,
-                namespace,
-                a.bgp4mp_rib.entries().values().cloned().collect(),
-                a.bgp4mp_rib.rejections().to_vec(),
-                a.state.observations().to_vec(),
-                collector,
-            )
-        } else if &magic == bgp_bmp_store::MAGIC {
-            let bmp_limits = bmp_profile(&mrt_limits);
-            let a = bgp_bmp_store::replay_with_options(
-                path,
-                maximum,
-                bmp_limits,
-                limits.clone(),
-                bgp_bmp_store::BmpReplayOptions {
-                    peer_relationship: options.peer_relationship,
-                },
-            )?;
-            preflight_native_clone(&a.bmp_rib, a.state.observations(), &limits)?;
-            imported_source_events = a.source_events;
-            source_events = a.bmp_events;
-            let digest = sha256::hex(&a.receipt.terminal_sha256);
-            let namespace = format!(
-                "bmp-source-sha256:{}:checkpoint:{}",
-                sha256::hex(&a.receipt.source_sha256),
-                a.receipt.checkpoint_id
-            );
-            (
-                a.receipt.json(),
-                digest,
-                namespace,
-                a.bmp_rib.entries().values().cloned().collect(),
-                a.bmp_rib.rejections().to_vec(),
-                a.state.observations().to_vec(),
-                Vec::new(),
-            )
-        } else {
-            return Err(Error::new(
-                ErrorCode::BadMagic,
-                0,
-                "bgp_store_magic",
-                "sealed captured/MRT/BMP source store required",
-            ));
-        };
+        let replay::ReplayInputs {
+            receipt,
+            digest,
+            namespace,
+            entries,
+            rejections,
+            observations,
+            collector,
+            source_events,
+            captured_source_events,
+            imported_source_events,
+            captured_rejections,
+            captured_entry_evidence,
+            captured_observation_evidence,
+        } = replay::ReplayInputs::read(path, maximum, mrt_limits, &limits, options)?;
         let mut rows = collector;
         let mut occurrence_count = rows
             .iter()
@@ -1036,75 +857,17 @@ impl VerifiedStore {
             if materialized_bytes > limits.retained_bytes || materialized_bytes > limits.work {
                 return Err(Error::limit("bgp_persisted_rows"));
             }
-            let (observation, capture_evidence) = if let Some(captured) = captured {
-                let observation =
-                    observations
-                        .get(captured.observation_index)
-                        .ok_or_else(|| {
-                            bad("bgp_persisted_rejection", 0, "source observation missing")
-                        })?;
-                let evidence = captured_observation_evidence
-                    .get(captured.observation_index)
-                    .ok_or_else(|| {
-                        bad("bgp_persisted_rejection", 0, "captured occurrence missing")
-                    })?;
-                if rejection.key.scope.source.kind != PartitionKind::Captured
-                    || rejection.key.scope.source.partition_id != namespace
-                    || observation.source().source_id != rejection.key.scope.source.source_id
-                    || observation.source().session.as_deref() != Some(&rejection.key.scope.session)
-                    || observation.source().generation != Some(rejection.key.scope.generation)
-                    || observation.source().direction != rejection.key.scope.direction
-                    || observation.source().peer != rejection.key.scope.peer
-                    || observation.source().record_id != rejection.record_id
-                    || !observation.routes().iter().any(|route| {
-                        route.ambiguous_attributes()
-                            && route.prefix() == &rejection.key.prefix
-                            && route.prefix().afi == rejection.key.family.afi
-                            && route.prefix().safi == rejection.key.family.safi
-                            && match (route.path_id(), rejection.key.path_id) {
-                                (super::bgp_state::RoutePathId::Absent, PathId::Absent) => true,
-                                (super::bgp_state::RoutePathId::Present(a), PathId::Present(b)) => {
-                                    a == b
-                                }
-                                _ => false,
-                            }
-                    })
-                {
-                    return Err(bad(
-                        "bgp_persisted_rejection",
-                        0,
-                        "captured source scope mismatch",
-                    ));
-                }
-                (observation, Some(evidence))
-            } else {
-                let observation = observations
-                    .iter()
-                    .find(|o| {
-                        o.source().source_id == rejection.key.scope.source.source_id
-                            && o.source().session.as_deref() == Some(&rejection.key.scope.session)
-                            && o.source().generation == Some(rejection.key.scope.generation)
-                            && o.source().direction == rejection.key.scope.direction
-                            && o.source().peer == rejection.key.scope.peer
-                            && o.source().record_id == rejection.record_id
-                    })
-                    .ok_or_else(|| {
-                        bad("bgp_persisted_rejection", 0, "source observation missing")
-                    })?;
-                let context = observation
-                    .import_context()
-                    .ok_or_else(|| bad("bgp_persisted_rejection", 0, "import context missing"))?;
-                if super::bgp_session::SourcePartition::from_import_context(context, &limits)?
-                    != rejection.key.scope.source
-                {
-                    return Err(bad(
-                        "bgp_persisted_rejection",
-                        0,
-                        "source partition mismatch",
-                    ));
-                }
-                (observation, None)
-            };
+            let RejectionOccurrence {
+                observation,
+                capture_evidence,
+            } = bind_rejection_occurrence(
+                rejection,
+                captured,
+                &observations,
+                &captured_observation_evidence,
+                &namespace,
+                &limits,
+            )?;
             let context = observation.import_context();
             let mut key = rejection.key.clone();
             if let Some(evidence) = capture_evidence {
