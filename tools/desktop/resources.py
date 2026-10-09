@@ -8,6 +8,7 @@ import signal
 import threading
 import time
 import uuid
+from .storage import census, StorageDenied
 
 class WorkerStopped(RuntimeError):
     pass
@@ -95,22 +96,11 @@ class ResourceGuard(AbstractContextManager):
             self.stop("cancelled")
         if time.monotonic() - self.started > self.timeout_seconds:
             self.stop("worker_lifetime_budget")
-        total = 0
-        count = 0
-        for entry in self.directory.iterdir():
-            count += 1
-            if count > 256:
-                self.stop("workspace_file_count_budget")
-                break
-            if entry.is_symlink():
-                self.stop("workspace_symlink_rejected")
-                break
-            try:
-                stat = entry.stat()
-            except FileNotFoundError:
-                continue  # Unique state staging file was atomically published.
-            if entry.is_file():
-                total += stat.st_size
+        try:
+            total = census(self.directory, max_entries=256).bytes
+        except StorageDenied as error:
+            self.stop(str(error))
+            return
         self.peak = max(self.peak, total)
         if total > self.disk_budget:
             self.stop("observed_workspace_disk_budget")

@@ -33,6 +33,10 @@ record/packet hashes. Missing or inexact timestamps do not become zero. Each TCP
 record retains the original TCP header and payload plus contiguous source spans.
 A reconstructed fragmented TCP record may have many original packet witnesses.
 Checksum failures remain observations rather than repaired data.
+Unsupported transport pseudo-header operands produce explicit journal notices
+for outer UDP and TCP; TCP decisions also retain the uncertainty reason in range
+output. Observation mode preserves source bytes without labeling those checksums
+valid or invalid.
 
 The caller must keep the source immutable in a trusted stable filesystem namespace.
 The workspace is created exclusively. The parser does not overwrite captures,
@@ -42,8 +46,11 @@ modify the process. Raw stored TCP may contain private data: keep workspaces loc
 
 ## Tuple, generation and sequence ownership
 
-Keys include ordered endpoints, capture section/interface, VLAN IDs and a bounded
-tunnel path. Tunnel scopes also include outer endpoint identities. A generation
+Keys include ordered endpoints, capture section/interface, the separate optional
+SLL2 link-header interface index, VLAN IDs and a bounded
+tunnel path. Tunnel scopes include canonically ordered outer endpoint identities;
+reverse directions share the same tunnel namespace, while GRE keys and
+VXLAN/Geneve VNIs remain separate. A generation
 identifier is derived from source identity, key, birth frame and generation ordinal.
 It is an analysis identity, not proof of an endpoint's actual connection history.
 
@@ -84,7 +91,19 @@ struct's memory representation.
 Header: `PCHIST01`, u32 body length, body, SHA-256(prefix + body). Body is source
 SHA-256[32], source length u64, length-prefixed canonical configuration. Config begins
 with the engine/policy version string, followed by 15 u64 budgets and one epoch-policy
-byte. Exact field order is in `model::Config::encode` and the independent Python reader.
+byte. The current engine identity is `pcap-evidence-history/2;state-policy/1`;
+older engine identities fail closed and require a fresh source replay. Tuple keys
+encode section u32, container interface u32, canonical link-interface presence
+byte and optional u32 value before VLANs, tunnel path and endpoints. Exact field
+order is in `model::Config::encode` and the independent Python reader.
+
+Engine 2 binds the separate SLL2 link-interface namespace and uses canonical
+bidirectional tunnel identity. Engine 1 stores lack that key representation and
+may contain direction-split tunnel generations. Readers, queries, verification
+and recovery reject the earlier identity with a rebuild reason: retain the
+earlier store as historical evidence and rebuild into a new workspace from its
+immutable original capture. Changing a stored engine label or rehashing an old
+journal cannot migrate its decisions or indexes and is not supported.
 
 Record: u32 payload length, u8 kind, u64 ordinal, body, digest[32]. Payload length
 includes kind + ordinal. Digest domain is `pcap-evidence/history-record/v1\0`, followed
@@ -107,7 +126,11 @@ and both index identities. Temporary sort files and tuple caches are workspace-o
 
 Defaults: 64 hot tuples; 128 generations per tuple; 16 epoch candidates; 2 MiB
 record limit; 32,768 sort entries; merge fan-in 16; 64 KiB query range; 4,096 query
-intervals; 128 MiB logical query-work allowance. Source and logical workspace quotas
+intervals; 128 MiB logical query-work allowance. The interval budget bounds every
+sequential index row fetched, including rows filtered before the requested start
+and the terminating row. Query work charges the fixed index-row bytes separately
+from selected journal bodies, source witness bytes and piece comparisons. Source
+and logical workspace quotas
 default to 1 TiB and can be lowered. The CLI exposes important build budgets; the
 native `Config` exposes every limit. These are limits, not demonstrated capacity.
 
@@ -115,6 +138,11 @@ A tuple eviction spills its complete bounded generation state; later observation
 reload it. The cache never becomes imported authority: restart reconstructs from
 the original source and checks the valid journal prefix. A state store is poisoned
 after failure, rather than continuing after lost eviction state.
+
+Recovery validates EOF after a complete seal or abort; any trailing byte fails,
+including when torn-tail recovery is authorized. That authorization applies only
+to an incomplete final record before a terminal record. Replay comparison omits
+the terminal record so that a clean aborted prefix can produce a new sealed replay.
 
 External sorting uses bounded chunks/fan-in and cooperative cancellation during
 run generation and merge phases. Buffers are bounded and disk charges include

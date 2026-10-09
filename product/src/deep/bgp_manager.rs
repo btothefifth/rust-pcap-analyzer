@@ -170,6 +170,11 @@ impl CapturedSessionManager {
             .map(|pipeline| snapshot(session, pipeline))
     }
 
+    /// Canonical typed candidate state for a currently retained session.
+    pub fn rib(&self, session: u64) -> Option<&super::bgp_rib::AdjRibIn> {
+        self.sessions.get(&session).map(|pipeline| pipeline.rib())
+    }
+
     pub fn end_session(&mut self, session: u64) -> Option<SessionSummary> {
         self.sessions
             .remove(&session)

@@ -12,6 +12,7 @@ use pcap_evidence::{
     sha256, Error, ErrorCode, Result,
 };
 use std::{
+    collections::BTreeMap,
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::Path,
@@ -254,6 +255,211 @@ impl JournalWriter {
     }
 }
 
+/// Source-replay lifecycle and exact normalized occurrence witnesses. These
+/// supplement canonical reducer entries without changing their historical status.
+#[derive(Clone, Debug)]
+pub struct CapturedEntryEvidence {
+    pub lifecycle: u64,
+    pub current: bool,
+    pub observation_sha256: Vec<[u8; 32]>,
+}
+#[derive(Clone, Debug)]
+pub struct CapturedObservationEvidence {
+    pub lifecycle: u64,
+    pub journal_record_sha256: [u8; 32],
+    pub source_record_index: u64,
+    pub source_start: u64,
+    pub source_end: u64,
+}
+
+/// Verified journal-only events unavailable as normalized route observations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapturedSourceEventKind {
+    Gap,
+    Reset,
+    EndSession,
+    Clear,
+    RejectedContainer,
+    DecodedGap,
+    DecodedReset,
+}
+impl CapturedSourceEventKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gap => "gap",
+            Self::Reset => "reset",
+            Self::EndSession => "end_session",
+            Self::Clear => "clear",
+            Self::RejectedContainer => "rejected_container",
+            Self::DecodedGap => "decoded_gap",
+            Self::DecodedReset => "decoded_reset",
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct CapturedSourceEvent {
+    pub kind: CapturedSourceEventKind,
+    pub source_record_index: u64,
+    pub journal_record_sha256: [u8; 32],
+    pub source_start: u64,
+    pub source_end: u64,
+    /// A CLEAR has one scope per actually retained session; empty remains empty.
+    pub scopes: Vec<CapturedSourceScope>,
+    pub record_id: Option<String>,
+    pub cause: Option<String>,
+    pub packet_spans: Vec<SourceSpan>,
+    pub metadata: Option<PcapMetadata>,
+    pub continuity: Option<CapturedDecodedContinuity>,
+}
+/// Exact normalized occurrence binding for a pipeline-owned continuity decision.
+#[derive(Clone, Debug)]
+pub struct CapturedDecodedContinuity {
+    pub observation_index: usize,
+    pub observation_sha256: [u8; 32],
+    pub decision: super::bgp_pipeline::DecodedContinuity,
+}
+#[derive(Clone, Debug)]
+pub struct CapturedSourceScope {
+    pub session: u64,
+    pub lifecycle: u64,
+    pub generation: Option<u64>,
+}
+impl CapturedSourceEvent {
+    /// Conservative typed-storage charge, available without cloning evidence subtrees.
+    pub fn retained_charge(&self) -> usize {
+        1024usize
+            .saturating_add(
+                self.continuity
+                    .as_ref()
+                    .map_or(0, |c| c.decision.retained_charge().saturating_add(256)),
+            )
+            .saturating_add(self.scopes.len().saturating_mul(192))
+            .saturating_add(self.record_id.as_ref().map_or(0, String::len))
+            .saturating_add(self.cause.as_ref().map_or(0, String::len))
+            .saturating_add(self.packet_spans.len().saturating_mul(512))
+            .saturating_add(self.metadata.as_ref().map_or(0, |m| {
+                m.source_id
+                    .len()
+                    .saturating_add(m.record_id.len())
+                    .saturating_add(m.peer.as_ref().map_or(0, String::len))
+                    .saturating_add(m.local.as_ref().map_or(0, String::len))
+                    .saturating_add(256)
+            }))
+    }
+    pub fn projection_nodes(&self) -> usize {
+        14usize
+            .saturating_add(self.scopes.len().saturating_mul(4))
+            .saturating_add(usize::from(self.metadata.is_some()).saturating_mul(6))
+            .saturating_add(self.packet_spans.len().saturating_mul(8))
+            .saturating_add(usize::from(self.continuity.is_some()).saturating_mul(18))
+    }
+    pub fn projection_depth(&self) -> usize {
+        2usize
+            .max(if self.scopes.is_empty() { 2 } else { 4 })
+            .max(if self.metadata.is_some() { 3 } else { 2 })
+            .max(if self.continuity.is_some() { 4 } else { 2 })
+            .max(if self.packet_spans.is_empty() { 2 } else { 5 })
+    }
+    pub fn json(&self) -> Json {
+        let mut value = Json::object([
+            (
+                "schema",
+                if self.continuity.is_some() {
+                    "pcap-evidence.bgp.captured-source-event.v2"
+                } else {
+                    "pcap-evidence.bgp.captured-source-event.v1"
+                }
+                .into(),
+            ),
+            ("event_kind", self.kind.name().into()),
+            ("source_record_index", self.source_record_index.into()),
+            (
+                "journal_record_sha256",
+                sha256::hex(&self.journal_record_sha256).into(),
+            ),
+            ("source_start", self.source_start.into()),
+            ("source_end", self.source_end.into()),
+            (
+                "scopes",
+                Json::array(self.scopes.iter().map(|scope| {
+                    Json::object([
+                        ("session", scope.session.to_string().into()),
+                        ("captured_lifecycle", scope.lifecycle.into()),
+                        (
+                            "generation",
+                            scope.generation.map_or(Json::Null, Json::from),
+                        ),
+                    ])
+                })),
+            ),
+            (
+                "record_id",
+                self.record_id.clone().map_or(Json::Null, Json::from),
+            ),
+            ("cause", self.cause.clone().map_or(Json::Null, Json::from)),
+            (
+                "metadata",
+                self.metadata.as_ref().map_or(Json::Null, |m| {
+                    Json::object([
+                        ("source_id", m.source_id.clone().into()),
+                        ("record_id", m.record_id.clone().into()),
+                        ("direction", m.direction.map_or(Json::Null, Json::from)),
+                        ("peer", m.peer.clone().map_or(Json::Null, Json::from)),
+                        ("local", m.local.clone().map_or(Json::Null, Json::from)),
+                        (
+                            "observed_at_ns",
+                            m.observed_at_ns
+                                .map_or(Json::Null, |v| v.to_string().into()),
+                        ),
+                    ])
+                }),
+            ),
+            (
+                "spans",
+                Json::array(self.packet_spans.iter().map(|span| {
+                    Json::object([
+                        ("start", span.start.into()),
+                        ("end", span.end.into()),
+                        ("packet_start", span.packet_start.into()),
+                        (
+                            "packet",
+                            Json::object([
+                                ("capture", sha256::hex(&span.packet.capture).into()),
+                                ("frame", span.packet.frame.into()),
+                                ("record_offset", span.packet.record_offset.into()),
+                            ]),
+                        ),
+                    ])
+                })),
+            ),
+            ("source_authenticated", false.into()),
+            ("route_action_created", false.into()),
+        ]);
+        if let (Json::Object(fields), Some(c)) = (&mut value, &self.continuity) {
+            fields.push((
+                "decoded_continuity",
+                Json::object([
+                    ("observation_index", c.observation_index.into()),
+                    (
+                        "observation_sha256",
+                        sha256::hex(&c.observation_sha256).into(),
+                    ),
+                    ("decision", c.decision.json()),
+                ]),
+            ));
+        }
+        value
+    }
+}
+/// A native rejected action bound when the reducer first emits it. The index
+/// selects the exact normalized observation and its journal/lifecycle witness;
+/// record labels alone cannot identify reused occurrences.
+#[derive(Clone, Debug)]
+pub struct CapturedRejection {
+    pub rejection: super::bgp_rib::RejectedRecord,
+    pub observation_index: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReplayArchive {
     pub receipt: JournalReceipt,
@@ -261,6 +467,15 @@ pub struct ReplayArchive {
     pub messages: u64,
     pub boundaries: u64,
     pub rejected_records: u64,
+    /// Typed terminal entries sampled from the canonical reducer before each
+    /// session leaves the manager. Reused session labels remain occurrences.
+    pub route_entries: Vec<super::bgp_rib::RouteEntry>,
+    pub route_rejections: Vec<CapturedRejection>,
+    /// Successful normalized observations rebuilt from verified source bytes.
+    pub observations: Vec<super::bgp_state::Observation>,
+    pub route_entry_evidence: Vec<CapturedEntryEvidence>,
+    pub observation_evidence: Vec<CapturedObservationEvidence>,
+    pub source_events: Vec<CapturedSourceEvent>,
 }
 
 impl ReplayArchive {
@@ -329,6 +544,16 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
     let mut manager =
         CapturedSessionManager::new(capture_namespace, source_id.clone(), limits.clone())?;
     let mut sessions = Vec::new();
+    let mut route_entries = Vec::new();
+    let mut route_rejections = Vec::new();
+    let mut observations = Vec::new();
+    let mut route_entry_evidence = Vec::new();
+    let mut observation_evidence = Vec::new();
+    let mut source_events = Vec::new();
+    let mut source_event_spans = 0usize;
+    let mut lifecycles = BTreeMap::<u64, u64>::new();
+    let mut latest_observations = BTreeMap::<(u64, String), [u8; 32]>::new();
+    let mut adapter_bytes = 0usize;
     let mut records = 0u64;
     let mut messages = 0u64;
     let mut boundaries = 0u64;
@@ -382,9 +607,161 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
                 let (session, bytes, metadata) = decoder.message(&source_id, capture_namespace)?;
                 decoder.finish()?;
                 messages = checked_increment(messages, "bgp_journal_messages")?;
-                if manager.apply_message(session, &bytes, metadata).is_err() {
-                    rejected_records =
-                        checked_increment(rejected_records, "bgp_journal_rejected_records")?;
+                let rejection_start = manager.rib(session).map_or(0, |rib| rib.rejections().len());
+                let event_scope = CapturedSourceScope {
+                    session,
+                    lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                    generation: manager.wire_state(session).map(|v| v.generation()),
+                };
+                let event_metadata = metadata.clone();
+                match manager.apply_message(session, &bytes, metadata) {
+                    Ok(receipt) => {
+                        let observation = super::bgp_state::Observation::from_normalized(
+                            &receipt.normalized,
+                            None,
+                            &limits,
+                        )?;
+                        adapter_bytes = adapter_bytes
+                            .checked_add(
+                                receipt
+                                    .normalized
+                                    .encoded_len_bounded(limits.retained_bytes)?
+                                    .checked_mul(3)
+                                    .ok_or_else(|| Error::limit("bgp_journal_adapter"))?,
+                            )
+                            .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+                        if observations.len() >= limits.elements
+                            || adapter_bytes > limits.retained_bytes
+                            || adapter_bytes > limits.work
+                        {
+                            return Err(Error::limit("bgp_journal_adapter"));
+                        }
+                        let key = (session, observation.source().record_id.clone());
+                        let extra =
+                            96usize.saturating_add(if latest_observations.contains_key(&key) {
+                                0
+                            } else {
+                                key.1.len().saturating_add(96)
+                            });
+                        adapter_bytes = adapter_bytes
+                            .checked_add(extra)
+                            .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+                        if adapter_bytes > limits.retained_bytes
+                            || adapter_bytes > limits.work
+                            || latest_observations.len() >= limits.elements
+                        {
+                            return Err(Error::limit("bgp_journal_adapter"));
+                        }
+                        retain_rejections(
+                            &manager,
+                            session,
+                            rejection_start,
+                            observations.len(),
+                            &mut route_rejections,
+                            &mut adapter_bytes,
+                            &limits,
+                        )?;
+                        if let Some(decision) = receipt.continuity {
+                            // Admit the complete borrowed carrier and packet mappings before
+                            // copying any scope, metadata or decision into the source archive.
+                            let charge = 1024usize
+                                .saturating_add(192)
+                                .saturating_add(event_metadata.record_id.len())
+                                .saturating_add(decision.reason.len())
+                                .saturating_add(event_metadata.source_id.len())
+                                .saturating_add(event_metadata.record_id.len())
+                                .saturating_add(event_metadata.peer.as_ref().map_or(0, String::len))
+                                .saturating_add(
+                                    event_metadata.local.as_ref().map_or(0, String::len),
+                                )
+                                .saturating_add(256)
+                                .saturating_add(decision.retained_charge())
+                                .saturating_add(256)
+                                .saturating_add(bytes.spans().len().saturating_mul(512));
+                            source_event_admission(
+                                charge,
+                                source_events.len(),
+                                1,
+                                source_event_spans,
+                                bytes.spans().len(),
+                                adapter_bytes,
+                                &limits,
+                            )?;
+                            let event = CapturedSourceEvent {
+                                kind: if decision.is_reset() {
+                                    CapturedSourceEventKind::DecodedReset
+                                } else {
+                                    CapturedSourceEventKind::DecodedGap
+                                },
+                                source_record_index: records,
+                                journal_record_sha256: actual,
+                                source_start: offset,
+                                source_end: consumed,
+                                scopes: vec![event_scope],
+                                record_id: Some(event_metadata.record_id.clone()),
+                                cause: Some(decision.reason.clone()),
+                                packet_spans: Vec::new(),
+                                metadata: Some(event_metadata),
+                                continuity: Some(CapturedDecodedContinuity {
+                                    observation_index: observations.len(),
+                                    observation_sha256: observation.sha256(),
+                                    decision,
+                                }),
+                            };
+                            retain_source_event(
+                                event,
+                                Some(bytes.spans()),
+                                &mut source_events,
+                                &mut source_event_spans,
+                                &mut adapter_bytes,
+                                &limits,
+                            )?;
+                        }
+                        latest_observations.insert(key, observation.sha256());
+                        observation_evidence.push(CapturedObservationEvidence {
+                            lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                            journal_record_sha256: actual,
+                            source_record_index: records,
+                            source_start: offset,
+                            source_end: consumed,
+                        });
+                        observations.push(observation);
+                    }
+                    Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
+                    Err(error) => {
+                        let event = CapturedSourceEvent {
+                            kind: CapturedSourceEventKind::RejectedContainer,
+                            source_record_index: records,
+                            journal_record_sha256: actual,
+                            source_start: offset,
+                            source_end: consumed,
+                            scopes: vec![event_scope],
+                            record_id: Some(event_metadata.record_id.clone()),
+                            cause: Some(format!("{:?}", error.code)),
+                            packet_spans: Vec::new(),
+                            metadata: Some(event_metadata),
+                            continuity: None,
+                        };
+                        // Charge borrowed packet mappings before copying them into the retained event.
+                        retain_source_event(
+                            event,
+                            Some(bytes.spans()),
+                            &mut source_events,
+                            &mut source_event_spans,
+                            &mut adapter_bytes,
+                            &limits,
+                        )?;
+                        rejected_records =
+                            checked_increment(rejected_records, "bgp_journal_rejected_records")?;
+                        // A rejected source record cannot prove continuous
+                        // candidate state. Retain its sealed bytes and mark only
+                        // the known session as gapped; never invent withdrawal.
+                        manager.observe_gap(
+                            session,
+                            format!("journal-rejected-message:{}", sha256::hex(&actual)),
+                            "sealed_source_message_rejected".into(),
+                        )?;
+                    }
                 }
             }
             GAP | RESET => {
@@ -393,12 +770,44 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
                 let reason = decoder.text("bgp_journal_reason")?;
                 decoder.finish()?;
                 boundaries = checked_increment(boundaries, "bgp_journal_boundaries")?;
+                let event = CapturedSourceEvent {
+                    kind: if kind == GAP {
+                        CapturedSourceEventKind::Gap
+                    } else {
+                        CapturedSourceEventKind::Reset
+                    },
+                    source_record_index: records,
+                    journal_record_sha256: actual,
+                    source_start: offset,
+                    source_end: consumed,
+                    scopes: vec![CapturedSourceScope {
+                        session,
+                        lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                        generation: manager.wire_state(session).map(|v| v.generation()),
+                    }],
+                    record_id: Some(record_id.clone()),
+                    cause: Some(reason.clone()),
+                    packet_spans: Vec::new(),
+                    metadata: None,
+                    continuity: None,
+                };
+                retain_source_event(
+                    event,
+                    None,
+                    &mut source_events,
+                    &mut source_event_spans,
+                    &mut adapter_bytes,
+                    &limits,
+                )?;
                 let result = if kind == GAP {
                     manager.observe_gap(session, record_id, reason)
                 } else {
                     manager.reset_generation(session, record_id, reason)
                 };
-                if result.is_err() {
+                if let Err(error) = result {
+                    if error.code == ErrorCode::LimitExceeded {
+                        return Err(error);
+                    }
                     rejected_records =
                         checked_increment(rejected_records, "bgp_journal_rejected_records")?;
                 }
@@ -406,14 +815,110 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
             END => {
                 let session = decoder.u64()?;
                 decoder.finish()?;
+                retain_source_event(
+                    CapturedSourceEvent {
+                        kind: CapturedSourceEventKind::EndSession,
+                        source_record_index: records,
+                        journal_record_sha256: actual,
+                        source_start: offset,
+                        source_end: consumed,
+                        scopes: vec![CapturedSourceScope {
+                            session,
+                            lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                            generation: manager.wire_state(session).map(|v| v.generation()),
+                        }],
+                        record_id: None,
+                        cause: None,
+                        packet_spans: Vec::new(),
+                        metadata: None,
+                        continuity: None,
+                    },
+                    None,
+                    &mut source_events,
+                    &mut source_event_spans,
+                    &mut adapter_bytes,
+                    &limits,
+                )?;
+                retain_entries(
+                    &manager,
+                    session,
+                    &mut route_entries,
+                    &mut route_entry_evidence,
+                    CapturedSelection {
+                        lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                        current: false,
+                    },
+                    &mut adapter_bytes,
+                    &limits,
+                )?;
                 if let Some(snapshot) = manager.end_session_snapshot(session) {
-                    retain_snapshot(&mut sessions, snapshot, &limits)?;
+                    retain_snapshot(&mut sessions, snapshot, &mut adapter_bytes, &limits)?;
                 }
+                advance_lifecycle(
+                    session,
+                    &mut lifecycles,
+                    &mut latest_observations,
+                    &mut adapter_bytes,
+                    &limits,
+                )?;
             }
             CLEAR => {
                 decoder.finish()?;
+                let scope_count = manager.active_sessions();
+                admit_clear_scopes(scope_count, source_events.len(), adapter_bytes, &limits)?;
+                let cleared_sessions = manager.session_ids();
+                let scopes = cleared_sessions
+                    .iter()
+                    .copied()
+                    .map(|session| CapturedSourceScope {
+                        session,
+                        lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                        generation: manager.wire_state(session).map(|v| v.generation()),
+                    })
+                    .collect();
+                retain_source_event(
+                    CapturedSourceEvent {
+                        kind: CapturedSourceEventKind::Clear,
+                        source_record_index: records,
+                        journal_record_sha256: actual,
+                        source_start: offset,
+                        source_end: consumed,
+                        scopes,
+                        record_id: None,
+                        cause: None,
+                        packet_spans: Vec::new(),
+                        metadata: None,
+                        continuity: None,
+                    },
+                    None,
+                    &mut source_events,
+                    &mut source_event_spans,
+                    &mut adapter_bytes,
+                    &limits,
+                )?;
+                for session in cleared_sessions {
+                    retain_entries(
+                        &manager,
+                        session,
+                        &mut route_entries,
+                        &mut route_entry_evidence,
+                        CapturedSelection {
+                            lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                            current: false,
+                        },
+                        &mut adapter_bytes,
+                        &limits,
+                    )?;
+                    advance_lifecycle(
+                        session,
+                        &mut lifecycles,
+                        &mut latest_observations,
+                        &mut adapter_bytes,
+                        &limits,
+                    )?;
+                }
                 for snapshot in manager.clear_snapshots() {
-                    retain_snapshot(&mut sessions, snapshot, &limits)?;
+                    retain_snapshot(&mut sessions, snapshot, &mut adapter_bytes, &limits)?;
                 }
             }
             SEAL => {
@@ -441,8 +946,22 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
         }
         records = checked_increment(records, "bgp_journal_records")?;
     }
+    for session in manager.session_ids() {
+        retain_entries(
+            &manager,
+            session,
+            &mut route_entries,
+            &mut route_entry_evidence,
+            CapturedSelection {
+                lifecycle: *lifecycles.get(&session).unwrap_or(&0),
+                current: true,
+            },
+            &mut adapter_bytes,
+            &limits,
+        )?;
+    }
     for snapshot in manager.clear_snapshots() {
-        retain_snapshot(&mut sessions, snapshot, &limits)?;
+        retain_snapshot(&mut sessions, snapshot, &mut adapter_bytes, &limits)?;
     }
     Ok(ReplayArchive {
         receipt: JournalReceipt {
@@ -455,16 +974,311 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
         messages,
         boundaries,
         rejected_records,
+        route_entries,
+        route_rejections,
+        observations,
+        route_entry_evidence,
+        observation_evidence,
+        source_events,
     })
+}
+
+fn admit_clear_scopes(
+    scope_count: usize,
+    event_count: usize,
+    retained: usize,
+    limits: &Limits,
+) -> Result<()> {
+    let prospective = scope_count
+        .checked_mul(192)
+        .and_then(|v| v.checked_add(1024))
+        .and_then(|v| v.checked_mul(6))
+        .and_then(|v| retained.checked_add(v))
+        .ok_or_else(|| Error::limit("bgp_journal_source_events"))?;
+    if scope_count > limits.elements
+        || event_count >= limits.elements
+        || prospective > limits.retained_bytes
+        || prospective > limits.work
+    {
+        return Err(Error::limit("bgp_journal_source_events"));
+    }
+    Ok(())
+}
+
+fn source_event_admission(
+    size: usize,
+    event_count: usize,
+    scope_count: usize,
+    span_count: usize,
+    additional_spans: usize,
+    retained: usize,
+    limits: &Limits,
+) -> Result<(usize, usize)> {
+    let next_spans = span_count
+        .checked_add(additional_spans)
+        .ok_or_else(|| Error::limit("bgp_journal_source_events"))?;
+    let next_retained = size
+        .checked_mul(6)
+        .and_then(|v| v.checked_add(retained))
+        .ok_or_else(|| Error::limit("bgp_journal_source_events"))?;
+    if event_count >= limits.elements
+        || scope_count > limits.elements
+        || next_spans > limits.spans
+        || next_retained > limits.retained_bytes
+        || next_retained > limits.work
+    {
+        return Err(Error::limit("bgp_journal_source_events"));
+    }
+    Ok((next_retained, next_spans))
+}
+
+fn retain_source_event(
+    mut event: CapturedSourceEvent,
+    spans: Option<&[SourceSpan]>,
+    events: &mut Vec<CapturedSourceEvent>,
+    span_count: &mut usize,
+    retained: &mut usize,
+    limits: &Limits,
+) -> Result<()> {
+    let borrowed_spans = spans.unwrap_or(&[]);
+    let size = event.retained_charge();
+    let charge = size
+        .checked_add(borrowed_spans.len().saturating_mul(512))
+        .ok_or_else(|| Error::limit("bgp_journal_source_events"))?;
+    let (next_retained, next_spans) = source_event_admission(
+        charge,
+        events.len(),
+        event.scopes.len(),
+        *span_count,
+        borrowed_spans.len(),
+        *retained,
+        limits,
+    )?;
+    *retained = next_retained;
+    *span_count = next_spans;
+    event.packet_spans = borrowed_spans.to_vec();
+    events.push(event);
+    Ok(())
+}
+
+fn advance_lifecycle(
+    session: u64,
+    lifecycles: &mut BTreeMap<u64, u64>,
+    latest: &mut BTreeMap<(u64, String), [u8; 32]>,
+    retained: &mut usize,
+    limits: &Limits,
+) -> Result<()> {
+    if !lifecycles.contains_key(&session) {
+        if lifecycles.len() >= limits.elements {
+            return Err(Error::limit("bgp_journal_lifecycles"));
+        }
+        *retained = retained
+            .checked_add(64)
+            .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+        if *retained > limits.retained_bytes || *retained > limits.work {
+            return Err(Error::limit("bgp_journal_adapter"));
+        }
+    }
+    let next = lifecycles
+        .get(&session)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| Error::limit("bgp_journal_lifecycles"))?;
+    lifecycles.insert(session, next);
+    latest.retain(|(id, _), _| *id != session);
+    Ok(())
+}
+
+struct CapturedSelection {
+    lifecycle: u64,
+    current: bool,
+}
+
+fn retain_entries(
+    manager: &CapturedSessionManager,
+    session: u64,
+    entries: &mut Vec<super::bgp_rib::RouteEntry>,
+    evidence: &mut Vec<CapturedEntryEvidence>,
+    selection: CapturedSelection,
+    bytes: &mut usize,
+    limits: &Limits,
+) -> Result<()> {
+    if let Some(rib) = manager.rib(session) {
+        // Every retained native origin and current-origin receipt consumes an
+        // aggregate element before snapshot copies, including prior lifecycles.
+        let mut origin_elements = entries.iter().try_fold(entries.len(), |n, entry| {
+            entry.versions.iter().try_fold(n, |n, version| {
+                n.checked_add(version.occurrences.len())
+                    .ok_or_else(|| Error::limit("bgp_journal_adapter"))
+            })
+        })?;
+        origin_elements = evidence.iter().try_fold(origin_elements, |n, e| {
+            n.checked_add(e.observation_sha256.len())
+                .ok_or_else(|| Error::limit("bgp_journal_adapter"))
+        })?;
+        for entry in rib.entries().values() {
+            let mut size = entry
+                .key
+                .scope
+                .source
+                .source_id
+                .len()
+                .saturating_add(entry.key.scope.source.partition_id.len())
+                .saturating_add(entry.key.scope.session.len())
+                .saturating_add(entry.key.scope.peer.as_ref().map_or(0, String::len))
+                .saturating_add(entry.key.prefix.address.len())
+                .saturating_add(entry.last_witness.len())
+                .saturating_add(512);
+            for version in &entry.versions {
+                size = size
+                    .checked_add(
+                        version
+                            .attributes
+                            .encoded_len_bounded(limits.retained_bytes)?
+                            .saturating_mul(3),
+                    )
+                    .and_then(|n| n.checked_add(version.attribute_identity.len()))
+                    .and_then(|n| {
+                        version
+                            .occurrences
+                            .len()
+                            .checked_mul(128)
+                            .and_then(|charge| n.checked_add(charge))
+                    })
+                    .and_then(|n| {
+                        n.checked_add(
+                            version
+                                .witnesses
+                                .iter()
+                                .map(|v| v.len().saturating_add(32))
+                                .sum::<usize>(),
+                        )
+                    })
+                    .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+            }
+            let witness_count: usize = entry
+                .versions
+                .iter()
+                .filter(|v| v.disposition == super::bgp_rib::VersionDisposition::Current)
+                .try_fold(0usize, |n, v| {
+                    n.checked_add(v.occurrences.len())
+                        .ok_or_else(|| Error::limit("bgp_journal_adapter"))
+                })?;
+            size = size
+                .saturating_add(96)
+                .saturating_add(witness_count.saturating_mul(32));
+            origin_elements = entry
+                .versions
+                .iter()
+                .try_fold(origin_elements, |n, version| {
+                    n.checked_add(version.occurrences.len())
+                        .ok_or_else(|| Error::limit("bgp_journal_adapter"))
+                })?
+                .checked_add(1)
+                .and_then(|n| n.checked_add(witness_count))
+                .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+            if origin_elements > limits.elements {
+                return Err(Error::limit("bgp_journal_adapter"));
+            }
+            *bytes = bytes
+                .checked_add(size)
+                .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+            if entries.len() >= limits.elements
+                || *bytes > limits.retained_bytes
+                || *bytes > limits.work
+            {
+                return Err(Error::limit("bgp_journal_adapter"));
+            }
+            let observation_sha256 = entry
+                .versions
+                .iter()
+                .filter(|v| v.disposition == super::bgp_rib::VersionDisposition::Current)
+                .flat_map(|v| v.occurrences.iter())
+                .map(|origin| origin.observation_sha256)
+                .collect();
+            entries.push(entry.clone());
+            evidence.push(CapturedEntryEvidence {
+                lifecycle: selection.lifecycle,
+                current: selection.current,
+                observation_sha256,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn retain_rejections(
+    manager: &CapturedSessionManager,
+    session: u64,
+    start: usize,
+    observation_index: usize,
+    rejections: &mut Vec<CapturedRejection>,
+    retained: &mut usize,
+    limits: &Limits,
+) -> Result<()> {
+    if let Some(rib) = manager.rib(session) {
+        let added = rib.rejections().get(start..).ok_or_else(|| {
+            bad(
+                "bgp_journal_rejection",
+                0,
+                "native rejection history shortened",
+            )
+        })?;
+        for rejection in added {
+            let size = rejection
+                .key
+                .scope
+                .source
+                .source_id
+                .len()
+                .saturating_add(rejection.key.scope.source.partition_id.len())
+                .saturating_add(rejection.key.scope.session.len())
+                .saturating_add(rejection.key.scope.peer.as_ref().map_or(0, String::len))
+                .saturating_add(rejection.key.prefix.address.len())
+                .saturating_add(rejection.record_id.len())
+                .saturating_add(rejection.reason.len())
+                .saturating_add(2048)
+                .saturating_mul(3);
+            *retained = retained
+                .checked_add(size)
+                .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+            if rejections.len() >= limits.elements
+                || *retained > limits.retained_bytes
+                || *retained > limits.work
+            {
+                return Err(Error::limit("bgp_journal_adapter"));
+            }
+            // Retain before END/CLEAR can drop the owning session. Rejections
+            // are always historical and cannot change an accepted entry.
+            rejections.push(CapturedRejection {
+                rejection: rejection.clone(),
+                observation_index,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn retain_snapshot(
     sessions: &mut Vec<SessionSnapshot>,
     snapshot: SessionSnapshot,
+    retained: &mut usize,
     limits: &Limits,
 ) -> Result<()> {
     if sessions.len() >= limits.elements {
         return Err(Error::limit("bgp_journal_sessions"));
+    }
+    *retained = retained
+        .checked_add(
+            snapshot
+                .state
+                .encoded_len_bounded(limits.retained_bytes)?
+                .saturating_mul(3),
+        )
+        .ok_or_else(|| Error::limit("bgp_journal_adapter"))?;
+    if *retained > limits.retained_bytes || *retained > limits.work {
+        return Err(Error::limit("bgp_journal_adapter"));
     }
     sessions.push(snapshot);
     Ok(())
@@ -935,5 +1749,256 @@ mod tests {
         assert!(replay(&probe, 1024 * 1024, Limits::default()).is_err());
         std::fs::remove_file(complete).unwrap();
         std::fs::remove_file(probe).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod source_event_admission_tests {
+    use super::*;
+    #[test]
+    fn clear_scopes_admit_exact_charge_and_reject_each_one_below_before_collection() {
+        let charge = (1024 + 4 * 192) * 6;
+        let mut l = Limits {
+            elements: 4,
+            retained_bytes: charge,
+            work: charge,
+            ..Limits::default()
+        };
+        admit_clear_scopes(4, 0, 0, &l).unwrap();
+        l.retained_bytes = charge - 1;
+        assert!(admit_clear_scopes(4, 0, 0, &l).is_err());
+        l.retained_bytes = charge;
+        l.work = charge - 1;
+        assert!(admit_clear_scopes(4, 0, 0, &l).is_err());
+        l.work = charge;
+        l.elements = 3;
+        assert!(admit_clear_scopes(4, 0, 0, &l).is_err());
+        l.elements = 4;
+        assert!(admit_clear_scopes(4, 4, 0, &l).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decoded_continuity_budget_tests {
+    use super::*;
+    #[test]
+    fn decoded_source_projection_matches_actual_nodes_and_depth() {
+        let source = super::super::bgp_session::SourcePartition {
+            kind: super::super::bgp_session::PartitionKind::Captured,
+            source_id: "capture".into(),
+            partition_id: "capture-namespace-sha256:test".into(),
+        };
+        let event = CapturedSourceEvent {
+            kind: CapturedSourceEventKind::DecodedGap,
+            source_record_index: 1,
+            journal_record_sha256: [1; 32],
+            source_start: 4,
+            source_end: 9,
+            scopes: vec![CapturedSourceScope {
+                session: 1,
+                lifecycle: 0,
+                generation: Some(0),
+            }],
+            record_id: Some("gap".into()),
+            cause: Some("opaque".into()),
+            packet_spans: vec![SourceSpan {
+                start: 0,
+                end: 1,
+                packet_start: 0,
+                packet: PacketId {
+                    capture: [1; 32],
+                    frame: 2,
+                    record_offset: 0,
+                },
+            }],
+            metadata: Some(PcapMetadata {
+                source_id: "capture".into(),
+                record_id: "gap".into(),
+                session: Some(1),
+                direction: Some(0),
+                peer: None,
+                local: None,
+                observed_at_ns: None,
+            }),
+            continuity: Some(CapturedDecodedContinuity {
+                observation_index: 0,
+                observation_sha256: [2; 32],
+                decision: super::super::bgp_pipeline::DecodedContinuity {
+                    scope: super::super::bgp_rib::RibScope {
+                        source,
+                        session: "1".into(),
+                        generation: 0,
+                        direction: Some(0),
+                        peer: None,
+                    },
+                    reason: "opaque".into(),
+                    native_status: Some(super::super::bgp_rib::ApplyStatus::Applied),
+                    session_status: super::super::bgp_session::ApplyStatus::Applied,
+                    newly_applied: true,
+                    kind: super::super::bgp_rib::NativeContinuityKind::Gap,
+                    effect: super::super::bgp_rib::NativeContinuityEffect::SessionGeneration,
+                },
+            }),
+        };
+        fn measure(value: &Json, depth: usize) -> (usize, usize) {
+            let children = match value {
+                Json::Object(v) => v.iter().map(|(_, v)| v).collect::<Vec<_>>(),
+                Json::Array(v) => v.iter().collect(),
+                _ => Vec::new(),
+            };
+            children
+                .into_iter()
+                .fold((1, depth), |(nodes, max_depth), child| {
+                    let (n, d) = measure(child, depth + 1);
+                    (nodes + n, max_depth.max(d))
+                })
+        }
+        let (nodes, depth) = measure(&event.json(), 1);
+        assert_eq!(event.projection_nodes(), nodes);
+        assert_eq!(event.projection_depth(), depth);
+        let limits = Limits {
+            fields: nodes,
+            depth,
+            ..Limits::default()
+        };
+        super::super::bgp_state::tree_budget(&event.json(), &limits).unwrap();
+        for l in [
+            Limits {
+                fields: nodes - 1,
+                ..limits.clone()
+            },
+            Limits {
+                depth: depth - 1,
+                ..limits.clone()
+            },
+        ] {
+            assert_eq!(
+                super::super::bgp_state::tree_budget(&event.json(), &l)
+                    .err()
+                    .expect("one-below projection must reject")
+                    .code,
+                ErrorCode::LimitExceeded
+            );
+        }
+    }
+    #[test]
+    fn legacy_source_projection_scopes_and_empty_envelope_have_exact_depth() {
+        fn actual_depth(value: &Json) -> usize {
+            match value {
+                Json::Object(fields) => {
+                    1 + fields
+                        .iter()
+                        .map(|(_, v)| actual_depth(v))
+                        .max()
+                        .unwrap_or(0)
+                }
+                Json::Array(items) => 1 + items.iter().map(actual_depth).max().unwrap_or(0),
+                _ => 1,
+            }
+        }
+        for kind in [
+            CapturedSourceEventKind::Gap,
+            CapturedSourceEventKind::Reset,
+            CapturedSourceEventKind::EndSession,
+            CapturedSourceEventKind::Clear,
+        ] {
+            let mut event = CapturedSourceEvent {
+                kind,
+                source_record_index: 1,
+                journal_record_sha256: [1; 32],
+                source_start: 0,
+                source_end: 1,
+                scopes: vec![CapturedSourceScope {
+                    session: 1,
+                    lifecycle: 0,
+                    generation: Some(0),
+                }],
+                record_id: None,
+                cause: None,
+                packet_spans: Vec::new(),
+                metadata: None,
+                continuity: None,
+            };
+            for scoped in [true, false] {
+                if !scoped {
+                    event.scopes.clear();
+                }
+                // Prospective depth is obtained before materializing the reference.
+                let expected = if scoped { 4 } else { 2 };
+                assert_eq!(event.projection_depth(), expected);
+                let limits = Limits {
+                    depth: expected,
+                    fields: event.projection_nodes(),
+                    ..Limits::default()
+                };
+                assert!(event.projection_depth() <= limits.depth);
+                assert!(event.projection_depth() > limits.depth - 1);
+                let reference = event.json();
+                assert_eq!(actual_depth(&reference), expected);
+                assert!(super::super::bgp_state::tree_budget(&reference, &limits).is_ok());
+                assert_eq!(
+                    super::super::bgp_state::tree_budget(
+                        &reference,
+                        &Limits {
+                            depth: expected - 1,
+                            ..limits
+                        }
+                    )
+                    .err()
+                    .expect("one-below legacy projection must reject")
+                    .code,
+                    ErrorCode::LimitExceeded
+                );
+                let Json::Object(fields) = &reference else {
+                    panic!("source event object")
+                };
+                assert_eq!(
+                    fields.iter().find(|(k, _)| *k == "schema").unwrap().1,
+                    Json::from("pcap-evidence.bgp.captured-source-event.v1")
+                );
+            }
+        }
+    }
+    #[test]
+    fn decoded_source_event_charge_exact_and_one_below() {
+        let size = 2048;
+        let retained = 19;
+        let exact = retained + size * 6;
+        let limits = Limits {
+            retained_bytes: exact,
+            work: exact,
+            spans: 3,
+            elements: 2,
+            ..Limits::default()
+        };
+        assert_eq!(
+            source_event_admission(size, 1, 1, 1, 2, retained, &limits).unwrap(),
+            (exact, 3)
+        );
+        for l in [
+            Limits {
+                retained_bytes: exact - 1,
+                ..limits.clone()
+            },
+            Limits {
+                work: exact - 1,
+                ..limits.clone()
+            },
+            Limits {
+                spans: 2,
+                ..limits.clone()
+            },
+            Limits {
+                elements: 1,
+                ..limits.clone()
+            },
+        ] {
+            assert_eq!(
+                source_event_admission(size, 1, 1, 1, 2, retained, &l)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::LimitExceeded
+            );
+        }
     }
 }

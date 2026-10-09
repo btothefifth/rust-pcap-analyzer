@@ -9,10 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import os
-import signal
-import subprocess
-import threading
-import time
+from scripts.owned_process import run as run_owned, stop_owned_process
 from dataclasses import dataclass
 from pathlib import Path
 from .contract import (InvalidResearch, MAX_ROWS, canonical, digest, file_identity,
@@ -35,34 +32,9 @@ class ProcessResult:
 
 
 def _stop_owned_process(proc, *, posix=None, kill_group=None):
-    """Stop only the launched child/group, tolerating an exited-group race.
+    """Compatibility seam for the shared exact-child/group cleanup owner."""
+    return stop_owned_process(proc, posix=posix, kill_group=kill_group)
 
-    Some POSIX runners reject ``killpg`` with EPERM after the short-lived child
-    has crossed its exit boundary.  The child handle remains the ownership
-    oracle, so fall back to its direct kill method instead of leaking it or
-    treating cleanup mechanics as a parser result.
-    """
-    use_group = os.name == "posix" if posix is None else posix
-    if use_group:
-        group_kill = os.killpg if kill_group is None else kill_group
-        try:
-            group_kill(proc.pid, getattr(signal, "SIGKILL", 9))
-            return True
-        except ProcessLookupError:
-            if proc.poll() is not None:
-                return True
-        except PermissionError:
-            if proc.poll() is not None:
-                return True
-    if proc.poll() is not None:
-        return True
-    try:
-        proc.kill()
-        return True
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return proc.poll() is not None
 
 def execute(command, *, timeout=30.0, output_limit=8*1024*1024, cwd=None):
     if not command or not 0 < timeout <= 3600 or not 1 <= output_limit <= 64*1024*1024:
@@ -72,48 +44,19 @@ def execute(command, *, timeout=30.0, output_limit=8*1024*1024, cwd=None):
         return ProcessResult(tuple(command), "BLOCKED", None, b"", b"explicit executable missing", 0)
     if os.name == "nt" and executable.suffix.lower() in {".bat", ".cmd"}:
         raise InvalidResearch("shell scripts are not research executables")
-    start = time.monotonic()
     env = {**os.environ, "LC_ALL": "C", "TZ": "UTC", "CARGO_NET_OFFLINE": "true"}
     try:
-        proc = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-                                start_new_session=os.name == "posix")
-    except OSError as e:
-        return ProcessResult(tuple(command), "BLOCKED", None, b"", str(type(e).__name__).encode(), 0)
-    over = threading.Event()
-    buffers = [bytearray(), bytearray()]
-    def pump(pipe, out):
-        try:
-            while data := pipe.read(8192):
-                room = output_limit-len(out)
-                out.extend(data[:room])
-                if len(data) > room:
-                    over.set()
-                    break
-        finally: pipe.close()
-    threads = [threading.Thread(target=pump,args=(pipe,buf),daemon=True) for pipe,buf in zip((proc.stdout,proc.stderr),buffers)]
-    for t in threads: t.start()
-    status = None
-    def stop():
-        return _stop_owned_process(proc)
-    while True:
-        if over.is_set(): status = "OUTPUT_LIMIT"; break
-        if time.monotonic()-start > timeout: status = "TIMEOUT"; break
-        if proc.poll() is not None and not any(t.is_alive() for t in threads): break
-        time.sleep(0.005)
-    if status and not stop(): status = "STOP_FAILED"
-    try: code = proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        if not stop(): status = "STOP_FAILED"
-        try: code = proc.wait(timeout=2)
-        except subprocess.TimeoutExpired: code = None; status = "STOP_FAILED"
-    for t in threads: t.join(timeout=2)
-    if any(t.is_alive() for t in threads):
-        # A descendant holding a pipe must not make a completed tool appear clean.
-        if not stop(): status = "STOP_FAILED"
-        else: status = status or "PIPE_NOT_CLOSED"
-    status = status or ("OUTPUT_LIMIT" if over.is_set() else "PASS" if code == 0 else "CRASH" if code < 0 else "TOOL_ERROR")
-    return ProcessResult(tuple(command),status,code,bytes(buffers[0]),bytes(buffers[1]),round(time.monotonic()-start,6))
+        result = run_owned(command, cwd=cwd, env=env, timeout=timeout,
+                           max_output_bytes=output_limit)
+    except OSError as error:
+        return ProcessResult(tuple(command), "BLOCKED", None, b"", str(type(error).__name__).encode(), 0)
+    statuses = {"timeout": "TIMEOUT", "output_budget": "OUTPUT_LIMIT",
+                "stop_failed": "STOP_FAILED", "pipe_not_closed": "PIPE_NOT_CLOSED",
+                "output_io_error": "OUTPUT_IO_ERROR"}
+    status = statuses.get(result.reason, "PROCESS_ERROR") if result.reason else (
+        "PASS" if result.returncode == 0 else "CRASH" if result.returncode is not None and result.returncode < 0 else "TOOL_ERROR")
+    return ProcessResult(tuple(command), status, result.returncode, result.stdout,
+                         result.stderr, result.elapsed_seconds)
 
 def _source(path):
     return file_identity(path)

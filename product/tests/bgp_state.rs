@@ -85,6 +85,34 @@ fn captured(
     )
     .unwrap()
 }
+fn resolved_two_octet_decoder() -> SessionState {
+    let mut decoder = SessionState::default();
+    for direction in 0..2u8 {
+        let mut message = vec![255; 16];
+        message.extend(29u16.to_be_bytes());
+        message.extend([1, 4]);
+        message.extend((65000 + u16::from(direction)).to_be_bytes());
+        message.extend(90u16.to_be_bytes());
+        message.extend([192, 0, 2, 1 + direction, 0]);
+        let evidence = EvidenceBytes::from_packet(
+            &message,
+            PacketId {
+                capture: sha256::digest(b"synthetic-bgp-source"),
+                frame: 900 + u64::from(direction),
+                record_offset: 90000 + u64::from(direction) * 100,
+            },
+            54,
+        );
+        bgp::decode_pcap(
+            &evidence,
+            metadata(&format!("context-open-{direction}"), Some(direction)),
+            &mut decoder,
+            &Limits::default(),
+        )
+        .unwrap();
+    }
+    decoder
+}
 fn input(id: &str, action: RouteAction, med: u32) -> Json {
     bgp::normalize_imported(
         ImportedRouteObservation {
@@ -160,7 +188,7 @@ fn source(kind: SourceKind, id: &str, generation: u64) -> Source {
 
 #[test]
 fn independent_wire_vector_has_exact_fields_and_provenance() {
-    let mut decoder = SessionState::default();
+    let mut decoder = resolved_two_octet_decoder();
     let normalized = captured("announce", "1", 1, Some(0), &mut decoder);
     let o = observe(&normalized, None);
     assert_eq!(o.routes().len(), 1);
@@ -509,7 +537,7 @@ fn conflicting_record_identity_quarantines_old_and_new_effects() {
 #[test]
 fn captured_content_identity_does_not_collapse_distinct_packet_occurrences() {
     let mut state = fresh();
-    let mut decoder = SessionState::default();
+    let mut decoder = resolved_two_octet_decoder();
     state
         .apply(observe(
             &captured("announce", "same-content-hash", 1, Some(0), &mut decoder),
@@ -536,7 +564,7 @@ fn discarded_duplicate_attributes_do_not_create_ambiguity_and_unknown_tokens_sur
         "dup",
         1,
         Some(0),
-        &mut SessionState::default(),
+        &mut resolved_two_octet_decoder(),
     );
     let o = observe(&v, None);
     assert!(!o.routes()[0].ambiguous_attributes());
@@ -717,7 +745,13 @@ fn imported_and_captured_share_state_shape_without_sharing_authority() {
     a.apply(scoped("a", 0, 0, RouteAction::Announce, 0))
         .unwrap();
     b.apply(observe(
-        &captured("announce", "b", 1, Some(0), &mut SessionState::default()),
+        &captured(
+            "announce",
+            "b",
+            1,
+            Some(0),
+            &mut resolved_two_octet_decoder(),
+        ),
         None,
     ))
     .unwrap();

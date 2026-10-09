@@ -1,95 +1,65 @@
 # Current implementation pointer
 
-## Objective and authority
+This page points to the active offline BGP surfaces, the current follow-up scope,
+and its source-bound receipt. It is navigation, not proof by itself.
 
-Continue the declared offline BGP evidence profile in
-[BGP completion](../product/BGP_COMPLETION.md), with RFCs and IANA registries as
-normative authority and other analyzers as disagreement probes only. The design
-docs remain authoritative for product intent. This pointer is the concise
-current-state view; older slice receipts are historical unless cited below.
+## Active BGP surfaces
 
-## Current local slice
+- Captured BGP framing, source-span provenance, session observation, and
+  candidate route-state reduction.
+- MRT/TABLE_DUMP_V2 and BGP4MP plus BMP v3 import, sealed source stores, fresh
+  replay, and source-scoped route candidates.
+- Persisted replay, query, policy, export, source-ordered changes, caller-scoped
+  expectations, and association across supported captured, MRT, and BMP stores.
+- Incremental MRT admission, chronology, window selection, evidence manifests,
+  and bounded attributed comparison.
 
-The latest audit-fix slice adds a versioned, source-neutral BGP semantic identity
-for the supported captured and TABLE_DUMP_V2 route subset; validates supplied
-complete identities against the normalized route envelope and retained captured
-attribute occurrences; preserves unsupported MRT RIB entries as opaque-only
-evidence; and charges their processing/output against bounded budgets before
-materialization. Equal fingerprints do not merge sources or establish router
-acceptance, installation, or reachability. The controlling details and known
-cross-check gaps are in [semantic identity](../product/BGP_SEMANTIC_IDENTITY.md).
+The [support matrix](../product/bgp-support-matrix.json) links each profile area
+to its owning code and tests. The [BGP completion contract](../product/BGP_COMPLETION.md)
+and its leaf contracts describe their boundaries.
 
-The slice also retains the earlier BGP4MP source-ordered candidate replay and
-DNP3 source-span/workflow hardening. It does not complete imported BGP4MP
-Adj-RIB-In semantics, full DNP3 object/device semantics, or the declared BGP
-profile.
+## Current follow-up scope
 
-## Fresh local validation
+Persisted change and expectation analysis now shares a bounded source-scope
+inventory. Change output separates applied native continuity effects from
+source boundaries or metadata that produced no route action. The source
+occurrence and its witness remain available to the consumer.
 
-Windows-only evidence, collected 2026-09-25 with Rust 1.85.1:
+`ImportedSourceEvent::new` is a checked construction path for imported
+occurrences: it validates bounded source labels and attached source identity
+while leaving event-kind, observation-index, and native-effect ownership with
+the producer. MRT archive assembly and persisted replay have focused owners in
+[`bgp_mrt_archive.rs`](../../product/src/deep/bgp_mrt_archive.rs) and
+[`bgp_persisted/replay.rs`](../../product/src/deep/bgp_persisted/replay.rs).
 
-- Product all-target debug tests: 447 passed; release tests: 447 passed.
-- Product warnings-denied Clippy and root, streaming, product, and FFI rustfmt
-  checks: passed. Root, streaming, product, and FFI locked debug/release tests,
-  Clippy, and release builds passed.
-- All six product feature profiles passed: no-default, standard, extensions,
-  industrial, industrial-full, and binary.
-- Ordered root validator: all 13 steps passed, including root debug/release,
-  locked offline check/build/Clippy, fixture/oracle checks, CLI hardening, and
-  mutation checks. Its source-unchanged receipt passed.
-- Full product qualification ran 202 Python tests (3 skipped), catalog audit,
-  and JavaScript model tests successfully. Its overall receipt is BLOCKED—not
-  failed—because this Windows host has no `cc` for the C-header harness and
-  cannot execute the Linux-only live-denial and C-ABI link/run gates.
-- BGP support-matrix contract tests: 4 passed.
+The research path can package a BGP first divergence with the exact source and
+range witnesses, and record derived-dataset provenance alongside the comparison
+inputs. The bundle remains an unresolved research result pending adjudication;
+it does not validate the interpretation by itself. See
+[`bgp_compare.py`](../../tools/research/bgp_compare.py) and
+[`bundle.py`](../../tools/research/bundle.py).
 
-The first GitHub run for the preceding published tree also exposed a Windows
-status-endpoint race: a transient `PermissionError` while reading a worker's
-`state.json` was reported as an authorization 403. The repair adds bounded
-state-read retries and a redacted 503 for persistent local access
-failure, while preserving 403 for actual token, Host, and Origin denials. Nine
-focused HTTP tests cover the status and job-list consumers, bounded exhaustion,
-redaction, and preserved authorization behavior. The full 202-test Python suite
-passes. Published candidate commit `8ff367591d66045ea1a0172a5c0e516b88fe592e`
-passed both exact-commit GitHub Actions workflows: native validation #62 and
-streaming evidence contracts #58. All six Ubuntu, Windows, and macOS jobs
-passed, including the Windows contract job that exposed the race.
+## Follow-up source-bound validation
 
-The same receipt records sustained fuzzing, representative large-capture
-benchmarking, full browser-to-native exercise, and normative protocol
-qualification as NOT RUN/NOT ESTABLISHED; automatic full-history TCP remains
-unimplemented. Exact-commit CI above covers the implementation-code candidate
-`8ff367591d66045ea1a0172a5c0e516b88fe592e`. Documentation-only refresh commit
-`3f0680c4c2188714e58ebed498ab11022cbd0d6f` also passed native validation #63
-and streaming evidence contracts #59, without changing implementation or test
-files. Neither local nor CI results establish lawful real-corpus parity,
-scale or performance targets, security qualification, external-source
-authenticity, or complete normative protocol conformance. Passing these gates
-is not a production-readiness claim.
+The follow-up receipt is
+[`pr-followup-validation.json`](../../evidence/pr-followup-validation.json).
+It records the source identity, inventory count, product and root gate results,
+coherence outcome, bounded sample details, and validation status. Consult the
+receipt for its current disposition; this pointer does not assert a pass. The
+earlier `8aa92ad` receipt is a historical baseline listed in
+[VALIDATION.md](../VALIDATION.md).
 
-## Remaining work and priority
+## Remaining qualification
 
-1. Complete imported BGP4MP session state: apply announcements/withdrawals to
-   imported Adj-RIB-In, derive reset/teardown behavior, and retain malformed
-   records through archive/replay with exact source ranges.
-2. Close semantic identity gaps before claiming full cross-source parity:
-   define and test source-bound AS4_PATH/AS4_AGGREGATOR identity; reconcile every
-   supported attribute/NLRI row against the matrix. Incomplete routes must stay
-   ambiguous rather than acquire a fingerprint.
-3. Connect persisted external/captured evidence to common query, policy, and
-   association paths while keeping source, clock, checkpoint, and trust
-   partitions separate; then implement the bounded BMP adapter.
-4. Add independent RFC/IANA vectors, lawful real-capture/collector disagreement
-   cases, minimized regressions, and sustained stateful fuzz campaigns.
-5. Require fresh exact-commit Windows/Linux CI (and macOS where claimed),
-   measured scale/RSS/performance evidence, and security/normative review before
-   raising qualification claims.
-6. Continue the separate DNP3 non-secure profile toward its documented
-   completion criteria; secure authentication, device truth, and unsupported
-   vendor semantics remain outside current proof.
+The follow-up includes bounded source-bound public UPDATE, chronology, and RIB
+prefix samples. Read their exact sizes, completeness, missing parent-source
+identity, unsupported entries, and retained coverage gaps from the follow-up
+receipt. These samples do not establish complete source coverage or
+representative multi-collector, multi-date, or corpus parity.
 
-## Boundaries
-
-All parser, replay, policy, and association output is offline evidence or
-candidate analysis. No source authenticity, endpoint negotiation, route
-installation, reachability, causality, or attack attribution is claimed.
+Normative protocol coverage, sustained fuzzing, complete-byte-copy behavior,
+whole-process CPU and physical RSS bounds, and caller-clocked GR/LLGR assessment
+remain unqualified. Logical work and retention limits do not establish whole-
+process CPU or peak-memory bounds. Actual endpoint state, source authenticity,
+route installation, reachability, and causality remain outside the offline
+evidence boundary.

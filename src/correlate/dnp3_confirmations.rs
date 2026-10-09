@@ -47,6 +47,39 @@ struct Group {
 // Capture, flow, confirmer's individual source/destination, sequence, UNS.
 type Key = ([u8; 32], usize, u16, u16, u8, bool);
 
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+enum InvalidScope {
+    Capture([u8; 32], usize),
+    UnknownCapture(usize),
+}
+
+// Invalid identifiers cannot choose a bucket, but coherent source provenance can
+// still limit their suppression to one capture. Mixed or absent provenance is an
+// explicit unknown scope and conservatively blocks this numeric flow.
+fn invalid_scope(
+    result: &crate::dnp3::Dnp3Result,
+    fragment: &crate::dnp3::ApplicationFragment,
+    flow: usize,
+    work: &mut usize,
+    limits: &Limits,
+) -> Result<InvalidScope> {
+    charge(work, fragment.raw.spans().len(), limits)?;
+    let Some(capture) = super::capture_scope(&fragment.raw) else {
+        return Ok(InvalidScope::UnknownCapture(flow));
+    };
+    for &index in &fragment.frames {
+        charge(work, 1, limits)?;
+        let Some(frame) = result.frames.get(index) else {
+            return Ok(InvalidScope::UnknownCapture(flow));
+        };
+        charge(work, frame.raw.spans().len(), limits)?;
+        if super::capture_scope(&frame.raw) != Some(capture) {
+            return Ok(InvalidScope::UnknownCapture(flow));
+        }
+    }
+    Ok(InvalidScope::Capture(capture, flow))
+}
+
 fn charge(work: &mut usize, amount: usize, limits: &Limits) -> Result<()> {
     *work = work
         .checked_add(amount)
@@ -63,7 +96,8 @@ fn charge(work: &mut usize, amount: usize, limits: &Limits) -> Result<()> {
 /// No timestamp, ordering, port, FCB/FCV or endpoint-state heuristic selects a
 /// partner. Identifier reuse anywhere in this query remains ambiguous. Invalid
 /// or unsupported fragments conservatively block positive candidates in their
-/// flow because their true identifier cannot safely be assigned a bucket.
+/// capture/flow scope because their true identifier cannot safely be assigned a
+/// bucket. Unknown capture scope explicitly blocks this numeric flow.
 /// Work/retention/output growth is bounded by existing correlation/message limits;
 /// exhaustion returns Err, never a silently truncated or partially successful list.
 pub fn dnp3_confirmation_candidates(
@@ -71,7 +105,7 @@ pub fn dnp3_confirmation_candidates(
     limits: &Limits,
 ) -> Result<Vec<Dnp3ConfirmationCandidate>> {
     let mut groups: BTreeMap<Key, Group> = BTreeMap::new();
-    let mut invalid: BTreeMap<usize, Vec<FragmentRef>> = BTreeMap::new();
+    let mut invalid: BTreeMap<InvalidScope, Vec<FragmentRef>> = BTreeMap::new();
     let mut output = Vec::new();
     let mut work = 0usize;
     let mut fragments = 0usize;
@@ -107,7 +141,9 @@ pub fn dnp3_confirmation_candidates(
                 Ok(witness) => witness,
                 Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
                 Err(error) => {
-                    invalid.entry(application.flow).or_default().push(reference);
+                    let scope =
+                        invalid_scope(result, fragment, application.flow, &mut work, limits)?;
+                    invalid.entry(scope).or_default().push(reference);
                     output.push(Dnp3ConfirmationCandidate {
                         flow: application.flow,
                         confirms: Vec::new(),
@@ -151,7 +187,7 @@ pub fn dnp3_confirmation_candidates(
             }
         }
     }
-    for ((_, flow, _, _, _, _), group) in groups {
+    for ((capture, flow, _, _, _, _), group) in groups {
         if group.confirms.is_empty() {
             continue;
         }
@@ -191,13 +227,20 @@ pub fn dnp3_confirmation_candidates(
                 targets.push(response);
             }
         }
-        let unclassified_fragments = if let Some(refs) = invalid.get(&flow) {
-            charge(&mut work, refs.len(), limits)?;
-            refs.clone()
-        } else {
-            Vec::new()
-        };
-        let (status, reason) = if !unclassified_fragments.is_empty() {
+        let mut unclassified_fragments = Vec::new();
+        let unknown_scope = InvalidScope::UnknownCapture(flow);
+        for scope in [InvalidScope::Capture(capture, flow), unknown_scope] {
+            if let Some(refs) = invalid.get(&scope) {
+                charge(&mut work, refs.len(), limits)?;
+                unclassified_fragments.extend_from_slice(refs);
+            }
+        }
+        let (status, reason) = if invalid.contains_key(&unknown_scope) {
+            (
+                "ambiguous",
+                "unverified_fragment_capture_scope_unknown_in_same_flow",
+            )
+        } else if !unclassified_fragments.is_empty() {
             ("ambiguous", "unverified_fragment_identifier_in_same_flow")
         } else if group.confirms.len() > 1 {
             ("ambiguous", "duplicate_or_reused_confirmation_identifier")

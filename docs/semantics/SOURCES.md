@@ -34,6 +34,14 @@ qualifier values and group/variation descriptions:
 - <https://docs.stepfunc.io/dnp3/1.6.0/rust/dnp3/app/enum.QualifierCode.html>
 - <https://docs.stepfunc.io/dnp3/1.6.0/rust/dnp3/app/enum.Variation.html>
 
+The October 4, 2026 guard repair also checked DNP Users Group AN2013-004b,
+*Validation of Incoming DNP3 Data*, August 13, 2014, Tables 2 and 3:
+<https://www.dnp.org/Portals/0/Public%20Documents/DNP3%20AN2013-004b%20Validation%20of%20Incoming%20DNP3%20Data.pdf>.
+Table 2 supplies required-object and defined-function distinctions; Table 3
+supplies exact layout pairs for the binary/event/counter/IIN guards. This public
+technical bulletin supports those finite assertions; it does not replace a
+reviewed current IEEE edition or establish full normative certification.
+
 No implementation was copied, ported, vendored, or linked. The explicit integer,
 bit-packing and float-bit fixtures are project assertions requiring independent
 normative review. They are not mislabeled as IEEE conformance-suite vectors.

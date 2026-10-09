@@ -21,7 +21,7 @@ MUTANTS = [
 
 def run(root: Path, suite: str, test: str) -> subprocess.CompletedProcess:
     return subprocess.run(["cargo", "test", "--locked", "--offline", "--test", suite, test, "--", "--exact"],
-                          cwd=root, env=dict(os.environ, CARGO_TERM_COLOR="never"), capture_output=True, text=True, timeout=180)
+                          cwd=root, env=dict(os.environ, CARGO_TERM_COLOR="never", CARGO_TARGET_DIR=str(root.parent / "mutation-target")), capture_output=True, text=True, timeout=180)
 
 
 def main() -> int:
@@ -31,7 +31,7 @@ def main() -> int:
     receipts = []
     with tempfile.TemporaryDirectory(prefix="pcap-evidence-mutation-") as directory:
         root = Path(directory) / "repo"
-        shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(".git", "target", "__pycache__", "evidence", "*.zip"))
+        shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(".git", "target", ".local-tooling", ".local-build", "__pycache__", "evidence", "*.zip"))
         for file, old, new, suite, test in MUTANTS:
             baseline = run(root, suite, test)
             assert baseline.returncode == 0 and "1 passed" in baseline.stdout, baseline.stdout + baseline.stderr

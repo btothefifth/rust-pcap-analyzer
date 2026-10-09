@@ -9,7 +9,10 @@ import hashlib
 import json
 import subprocess
 import sys
-import threading
+try:
+    from .owned_process import run as run_owned
+except ImportError:
+    from owned_process import run as run_owned
 
 ROOT=Path(__file__).resolve().parents[1]
 MAX_OUTPUT=4*1024*1024
@@ -68,32 +71,13 @@ def validate_report(report,case,payload):
     return failures
 
 def execute(command, timeout=30):
-    """Bound both pipes while the trusted local process is still running."""
-    proc=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=False)
-    buffers=[bytearray(),bytearray()];limited=threading.Event()
-    def read(pipe,index,maximum):
-        try:
-            while chunk:=pipe.read(4096):
-                if len(buffers[index])+len(chunk)>maximum:
-                    limited.set()
-                    try:proc.kill()
-                    except OSError:pass
-                    break
-                buffers[index].extend(chunk)
-        finally:pipe.close()
-    threads=[threading.Thread(target=read,args=(proc.stdout,0,MAX_OUTPUT),daemon=True),
-             threading.Thread(target=read,args=(proc.stderr,1,65536),daemon=True)]
-    for thread in threads:thread.start()
-    try:
-        code=proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill();proc.wait();raise
-    finally:
-        for thread in threads:thread.join(timeout=2)
-    if any(t.is_alive()for t in threads):raise ValueError('producer pipe did not close')
-    if limited.is_set():raise ValueError('producer output limit')
-    if code:raise ValueError('producer operational failure '+str(code))
-    return bytes(buffers[0]),bytes(buffers[1])
+    result=run_owned(command,timeout=timeout,max_output_bytes=MAX_OUTPUT+65536)
+    if result.reason=='timeout':raise subprocess.TimeoutExpired(command,timeout)
+    if result.reason=='output_budget':raise ValueError('producer output limit')
+    if result.reason:raise ValueError('producer '+result.reason)
+    if len(result.stdout)>MAX_OUTPUT or len(result.stderr)>65536:raise ValueError('producer output limit')
+    if result.returncode:raise ValueError('producer operational failure '+str(result.returncode))
+    return result.stdout,result.stderr
 
 def run(root,probe=None):
     root=Path(root);m=audit(root)

@@ -78,6 +78,230 @@ fn rib_v6_generic() -> Vec<u8> {
     b.extend(0u16.to_be_bytes());
     record(13, 13, 6, &b)
 }
+
+// RFC 8050 sections 4.1/4.2 and 5.2, encoded independently of the parser.
+// Specific ADD-PATH RIBs carry Path Identifier in each RIB entry. Generic
+// ADD-PATH carries it in NLRI and preserves the ordinary RIB entry layout.
+fn opaque_addpath_rib(subtype: u16) -> Vec<u8> {
+    let mut body = 901u32.to_be_bytes().to_vec();
+    if subtype == 12 {
+        body.extend(2u16.to_be_bytes());
+        body.push(1);
+        body.extend(0x1020_3040u32.to_be_bytes());
+        body.extend([32, 0x20, 0x01, 0x0d, 0xb8]);
+    } else if matches!(subtype, 8 | 9) {
+        body.extend([24, 198, 51, 100]);
+    } else {
+        assert!(matches!(subtype, 10 | 11));
+        body.extend([32, 0x20, 0x01, 0x0d, 0xb8]);
+    }
+    body.extend(1u16.to_be_bytes());
+    body.extend(0u16.to_be_bytes());
+    body.extend(9u32.to_be_bytes());
+    if subtype != 12 {
+        body.extend(0x1020_3040u32.to_be_bytes());
+    }
+    let attributes = attrs();
+    body.extend((attributes.len() as u16).to_be_bytes());
+    body.extend(attributes);
+    record(17, 13, subtype, &body)
+}
+
+fn ordinary_v6_rib() -> Vec<u8> {
+    let mut body = 902u32.to_be_bytes().to_vec();
+    body.extend([32, 0x20, 0x01, 0x0d, 0xb8]);
+    body.extend(1u16.to_be_bytes());
+    body.extend(0u16.to_be_bytes());
+    body.extend(8u32.to_be_bytes());
+    body.extend(0u16.to_be_bytes());
+    record(16, 13, 4, &body)
+}
+
+#[test]
+fn table_dump_v2_addpath_ribs_preserve_peer_table_across_mixed_families() {
+    for subtype in 8..=12 {
+        let table = table();
+        let addpath = opaque_addpath_rib(subtype);
+        let bytes = [
+            table.clone(),
+            rib_v4(),
+            addpath.clone(),
+            ordinary_v6_rib(),
+            rib_v4(),
+            rib_v6_generic(),
+        ]
+        .concat();
+        let batch =
+            MrtBatch::parse(&bytes, source(), &MrtLimits::default()).unwrap_or_else(|error| {
+                panic!("opaque ADD-PATH subtype {subtype} must preserve the peer table: {error:?}")
+            });
+        assert_eq!(batch.records.len(), 6);
+        assert!(
+            matches!(&batch.records[2].body, MrtBody::Opaque { reason: "unsupported_type_or_subtype", bytes } if bytes == &addpath[12..])
+        );
+        assert_eq!(
+            batch.records[2].sha256,
+            sha256::hex(&sha256::digest(&addpath))
+        );
+        assert!(
+            batch.normalize_rib_entry(2, 0, &Limits::default()).is_err(),
+            "opaque ADD-PATH bytes cannot become an ordinary RIB candidate"
+        );
+        for (index, afi) in [(1, 1), (3, 2), (4, 1), (5, 2)] {
+            let MrtBody::Rib(rib) = &batch.records[index].body else {
+                panic!("supported RIB after subtype {subtype}")
+            };
+            assert_eq!((rib.afi, rib.safi), (afi, 1));
+            assert_eq!(rib.peer_table_offset, 0);
+            assert_eq!(rib.peer_table_sha256, sha256::hex(&sha256::digest(&table)));
+            assert_eq!(rib.entries[0].peer_index, 0);
+        }
+        let normalized = batch
+            .normalize_rib_entry(4, 0, &Limits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            get(&normalized, "peer"),
+            &Json::from(format!("{}:0:203.0.113.9:65551", batch.records[0].sha256))
+        );
+        assert_eq!(get(&normalized, "direction"), &Json::Null);
+        assert_eq!(batch.sha256, sha256::hex(&sha256::digest(&bytes)));
+    }
+}
+
+#[test]
+fn table_dump_v2_known_opaque_rib_series_does_not_drop_peer_identity() {
+    let unsupported_family = record(18, 13, 6, &[0, 0, 0, 1, 0, 25, 70, 0xaa]);
+    let mut records = vec![table(), record(12, 13, 3, &[0xaa])];
+    records.extend((8..=12).map(opaque_addpath_rib));
+    records.extend([record(18, 13, 5, &[0xbb]), unsupported_family, rib_v4()]);
+    let batch = parse(&records.concat());
+    let MrtBody::Rib(rib) = &batch.records.last().unwrap().body else {
+        panic!("final supported RIB")
+    };
+    assert_eq!(rib.peer_table_offset, 0);
+    assert_eq!(rib.peer_table_sha256, batch.records[0].sha256);
+    assert!(matches!(
+        &batch.records[8].body,
+        MrtBody::Opaque {
+            reason: "unsupported_afi_safi",
+            ..
+        }
+    ));
+    // Opaque malformed payloads have no semantic validation claim. Their
+    // declared known RIB subtype still does not replace the peer table.
+    let batch = parse(&[table(), record(13, 13, 8, &[0xff]), rib_v4()].concat());
+    assert!(matches!(batch.records[1].body, MrtBody::Opaque { .. }));
+    assert!(matches!(batch.records[2].body, MrtBody::Rib(_)));
+}
+
+#[test]
+fn table_dump_v2_series_boundaries_cannot_launder_a_prior_peer_table() {
+    let boundaries = [
+        record(12, 999, 1, &[1]),
+        record(12, 12, 1, &[2]),
+        record(12, 13, 0, &[3]),
+        record(12, 13, 7, &[4]),
+        record(12, 13, 13, &[5]),
+        record(12, 13, u16::MAX, &[6]),
+        bgp4mp(4, false, false),
+        record(12, 16, 4, &[0, 1, 2]),
+    ];
+    for boundary in boundaries {
+        let prefix = [
+            table(),
+            opaque_addpath_rib(8),
+            boundary.clone(),
+            opaque_addpath_rib(12),
+        ]
+        .concat();
+        let error = MrtBatch::parse(
+            &[prefix.clone(), rib_v4()].concat(),
+            source(),
+            &MrtLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.field,
+            "mrt_peer_table",
+            "boundary {:?}",
+            &boundary[4..8]
+        );
+        let fresh_table = table();
+        let fresh_offset = prefix.len() as u64;
+        let batch = parse(&[prefix, fresh_table.clone(), rib_v4()].concat());
+        let MrtBody::Rib(rib) = &batch.records.last().unwrap().body else {
+            panic!("fresh RIB")
+        };
+        assert_eq!(rib.peer_table_offset, fresh_offset);
+        assert_eq!(
+            rib.peer_table_sha256,
+            sha256::hex(&sha256::digest(&fresh_table))
+        );
+    }
+    assert!(
+        MrtBatch::parse(
+            &[opaque_addpath_rib(8), rib_v4()].concat(),
+            source(),
+            &MrtLimits::default()
+        )
+        .is_err(),
+        "a new batch cannot borrow a table from an earlier parse"
+    );
+}
+
+#[test]
+fn table_dump_v2_peer_table_replacement_and_malformed_records_are_atomic() {
+    let old_table = table_two();
+    let addpath = opaque_addpath_rib(10);
+    let mut fresh_table = table();
+    let end = fresh_table.len();
+    fresh_table[end - 8..end - 4].copy_from_slice(&[203, 0, 113, 42]);
+    fresh_table[end - 4..].copy_from_slice(&65_599u32.to_be_bytes());
+    let prefix = [old_table, addpath, fresh_table.clone()].concat();
+    let batch = parse(&[prefix.clone(), rib_v4()].concat());
+    let MrtBody::Rib(rib) = &batch.records[3].body else {
+        panic!("replacement RIB")
+    };
+    assert_eq!(
+        rib.peer_table_offset,
+        (prefix.len() - fresh_table.len()) as u64
+    );
+    assert_eq!(
+        rib.peer_table_sha256,
+        sha256::hex(&sha256::digest(&fresh_table))
+    );
+    let normalized = batch
+        .normalize_rib_entry(3, 0, &Limits::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        get(&normalized, "peer"),
+        &Json::from(format!("{}:0:203.0.113.42:65599", rib.peer_table_sha256))
+    );
+    let mut invalid_index = rib_v4();
+    invalid_index[20..22].copy_from_slice(&1u16.to_be_bytes());
+    let error = MrtBatch::parse(
+        &[prefix, invalid_index].concat(),
+        source(),
+        &MrtLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.field, "mrt_peer_index",
+        "old two-peer table must not survive its one-peer replacement"
+    );
+    let mut malformed_table = table();
+    malformed_table[18] = 0xff;
+    for bad_record in [malformed_table, record(12, 13, 2, &[0])] {
+        assert!(MrtBatch::parse(
+            &[table(), opaque_addpath_rib(8), bad_record, rib_v4()].concat(),
+            source(),
+            &MrtLimits::default()
+        )
+        .is_err());
+    }
+}
 fn bgp_message() -> Vec<u8> {
     let mut b = vec![0xff; 16];
     b.extend(19u16.to_be_bytes());
@@ -138,6 +362,45 @@ fn attr(flags: u8, code: u8, value: &[u8]) -> Vec<u8> {
 }
 
 fn capture_update(attributes: &[u8]) -> Json {
+    // The UPDATE uses four-octet AS_PATH syntax. Establish that interpretation
+    // from independently constructed bilateral OPEN evidence first.
+    let mut state = SessionState::default();
+    for direction in [0u8, 1] {
+        let asn = 65_551u32 + u32::from(direction);
+        let mut open_body = vec![4];
+        open_body.extend(23_456u16.to_be_bytes());
+        open_body.extend(90u16.to_be_bytes());
+        open_body.extend([192, 0, 2, 1 + direction]);
+        open_body.extend([8, 2, 6, 65, 4]);
+        open_body.extend(asn.to_be_bytes());
+        let mut open = vec![0xff; 16];
+        open.extend(u16::try_from(19 + open_body.len()).unwrap().to_be_bytes());
+        open.push(1);
+        open.extend(open_body);
+        bgp::decode_pcap(
+            &EvidenceBytes::from_packet(
+                &open,
+                PacketId {
+                    capture: sha256::digest(b"semantic-identity-capture-fixture"),
+                    frame: 35 + u64::from(direction),
+                    record_offset: 64 + 32 * u64::from(direction),
+                },
+                54,
+            ),
+            PcapMetadata {
+                source_id: "packet-capture-fixture".into(),
+                record_id: format!("capture-open-{direction}"),
+                observed_at_ns: Some(9_876_543_208 + i64::from(direction)),
+                session: Some(44),
+                direction: Some(direction),
+                peer: Some("192.0.2.9:179".into()),
+                local: Some("192.0.2.1:179".into()),
+            },
+            &mut state,
+            &Limits::default(),
+        )
+        .unwrap();
+    }
     let mut body = vec![0, 0];
     body.extend(u16::try_from(attributes.len()).unwrap().to_be_bytes());
     body.extend(attributes);
@@ -162,7 +425,7 @@ fn capture_update(attributes: &[u8]) -> Json {
             peer: Some("192.0.2.9:179".into()),
             local: Some("192.0.2.1:179".into()),
         },
-        &mut SessionState::default(),
+        &mut state,
         &Limits::default(),
     )
     .unwrap()
@@ -423,6 +686,51 @@ fn mrt_identity_obeys_flag_duplicate_and_nonempty_set_rules() {
         .unwrap()
         .is_none());
 }
+
+#[test]
+fn complete_rib_malformed_as_path_values_preserve_raw_records_without_conversion() {
+    // Each outer attribute length is exact. The AS_PATH value alone is short:
+    // missing count, absent ASN, partial ASN, or short second segment.
+    for value in [
+        vec![2],
+        vec![2, 1],
+        vec![2, 1, 0, 1, 0],
+        vec![2, 1, 0, 1, 0, 15, 1],
+        vec![2, 0],
+    ] {
+        let mut attributes = attr(0x40, 1, &[0]);
+        attributes.extend(attr(0x40, 2, &value));
+        attributes.extend(attr(0x40, 3, &[192, 0, 2, 9]));
+        let record = rib_v4_with_attributes(&attributes);
+        let bytes = [table(), record.clone(), rib_v4()].concat();
+        let batch = parse(&bytes);
+        let MrtBody::Rib(rib) = &batch.records[1].body else {
+            panic!("typed RIB")
+        };
+        assert_eq!(rib.entries[0].attributes, attributes);
+        assert_eq!(
+            batch.records[1].sha256,
+            sha256::hex(&sha256::digest(&record))
+        );
+        assert_eq!(batch.sha256, sha256::hex(&sha256::digest(&bytes)));
+        assert!(batch
+            .normalize_rib_entry(1, 0, &Limits::default())
+            .unwrap()
+            .is_none());
+        assert!(batch
+            .normalize_rib_entry(2, 0, &Limits::default())
+            .unwrap()
+            .is_some());
+    }
+    // A genuinely short outer attribute cannot be disguised as value evidence.
+    let bad_framing = [0x40, 1, 1, 0, 0x40, 2, 6, 2, 1];
+    assert!(MrtBatch::parse(
+        &[table(), rib_v4_with_attributes(&bad_framing)].concat(),
+        source(),
+        &MrtLimits::default(),
+    )
+    .is_err());
+}
 #[test]
 fn identical_route_bytes_from_distinct_collectors_keep_distinct_partitions() {
     let bytes = [table(), rib_v4()].concat();
@@ -518,10 +826,29 @@ fn unknown_types_families_and_attribute_semantics_remain_source_bound() {
     assert!(matches!(b.records[1].body, MrtBody::Rib(_)));
     let mut atomic = vec![0, 0, 0, 7, 8, 10, 0, 1, 0, 0];
     atomic.extend(10u32.to_be_bytes());
-    atomic.extend(3u16.to_be_bytes());
-    atomic.extend([0x40, 6, 0]);
+    let mut atomic_attributes = attrs();
+    atomic_attributes.extend([0x40, 6, 0]);
+    atomic.extend((atomic_attributes.len() as u16).to_be_bytes());
+    atomic.extend(&atomic_attributes);
     let b = parse(&[table(), record(2, 13, 2, &atomic)].concat());
-    assert!(b
+    let normalized = b
+        .normalize_rib_entry(1, 0, &Limits::default())
+        .unwrap()
+        .expect("valid zero-length ATOMIC_AGGREGATE is part of semantic v2");
+    assert_eq!(
+        get(identity(&normalized), "completeness"),
+        &Json::from("complete")
+    );
+    let Json::Array(routes) = get(&normalized, "routes") else {
+        panic!("routes")
+    };
+    assert_eq!(
+        get(get(&routes[0], "attributes"), "atomic_aggregate"),
+        &Json::Bool(true)
+    );
+    atomic_attributes.extend([0x80, 99, 0]);
+    let neighbor = parse(&[table(), rib_v4_with_attributes(&atomic_attributes)].concat());
+    assert!(neighbor
         .normalize_rib_entry(1, 0, &Limits::default())
         .unwrap()
         .is_none());
@@ -620,7 +947,9 @@ fn contradictory_lengths_et_and_malformed_attributes_are_rejected() {
     let mut b = bgp4mp(4, false, false);
     let end = b.len();
     b[end - 2] = 0; // BGP length no longer agrees
-    assert!(MrtBatch::parse(&b, source(), &MrtLimits::default()).is_err());
+    let malformed = MrtBatch::parse(&b, source(), &MrtLimits::default())
+        .expect("complete MRT container retains malformed embedded frame");
+    assert!(matches!(malformed.records[0].body, MrtBody::Bgp4mp(_)));
     let mut b = bgp4mp(7, true, false);
     b[12..16].copy_from_slice(&1_000_000u32.to_be_bytes());
     let parsed = MrtBatch::parse(&b, source(), &MrtLimits::default())

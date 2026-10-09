@@ -171,8 +171,19 @@ impl History {
         let mut at = self.index.lower_bound(generation, direction, low)?;
         let mut observations = Vec::<(Row, TcpInput, Decision)>::new();
         let mut work = 0u64;
+        let mut scanned = 0usize;
         let mut boundaries = BTreeSet::from([start, end]);
         while at < self.index.count {
+            // Charge the index scan before filtering: short intervals preceding
+            // start are still reads, even though they produce no observation.
+            if scanned >= self.config.max_query_intervals {
+                return Err(Error::limit("query_scan"));
+            }
+            scanned += 1;
+            work = work
+                .checked_add(crate::index::WIDTH as u64)
+                .filter(|n| *n <= self.config.max_query_work)
+                .ok_or_else(|| Error::limit("query_work"))?;
             let row = self.index.at(at)?;
             at += 1;
             if row.generation != generation || row.direction != direction || row.start >= end {

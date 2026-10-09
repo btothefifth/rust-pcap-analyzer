@@ -8,6 +8,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub struct Scope {
     pub section: u32,
     pub interface: u32,
+    /// Interface index supplied by the link header (currently Linux SLL2).
+    /// This namespace is distinct from the capture container's interface ID.
+    pub link_interface: Option<u32>,
     pub vlans: Vec<u16>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -27,6 +30,12 @@ pub enum ChecksumPolicy {
     Observe,
     RequireValid,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChecksumContext {
+    BaseAddresses,
+    /// Network options change pseudo-header operands we do not interpret.
+    Unsupported,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FragmentInfo {
     pub id: u32,
@@ -44,6 +53,7 @@ pub struct Datagram {
     pub fragment: Option<FragmentInfo>,
     pub payload: EvidenceBytes,
     pub ip_checksum: Checksum,
+    pub checksum_context: ChecksumContext,
 }
 #[derive(Clone, Debug)]
 pub struct TcpSegment {
@@ -112,6 +122,7 @@ pub fn decode_packet(
         }
         276 => {
             require(packet, 20, id.record_offset, "linux_sll2")?;
+            scope.link_interface = Some(be32(&packet[4..8]));
             (20, be16(&packet[..2]))
         }
         101 => {
@@ -215,6 +226,7 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
     }
     let source = IpAddr::V4(Ipv4Addr::new(b[12], b[13], b[14], b[15]));
     let destination = IpAddr::V4(Ipv4Addr::new(b[16], b[17], b[18], b[19]));
+    let checksum_context = ipv4_checksum_context(&b[20..header])?;
     Ok(Datagram {
         scope,
         source,
@@ -237,6 +249,7 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         } else {
             Checksum::Invalid
         },
+        checksum_context,
     })
 }
 fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datagram> {
@@ -264,6 +277,7 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
     let mut p = 40;
     let mut fragment = None;
     let mut depth = 0;
+    let mut checksum_context = ChecksumContext::BaseAddresses;
     while [0, 43, 44, 51, 60].contains(&next) {
         depth += 1;
         if depth > 16 {
@@ -322,6 +336,9 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
             id.record_offset + start as u64,
             "ipv6_extension_length",
         )?;
+        if ipv6_checksum_context(next, &b[p..p + ext])? == ChecksumContext::Unsupported {
+            checksum_context = ChecksumContext::Unsupported;
+        }
         next = b[p];
         p += ext;
     }
@@ -335,7 +352,69 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         fragment,
         payload: EvidenceBytes::from_packet(&b[p..total], id, start + p),
         ip_checksum: Checksum::NotPresent,
+        checksum_context,
     })
+}
+
+fn ipv4_checksum_context(options: &[u8]) -> Result<ChecksumContext> {
+    let mut p = 0;
+    let mut context = ChecksumContext::BaseAddresses;
+    while p < options.len() {
+        match options[p] {
+            0 => break,  // End of option list; remaining bytes are padding.
+            1 => p += 1, // NOP has no length byte.
+            ty => {
+                require(options, p + 2, 0, "ipv4_option_length")?;
+                let n = usize::from(options[p + 1]);
+                if n < 2 {
+                    return Err(bad(
+                        "ipv4_option_length",
+                        "option shorter than type and length",
+                    ));
+                }
+                require(options, p + n, 0, "ipv4_option_length")?;
+                // Source routing changes the final destination (RFC 791),
+                // used by transport pseudo-headers (RFC 9293 3.9.2.1).
+                if ty == 131 || ty == 137 {
+                    context = ChecksumContext::Unsupported;
+                }
+                p += n;
+            }
+        }
+    }
+    Ok(context)
+}
+
+/// Classify a length-checked IPv6 extension before a consumer removes it.
+/// Streaming normalization uses the same owner as both wire extension scans.
+pub fn ipv6_checksum_context(protocol: u8, header: &[u8]) -> Result<ChecksumContext> {
+    // RFC 8200 8.1 requires the final destination with a Routing header.
+    // Keep every routing type conservative until its operands are supported.
+    if protocol == 43 {
+        return Ok(ChecksumContext::Unsupported);
+    }
+    if protocol != 0 && protocol != 60 {
+        return Ok(ChecksumContext::BaseAddresses);
+    }
+    let mut context = ChecksumContext::BaseAddresses;
+    let mut p = 2;
+    while p < header.len() {
+        if header[p] == 0 {
+            // Pad1
+            p += 1;
+            continue;
+        }
+        require(header, p + 2, 0, "ipv6_option_length")?;
+        let n = usize::from(header[p + 1]) + 2;
+        require(header, p + n, 0, "ipv6_option_length")?;
+        // RFC 6275 6.3 / 11.3.1: the Home Address option changes the
+        // pseudo-header source. Do not guess based on the base IP address.
+        if header[p] == 0xc9 {
+            context = ChecksumContext::Unsupported;
+        }
+        p += n;
+    }
+    Ok(context)
 }
 
 pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<Transport> {
@@ -357,6 +436,7 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
     let mut prefix = 0;
     let all = datagram.payload.data();
     let mut depth = 0;
+    let mut checksum_context = datagram.checksum_context;
     // Fragmentable IPv6 extension headers can follow the Fragment header.
     while datagram.ipv6 && [0, 43, 51, 60].contains(&protocol) {
         depth += 1;
@@ -370,6 +450,11 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
             (usize::from(all[prefix + 1]) + 1) * 8
         };
         require(all, prefix + n, 0, "ipv6_post_fragment_extension")?;
+        if ipv6_checksum_context(protocol, &all[prefix..prefix + n])?
+            == ChecksumContext::Unsupported
+        {
+            checksum_context = ChecksumContext::Unsupported;
+        }
         protocol = all[prefix];
         prefix += n;
     }
@@ -382,7 +467,8 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
                 return Err(bad("tcp_offset", "data offset smaller than fixed header"));
             }
             require(data, header, 0, "tcp_options")?;
-            let checksum = transport_checksum(datagram.source, datagram.destination, 6, data)?;
+            let checksum = checked_transport_checksum(datagram, checksum_context, 6, data)?;
+            require_supported_checksum(checksum, policy)?;
             if policy == ChecksumPolicy::RequireValid && checksum != Checksum::Valid {
                 return Err(Error::new(
                     ErrorCode::Checksum,
@@ -424,8 +510,9 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
                     Checksum::NotPresent
                 }
             } else {
-                transport_checksum(datagram.source, datagram.destination, 17, &data[..len])?
+                checked_transport_checksum(datagram, checksum_context, 17, &data[..len])?
             };
+            require_supported_checksum(checksum, policy)?;
             if policy == ChecksumPolicy::RequireValid && checksum == Checksum::Invalid {
                 return Err(Error::new(
                     ErrorCode::Checksum,
@@ -454,6 +541,32 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
             format!("protocol {protocol} is not decoded"),
         )),
     }
+}
+
+fn checked_transport_checksum(
+    datagram: &Datagram,
+    context: ChecksumContext,
+    protocol: u8,
+    bytes: &[u8],
+) -> Result<Checksum> {
+    match context {
+        ChecksumContext::BaseAddresses => {
+            transport_checksum(datagram.source, datagram.destination, protocol, bytes)
+        }
+        ChecksumContext::Unsupported => Ok(Checksum::NotChecked),
+    }
+}
+
+fn require_supported_checksum(checksum: Checksum, policy: ChecksumPolicy) -> Result<()> {
+    if policy == ChecksumPolicy::RequireValid && checksum == Checksum::NotChecked {
+        return Err(Error::new(
+            ErrorCode::UnsupportedNetwork,
+            0,
+            "transport_checksum_operands",
+            "network options require unsupported pseudo-header operands",
+        ));
+    }
+    Ok(())
 }
 
 pub fn internet_checksum(data: &[u8]) -> u16 {

@@ -3,18 +3,22 @@ use pcap_evidence_history::query::History;
 use pcap_evidence_history_app::{analyze, Request};
 use pcap_evidence_product::deep::Limits;
 use std::{io::Write, path::Path};
+fn generation(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("generation must be 64 hexadecimal characters".into());
+    }
+    let mut id = [0; 32];
+    for (n, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[n * 2..n * 2 + 2], 16)?;
+    }
+    Ok(id)
+}
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 6 {
         return Err("USAGE: pcap-evidence-history-app CAPTURE HISTORY_DIR GENERATION_HEX DIRECTION PROTOCOL NEW_OUTPUT [--ua-security-none]".into());
     }
-    if args[2].len() != 64 {
-        return Err("generation must be 64 hex digits".into());
-    }
-    let mut generation = [0u8; 32];
-    for (i, x) in generation.iter_mut().enumerate() {
-        *x = u8::from_str_radix(&args[2][2 * i..2 * i + 2], 16)?;
-    }
+    let generation = generation(&args[2])?;
     if args.len() > 7 || args.get(6).is_some_and(|x| x != "--ua-security-none") {
         return Err("unknown option".into());
     }

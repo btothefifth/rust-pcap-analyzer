@@ -14,11 +14,17 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub const SCHEMA: &str = "pcap-evidence.bgp.association.v1";
 pub const INPUT_SCHEMA: &str = "pcap-evidence.association-input.v1";
+pub const ROUTE_INPUT_SCHEMA: &str = "pcap-evidence.association-input.v2";
+pub const EVIDENCE_REPORT_SCHEMA: &str = "pcap-evidence.bgp.association.v3";
+pub const ROUTE_REPORT_SCHEMA: &str = "pcap-evidence.bgp.association.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalKind {
     Flow,
     Security,
+    /// A source-bound route projection, with prefix equality as its only
+    /// spatial semantics. It carries no flow or endpoint observation.
+    RouteEvidence,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Coverage {
@@ -285,6 +291,94 @@ impl TimeComparison {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticRelation {
+    Equal,
+    Distinct,
+    Unavailable,
+}
+impl SemanticRelation {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Equal => "equal",
+            Self::Distinct => "distinct",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+/// Only validated producer identities may enter semantic comparison.
+#[derive(Clone, Debug)]
+struct CompleteIdentity {
+    schema: String,
+    payload: String,
+}
+fn complete_identity(o: &Observation, index: usize) -> Option<CompleteIdentity> {
+    let identity = o.routes().get(index)?.semantic_identity();
+    let Json::Object(fields) = identity else {
+        return None;
+    };
+    let value = |key| fields.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+    if value("completeness") != Some(&Json::from("complete")) {
+        return None;
+    }
+    let Json::String(schema) = value("schema")? else {
+        return None;
+    };
+    let payload = value("canonical_payload")?;
+    if !matches!(payload, Json::Object(_)) {
+        return None;
+    }
+    Some(CompleteIdentity {
+        schema: schema.clone(),
+        payload: canonical(payload).encode(),
+    })
+}
+fn semantic_relation(
+    a: Option<&CompleteIdentity>,
+    b: Option<&CompleteIdentity>,
+) -> SemanticRelation {
+    match (a, b) {
+        (Some(a), Some(b)) if a.schema == b.schema => {
+            if a.payload == b.payload {
+                SemanticRelation::Equal
+            } else {
+                SemanticRelation::Distinct
+            }
+        }
+        _ => SemanticRelation::Unavailable,
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceEventKind {
+    Open,
+    EndOfRib,
+    Gap,
+    Reset,
+    RejectedContainer,
+    Notification,
+    Keepalive,
+    RouteRefresh,
+    EndSession,
+    Clear,
+    SourceEvent,
+}
+impl SourceEventKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::EndOfRib => "end_of_rib",
+            Self::Gap => "gap",
+            Self::Reset => "reset",
+            Self::RejectedContainer => "rejected_container",
+            Self::Notification => "notification",
+            Self::Keepalive => "keepalive",
+            Self::RouteRefresh => "route_refresh",
+            Self::EndSession => "end_session",
+            Self::Clear => "clear",
+            Self::SourceEvent => "source_event",
+        }
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Association {
     /// Stable indices in this report's canonically sorted evidence arrays.
@@ -293,6 +387,7 @@ pub struct Association {
     pub status: AssociationStatus,
     pub reasons: Vec<Reason>,
     pub time: TimeComparison,
+    pub semantic_relation: Option<SemanticRelation>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvidenceEntry {
@@ -319,8 +414,27 @@ impl EvidenceEntry {
 pub struct SelectionNote {
     reason: Reason,
     witness: Json,
+    source_event_kind: Option<SourceEventKind>,
 }
 impl SelectionNote {
+    /// Caller owns verified source admission; this note grants no route disposition.
+    pub fn from_source_event(kind: SourceEventKind, witness: &Json, l: &Limits) -> Result<Self> {
+        inspect(witness, l)?;
+        let size = witness.encoded_len_bounded(l.input_bytes)?;
+        if size.saturating_mul(4) > l.retained_bytes || size.saturating_mul(4) > l.work {
+            return Err(Error::limit("bgp_association_source_event"));
+        }
+        reference_count(witness, l)?;
+        Ok(Self {
+            reason: Reason::MetadataOnly,
+            witness: witness.clone(),
+            source_event_kind: Some(kind),
+        })
+    }
+    pub fn source_event_kind(&self) -> Option<SourceEventKind> {
+        self.source_event_kind
+    }
+
     pub fn reason(&self) -> Reason {
         self.reason
     }
@@ -351,6 +465,7 @@ pub struct RouteEvidence {
     native_key: String,
     path_identity: String,
     action: RouteAction,
+    semantic_identity: Option<CompleteIdentity>,
 }
 impl RouteEvidence {
     pub fn from_normalized(
@@ -545,10 +660,16 @@ impl RouteEvidence {
             .saturating_add(frozen.record_content.len())
             .saturating_add(native_key.len())
             .saturating_add(path_identity.len())
+            .saturating_add(
+                r.semantic_identity()
+                    .encoded_len_bounded(l.retained_bytes)?,
+            )
             > l.retained_bytes
         {
             return Err(Error::limit("bgp_association_retained"));
         }
+        // Borrowed sidecar admission above precedes canonical payload retention.
+        let semantic_identity = complete_identity(o, route);
         Ok(Self {
             frozen,
             scope,
@@ -559,7 +680,62 @@ impl RouteEvidence {
             native_key,
             path_identity,
             action: r.action(),
+            semantic_identity,
         })
+    }
+    /// Attach a caller-verified native reducer disposition without replacing
+    /// original source identity, normalized bytes, or clock metadata.
+    pub fn with_store_selection(mut self, current: bool, seal: &str, l: &Limits) -> Result<Self> {
+        hash(seal)?;
+        if !current {
+            self.reasons.push(Reason::NotCurrentCandidate);
+        }
+        normalize_reasons(&mut self.reasons);
+        let mut data = self.frozen.data;
+        replace(
+            &mut data,
+            "selection",
+            if current {
+                "current_native_candidate_witness"
+            } else {
+                "inactive_or_unresolved_native_observation"
+            }
+            .into(),
+        );
+        replace(&mut data, "selection_snapshot_sha256", seal.into());
+        self.frozen = freeze(
+            data,
+            self.frozen.record_identity,
+            self.frozen.record_content,
+            self.frozen.spans,
+            l,
+        )?;
+        Ok(self)
+    }
+    /// Qualify a retained source occurrence without rewriting original packet
+    /// locators or normalized record labels. Sealed replay owns this binding.
+    pub fn with_source_occurrence(mut self, binding: &str, l: &Limits) -> Result<Self> {
+        identity(binding, l)?;
+        let record_identity = Json::object([
+            (
+                "original_identity",
+                self.frozen.record_identity.clone().into(),
+            ),
+            ("source_occurrence", binding.into()),
+        ])
+        .encode_bounded(l.input_bytes)?;
+        let Json::Object(mut fields) = self.frozen.data else {
+            unreachable!()
+        };
+        fields.push(("source_occurrence", binding.into()));
+        self.frozen = freeze(
+            Json::Object(fields),
+            record_identity,
+            self.frozen.record_content,
+            self.frozen.spans,
+            l,
+        )?;
+        Ok(self)
     }
     pub fn data(&self) -> &Json {
         &self.frozen.data
@@ -582,6 +758,8 @@ impl RouteEvidence {
 pub struct InternalEvidence {
     frozen: Frozen,
     input: InternalInput,
+    native_reasons: Vec<Reason>,
+    semantic_identity: Option<CompleteIdentity>,
 }
 impl InternalEvidence {
     pub fn new(input: InternalInput, l: &Limits) -> Result<Self> {
@@ -606,7 +784,15 @@ impl InternalEvidence {
         ]))
         .encode_bounded(l.input_bytes)?;
         let data = Json::object([
-            ("schema", INPUT_SCHEMA.into()),
+            (
+                "schema",
+                if input.kind == InternalKind::RouteEvidence {
+                    ROUTE_INPUT_SCHEMA
+                } else {
+                    INPUT_SCHEMA
+                }
+                .into(),
+            ),
             ("side", internal_name(input.kind).into()),
             ("source", source_identity_json(&input.source)),
             ("dimensions", dimensions_json(&input.dimensions)),
@@ -634,10 +820,114 @@ impl InternalEvidence {
             return Err(Error::limit("bgp_association_spans"));
         }
         let frozen = freeze(data, record_identity, content, spans, l)?;
-        Ok(Self { frozen, input })
+        let native_reasons = if input.kind == InternalKind::RouteEvidence {
+            vec![Reason::NotCurrentCandidate]
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            frozen,
+            input,
+            native_reasons,
+            semantic_identity: None,
+        })
     }
     pub fn data(&self) -> &Json {
         &self.frozen.data
+    }
+    /// Explicit native selection owned by the verified source consumer. Generic
+    /// flow/security adapters cannot set route disposition through opaque JSON.
+    pub fn with_native_disposition(
+        mut self,
+        action: RouteAction,
+        current: bool,
+        l: &Limits,
+    ) -> Result<Self> {
+        if self.input.kind != InternalKind::RouteEvidence {
+            return Err(bad(
+                "bgp_association_native_disposition",
+                0,
+                "route evidence required",
+            ));
+        }
+        self.native_reasons.clear();
+        if action != RouteAction::Announce {
+            self.native_reasons.push(Reason::NotAnnouncement);
+        }
+        if !current {
+            self.native_reasons.push(Reason::NotCurrentCandidate);
+        }
+        normalize_reasons(&mut self.native_reasons);
+        let Json::Object(mut fields) = self.frozen.data else {
+            unreachable!()
+        };
+        fields.push((
+            "native_disposition",
+            Json::object([
+                (
+                    "action",
+                    if action == RouteAction::Announce {
+                        "announce"
+                    } else {
+                        "withdraw"
+                    }
+                    .into(),
+                ),
+                ("current", current.into()),
+            ]),
+        ));
+        self.frozen = freeze(
+            Json::Object(fields),
+            self.frozen.record_identity,
+            self.frozen.record_content,
+            self.frozen.spans,
+            l,
+        )?;
+        Ok(self)
+    }
+    /// Binds semantic evidence only from the validated native observation API.
+    /// Opaque provenance details cannot activate equality.
+    pub fn with_semantic_observation(
+        mut self,
+        o: &Observation,
+        index: usize,
+        l: &Limits,
+    ) -> Result<Self> {
+        if self.input.kind != InternalKind::RouteEvidence
+            || self.input.provenance.record_sha256.as_deref()
+                != Some(sha256::hex(&o.sha256()).as_str())
+            || self.input.dimensions.prefix.as_ref() != o.routes().get(index).map(|r| r.prefix())
+            || self.input.source.source_id != o.source().source_id
+            || self.input.dimensions.scope.session != o.source().session
+            || self.input.dimensions.scope.generation != o.source().generation
+            || self.input.dimensions.scope.direction != o.source().direction
+            || self.input.time.observed_at_ns != o.source().observed_at_ns
+            || match &self.input.provenance.details {
+                Json::Object(fields) => {
+                    fields
+                        .iter()
+                        .find(|(k, _)| *k == "route_index")
+                        .map(|(_, v)| v)
+                        != Some(&Json::from(index))
+                }
+                _ => true,
+            }
+        {
+            return Err(bad(
+                "bgp_association_semantic_binding",
+                0,
+                "exact route observation required",
+            ));
+        }
+        inspect(o.normalized(), l)?;
+        let size = o.routes()[index]
+            .semantic_identity()
+            .encoded_len_bounded(l.input_bytes)?;
+        if size.saturating_mul(4) > l.retained_bytes || size.saturating_mul(4) > l.work {
+            return Err(Error::limit("bgp_association_semantic_identity"));
+        }
+        self.semantic_identity = complete_identity(o, index);
+        Ok(self)
     }
     pub fn input(&self) -> &InternalInput {
         &self.input
@@ -662,6 +952,11 @@ impl RouteBatch {
         };
         value.validate(l)?;
         Ok(value)
+    }
+    pub fn with_source_notes(mut self, notes: Vec<SelectionNote>, l: &Limits) -> Result<Self> {
+        self.notes.extend(notes);
+        self.validate(l)?;
+        Ok(self)
     }
     pub fn from_candidate_state(
         state: &CandidateState,
@@ -721,6 +1016,7 @@ impl RouteBatch {
                         Reason::MetadataOnly
                     },
                     witness: o.normalized().clone(),
+                    source_event_kind: None,
                 });
             }
             for ri in 0..o.routes().len() {
@@ -793,7 +1089,16 @@ impl RouteBatch {
         let mut b = Budget::new(l);
         for r in &self.routes {
             b.input(&r.frozen)?;
-            b.retain(r.native_key.len().saturating_add(r.path_identity.len()))?;
+            b.retain(
+                r.native_key
+                    .len()
+                    .saturating_add(r.path_identity.len())
+                    .saturating_add(
+                        r.semantic_identity
+                            .as_ref()
+                            .map_or(0, |i| i.payload.len().saturating_add(i.schema.len())),
+                    ),
+            )?;
         }
         for n in &self.notes {
             b.tree(&n.witness, 1)?;
@@ -813,8 +1118,23 @@ pub struct AssociationReport {
     associations: Vec<Association>,
     notes: Vec<SelectionNote>,
     encoded: String,
+    policy: Policy,
+    snapshot: Option<String>,
+    evidence_profile: bool,
 }
 impl AssociationReport {
+    /// Typed projection, constructed by the same report owner as encoding.
+    pub fn to_json(&self) -> Json {
+        report_json(
+            &self.routes,
+            &self.internal,
+            &self.associations,
+            &self.notes,
+            policy_json(&self.policy),
+            self.snapshot.as_deref(),
+            self.evidence_profile,
+        )
+    }
     pub fn routes(&self) -> &[EvidenceEntry] {
         &self.routes
     }
@@ -837,6 +1157,24 @@ pub fn associate(
     internal: &[InternalEvidence],
     policy: &Policy,
     l: &Limits,
+) -> Result<AssociationReport> {
+    associate_impl(routes, internal, policy, l, false)
+}
+/// Additive semantic evidence report; legacy association schemas remain unchanged.
+pub fn associate_evidence(
+    routes: &RouteBatch,
+    internal: &[InternalEvidence],
+    policy: &Policy,
+    l: &Limits,
+) -> Result<AssociationReport> {
+    associate_impl(routes, internal, policy, l, true)
+}
+fn associate_impl(
+    routes: &RouteBatch,
+    internal: &[InternalEvidence],
+    policy: &Policy,
+    l: &Limits,
+    evidence_profile: bool,
 ) -> Result<AssociationReport> {
     l.validate()?;
     validate_policy(policy, l)?;
@@ -873,10 +1211,24 @@ pub fn associate(
     budget.bytes(policy_json.encode_bounded(l.input_bytes)?.len())?;
     for r in &routes.routes {
         budget.input(&r.frozen)?;
-        budget.retain(r.native_key.len().saturating_add(r.path_identity.len()))?;
+        budget.retain(
+            r.native_key
+                .len()
+                .saturating_add(r.path_identity.len())
+                .saturating_add(
+                    r.semantic_identity
+                        .as_ref()
+                        .map_or(0, |i| i.payload.len().saturating_add(i.schema.len())),
+                ),
+        )?;
     }
     for i in internal {
         budget.input(&i.frozen)?;
+        budget.retain(
+            i.semantic_identity
+                .as_ref()
+                .map_or(0, |v| v.payload.len().saturating_add(v.schema.len())),
+        )?;
     }
     for n in &routes.notes {
         budget.tree(&n.witness, 1)?;
@@ -948,7 +1300,11 @@ pub fn associate(
         normalize_reasons(&mut route_entries[index].reasons);
     }
     for (index, (f, _)) in ii.iter().enumerate() {
-        let i = &internal_lookup[f.encoded.as_str()].input;
+        let adapted = internal_lookup[f.encoded.as_str()];
+        internal_entries[index]
+            .reasons
+            .extend(adapted.native_reasons.iter().copied());
+        let i = &adapted.input;
         if i.coverage != Coverage::DeclaredComplete {
             internal_entries[index]
                 .reasons
@@ -981,6 +1337,14 @@ pub fn associate(
                 status: status(&reasons),
                 reasons,
                 time,
+                semantic_relation: evidence_profile.then(|| {
+                    semantic_relation(
+                        r.semantic_identity.as_ref(),
+                        internal_lookup[ii[ni].0.encoded.as_str()]
+                            .semantic_identity
+                            .as_ref(),
+                    )
+                }),
             });
         }
     }
@@ -1015,6 +1379,7 @@ pub fn associate(
                 status: AssociationStatus::Unresolved,
                 reasons,
                 time: TimeComparison::unused(),
+                semantic_relation: evidence_profile.then_some(SemanticRelation::Unavailable),
             });
         }
     }
@@ -1029,6 +1394,7 @@ pub fn associate(
                 status: AssociationStatus::Unresolved,
                 reasons,
                 time: TimeComparison::unused(),
+                semantic_relation: evidence_profile.then_some(SemanticRelation::Unavailable),
             });
         }
     }
@@ -1039,6 +1405,7 @@ pub fn associate(
             status: AssociationStatus::Unresolved,
             reasons: vec![Reason::NoRouteEvidence, Reason::NoInternalEvidence],
             time: TimeComparison::unused(),
+            semantic_relation: evidence_profile.then_some(SemanticRelation::Unavailable),
         });
     }
     let mut notes = routes.notes.clone();
@@ -1053,10 +1420,47 @@ pub fn associate(
     if output_nodes > l.fields {
         return Err(Error::limit("bgp_association_output_nodes"));
     }
-    let data = Json::object([
-        ("schema", SCHEMA.into()),
+    let data = report_json(
+        &route_entries,
+        &internal_entries,
+        &associations,
+        &notes,
+        policy_json,
+        routes.snapshot.as_deref(),
+        evidence_profile,
+    );
+    let output_work = inspect(&data, l)?;
+    budget.charge(output_work)?;
+    budget.charge(budget.input_bytes.saturating_mul(4))?;
+    let encoded = canonical(&data).encode_bounded(
+        l.output_bytes
+            .min(l.retained_bytes.saturating_sub(budget.retained)),
+    )?;
+    Ok(AssociationReport {
+        routes: route_entries,
+        internal: internal_entries,
+        associations,
+        notes,
+        encoded,
+        policy: policy.clone(),
+        snapshot: routes.snapshot.clone(),
+        evidence_profile,
+    })
+}
+
+fn report_json(
+    route_entries: &[EvidenceEntry],
+    internal_entries: &[EvidenceEntry],
+    associations: &[Association],
+    notes: &[SelectionNote],
+    policy_json: Json,
+    snapshot: Option<&str>,
+    evidence_profile: bool,
+) -> Json {
+    Json::object([
+        ("schema", if evidence_profile { EVIDENCE_REPORT_SCHEMA } else if internal_entries.iter().any(|entry| matches!(&entry.data, Json::Object(fields) if fields.iter().any(|(key,value)| *key == "side" && *value == Json::from("route_evidence")))) { ROUTE_REPORT_SCHEMA } else { SCHEMA }.into()),
         ("policy", policy_json),
-        ("candidate_snapshot_sha256", optional(&routes.snapshot)),
+        ("candidate_snapshot_sha256", snapshot.map_or(Json::Null, Json::from)),
         ("endpoint_state_established", false.into()),
         ("rib_established", false.into()),
         ("best_path_selected", false.into()),
@@ -1091,31 +1495,16 @@ pub fn associate(
         (
             "selection_notes",
             Json::array(notes.iter().map(|n| {
-                Json::object([
-                    ("reason", n.reason.name().into()),
-                    ("witness", n.witness.clone()),
-                ])
+                let mut fields = vec![("reason", n.reason.name().into()), ("witness", n.witness.clone())];
+                if let Some(kind) = n.source_event_kind { fields.push(("source_event_kind", kind.name().into())); }
+                Json::Object(fields)
             })),
         ),
         (
             "associations",
             Json::array(associations.iter().map(association_json)),
         ),
-    ]);
-    let output_work = inspect(&data, l)?;
-    budget.charge(output_work)?;
-    budget.charge(budget.input_bytes.saturating_mul(4))?;
-    let encoded = canonical(&data).encode_bounded(
-        l.output_bytes
-            .min(l.retained_bytes.saturating_sub(budget.retained)),
-    )?;
-    Ok(AssociationReport {
-        routes: route_entries,
-        internal: internal_entries,
-        associations,
-        notes,
-        encoded,
-    })
+    ])
 }
 
 fn sorted_unique<'a>(values: impl Iterator<Item = &'a Frozen>) -> Vec<(&'a Frozen, usize)> {
@@ -1772,6 +2161,7 @@ fn internal_name(v: InternalKind) -> &'static str {
     match v {
         InternalKind::Flow => "internal_flow",
         InternalKind::Security => "internal_security",
+        InternalKind::RouteEvidence => "route_evidence",
     }
 }
 fn coverage_name(v: Coverage) -> &'static str {
@@ -1960,7 +2350,7 @@ fn entry_json(e: &EvidenceEntry) -> Json {
     ])
 }
 fn association_json(a: &Association) -> Json {
-    Json::object([
+    let mut fields = vec![
         (
             "route",
             a.route.map_or(Json::Null, |n| n.to_string().into()),
@@ -1983,5 +2373,33 @@ fn association_json(a: &Association) -> Json {
                 ("uncertainty_used", a.time.uncertainty_used.into()),
             ]),
         ),
-    ])
+    ];
+    if let Some(relation) = a.semantic_relation {
+        fields.push(("semantic_relation", relation.name().into()));
+    }
+    Json::Object(fields)
+}
+
+#[cfg(test)]
+mod semantic_relation_schema_tests {
+    use super::*;
+    #[test]
+    fn mixed_complete_identity_schemas_are_unavailable_even_with_equal_payloads() {
+        let a = CompleteIdentity {
+            schema: "identity.v1".into(),
+            payload: "{\"origin\":0}".into(),
+        };
+        let b = CompleteIdentity {
+            schema: "identity.v2".into(),
+            payload: a.payload.clone(),
+        };
+        assert_eq!(
+            semantic_relation(Some(&a), Some(&b)),
+            SemanticRelation::Unavailable
+        );
+        assert_eq!(
+            semantic_relation(Some(&a), None),
+            SemanticRelation::Unavailable
+        );
+    }
 }

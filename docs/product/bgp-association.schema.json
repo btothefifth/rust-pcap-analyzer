@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:pcap-evidence:bgp:association:v1",
   "title": "Bounded non-causal candidate evidence association",
-  "$comment": "Structural projection only. Runtime Limits, source verification, policy compatibility, exact ranges and complete candidate coverage are independent obligations. Opaque evidence objects preserve producer fields; this schema is not authentication or semantic proof.",
+  "$comment": "Structural projection only. Runtime Limits, source verification, policy compatibility, exact ranges and complete candidate coverage are independent obligations. Opaque evidence objects preserve producer fields; this schema is not authentication or semantic proof. Route-evidence inputs use association-input.v2 and require association report v2; Flow/Security retain v1. Store seals establish integrity only.",
   "type": "object",
   "required": [
     "schema",
@@ -25,7 +25,10 @@
   "additionalProperties": false,
   "properties": {
     "schema": {
-      "const": "pcap-evidence.bgp.association.v1"
+      "enum": [
+        "pcap-evidence.bgp.association.v1",
+        "pcap-evidence.bgp.association.v2"
+      ]
     },
     "policy": {
       "type": "object",
@@ -288,7 +291,60 @@
         "additionalProperties": false,
         "properties": {
           "evidence": {
-            "type": "object"
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "schema",
+                  "side"
+                ],
+                "properties": {
+                  "schema": {
+                    "const": "pcap-evidence.association-input.v1"
+                  },
+                  "side": {
+                    "enum": [
+                      "internal_flow",
+                      "internal_security"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "required": [
+                  "schema",
+                  "side"
+                ],
+                "properties": {
+                  "schema": {
+                    "const": "pcap-evidence.association-input.v2"
+                  },
+                  "side": {
+                    "const": "route_evidence"
+                  },
+                  "native_disposition": {
+                    "type": "object",
+                    "required": [
+                      "action",
+                      "current"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "enum": [
+                          "announce",
+                          "withdraw"
+                        ]
+                      },
+                      "current": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
           },
           "input_sha256": {
             "type": "string",
@@ -530,5 +586,73 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema": {
+            "const": "pcap-evidence.bgp.association.v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "internal_evidence": {
+            "items": {
+              "properties": {
+                "evidence": {
+                  "type": "object",
+                  "required": [
+                    "schema",
+                    "side"
+                  ],
+                  "properties": {
+                    "schema": {
+                      "const": "pcap-evidence.association-input.v1"
+                    },
+                    "side": {
+                      "enum": [
+                        "internal_flow",
+                        "internal_security"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "internal_evidence": {
+            "contains": {
+              "properties": {
+                "evidence": {
+                  "type": "object",
+                  "required": [
+                    "schema",
+                    "side"
+                  ],
+                  "properties": {
+                    "schema": {
+                      "const": "pcap-evidence.association-input.v2"
+                    },
+                    "side": {
+                      "const": "route_evidence"
+                    }
+                  }
+                }
+              },
+              "required": [
+                "evidence"
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ]
 }

@@ -110,6 +110,24 @@ fn paired() -> SessionState {
     decode("open_four_b", &mut state, Some(1), 2);
     state
 }
+fn paired_two() -> SessionState {
+    let mut state = SessionState::default();
+    decode("open_two", &mut state, Some(0), 900);
+    let mut peer_open = wire("open_two");
+    peer_open[20..22].copy_from_slice(&65001u16.to_be_bytes());
+    peer_open[27] = 2;
+    let value = bgp::decode_pcap(
+        &evidence(&peer_open, 901),
+        metadata(Some(1), 901),
+        &mut state,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(opens(&value).len(), 2);
+    assert_eq!(get(context(&value), "asn_width"), &Json::from(2usize));
+    assert_eq!(get(&value, "negotiation_established"), &Json::Bool(false));
+    state
+}
 fn changed_update(attributes: &[u8], prefixes: &[u8]) -> Vec<u8> {
     let length = 23 + attributes.len() + prefixes.len();
     let mut raw = vec![255; 16];
@@ -131,6 +149,7 @@ fn required_attributes_except(code: u8) -> Vec<u8> {
         (1, 0x40, &[0][..]),
         (2, 0x40, &[2, 1, 0, 1][..]),
         (3, 0x40, &[192, 0, 2, 1][..]),
+        (5, 0x40, &[0, 0, 0, 100][..]),
     ] {
         if required_code != code {
             values.extend(wire_attribute(flags, required_code, payload));
@@ -525,11 +544,106 @@ fn malformed_capability_and_partial_looking_open_leave_the_prior_state_intact() 
     );
 }
 #[test]
-fn repeated_open_is_an_alternative_not_an_implicit_generation_boundary() {
+fn identical_open_bytes_retain_distinct_source_occurrences_and_bilateral_grammar() {
+    let raw = wire("open_four_a");
     let mut state = paired();
     let value = decode("open_four_a", &mut state, Some(0), 3);
     assert_eq!(state.generation(), 0);
-    assert_eq!(array(get(&opens(&value)[0], "observations")).len(), 2);
+    assert_eq!(opens(&value).len(), 2);
+    let witnesses = array(get(&opens(&value)[0], "observations"));
+    assert_eq!(witnesses.len(), 2);
+    for (witness, frame) in witnesses.iter().zip([1u64, 3]) {
+        assert_eq!(
+            get(get(witness, "source"), "record_id"),
+            &Json::from(format!("record-{frame}"))
+        );
+        let proof = get(witness, "evidence");
+        assert_eq!(
+            get(proof, "byte_length"),
+            &Json::from(raw.len().to_string())
+        );
+        assert_eq!(
+            get(proof, "reconstructed_sha256"),
+            &Json::from(sha256::hex(&sha256::digest(&raw)))
+        );
+        let spans = array(get(proof, "spans"));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(get(&spans[0], "frame"), &Json::from(frame.to_string()));
+    }
+    assert_eq!(get(&witnesses[0], "open"), get(&witnesses[1], "open"));
+    assert_ne!(
+        get(&witnesses[0], "evidence"),
+        get(&witnesses[1], "evidence")
+    );
+    assert_eq!(array(get(&opens(&value)[1], "observations")).len(), 1);
+    assert_eq!(get(context(&value), "asn_width"), &Json::from(4usize));
+    assert!(!array(get(&value, "issues")).contains(&Json::from(
+        "repeated_open_requires_explicit_generation_boundary"
+    )));
+    let route = decode("announce_four", &mut state, Some(0), 4);
+    assert_eq!(
+        array(get(&array(get(attrs(&route), "as_path"))[0], "values")),
+        &[Json::from(65636u32)]
+    );
+    assert!(
+        !Observation::from_normalized(&route, None, &Limits::default())
+            .unwrap()
+            .routes()[0]
+            .ambiguous_attributes()
+    );
+}
+
+#[test]
+fn repeated_open_is_an_alternative_not_an_implicit_generation_boundary() {
+    let original = wire("open_four_a");
+    let mut changed = original.clone();
+    // Hold time differs; ASN, identifier and capability occurrences are identical.
+    changed[22..24].copy_from_slice(&91u16.to_be_bytes());
+    assert_ne!(sha256::digest(&original), sha256::digest(&changed));
+    let mut state = paired();
+    let value = bgp::decode_pcap(
+        &evidence(&changed, 3),
+        metadata(Some(0), 3),
+        &mut state,
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        get(get(&value, "message_detail"), "ambiguous"),
+        &Json::Bool(false)
+    );
+    assert_eq!(state.generation(), 0);
+    let witnesses = array(get(&opens(&value)[0], "observations"));
+    assert_eq!(witnesses.len(), 2);
+    assert_eq!(array(get(&opens(&value)[1], "observations")).len(), 1);
+    for key in [
+        "autonomous_system",
+        "four_octet_asn",
+        "identifier",
+        "capability_occurrences",
+    ] {
+        assert_eq!(
+            get(get(&witnesses[0], "open"), key),
+            get(get(&witnesses[1], "open"), key)
+        );
+    }
+    assert_eq!(
+        get(get(&witnesses[0], "open"), "hold_time"),
+        &Json::from(90u16)
+    );
+    assert_eq!(
+        get(get(&witnesses[1], "open"), "hold_time"),
+        &Json::from(91u16)
+    );
+    for (witness, raw) in witnesses.iter().zip([&original, &changed]) {
+        assert_eq!(
+            get(get(witness, "evidence"), "reconstructed_sha256"),
+            &Json::from(sha256::hex(&sha256::digest(raw)))
+        );
+    }
+    assert!(array(get(&value, "issues")).contains(&Json::from(
+        "repeated_open_requires_explicit_generation_boundary"
+    )));
     assert_eq!(get(context(&value), "asn_width"), &Json::Null);
     let route = decode("announce_two", &mut state, Some(0), 4);
     assert!(array(get(attrs(&route), "as_path")).is_empty());
@@ -542,6 +656,35 @@ fn repeated_open_is_an_alternative_not_an_implicit_generation_boundary() {
             .unwrap()
             .routes()[0]
             .ambiguous_attributes()
+    );
+
+    // The real consumer rejects the ambiguous announcement, preserving generation0.
+    let mut pipeline = pcap_evidence_product::deep::bgp_pipeline::CapturedSessionPipeline::new(
+        packet(1).capture,
+        "capture-source".into(),
+        7,
+        Limits::default(),
+    )
+    .unwrap();
+    for (raw, direction, frame) in [
+        (original, 0, 1),
+        (wire("open_four_b"), 1, 2),
+        (changed, 0, 3),
+    ] {
+        pipeline
+            .apply_message(&evidence(&raw, frame), metadata(Some(direction), frame))
+            .unwrap();
+    }
+    let receipt = pipeline
+        .apply_message(&evidence(&wire("announce_two"), 4), metadata(Some(0), 4))
+        .unwrap();
+    assert!(!receipt.protocol_reset);
+    assert_eq!(pipeline.wire_state().generation(), 0);
+    assert!(pipeline.rib().entries().is_empty());
+    assert_eq!(pipeline.rib().rejections().len(), 1);
+    assert_eq!(
+        pipeline.rib().rejections()[0].reason,
+        "ambiguous_attribute_context"
     );
 }
 #[test]
@@ -649,7 +792,7 @@ fn ordinary_scalar_duplicates_keep_the_first_effective_value_and_every_source_ra
 
             let decode_values = |values: &[u8], frame| {
                 let raw = changed_update(values, &[24, 203, 0, 113]);
-                let mut state = SessionState::default();
+                let mut state = paired_two();
                 state.set_peer_relationship(PeerRelationship::Internal);
                 bgp::decode_pcap(
                     &evidence(&raw, frame),
@@ -725,7 +868,7 @@ fn duplicate_path_and_collection_attributes_keep_the_first_value_without_concate
         duplicate_values.extend(wire_attribute(flags, code, &second));
         let decode_values = |values: &[u8], frame| {
             let raw = changed_update(values, &[24, 203, 0, 113]);
-            let mut state = SessionState::default();
+            let mut state = paired_two();
             state.set_peer_relationship(PeerRelationship::Internal);
             bgp::decode_pcap(
                 &evidence(&raw, frame),
@@ -840,7 +983,7 @@ fn source_ranges_and_payload_hashes_survive_a_split_inside_the_asn() {
 }
 #[test]
 fn source_movement_does_not_turn_the_same_path_into_a_conflicting_candidate() {
-    let mut decoder = SessionState::default();
+    let mut decoder = paired_two();
     let a = decode("announce_two", &mut decoder, Some(0), 1);
     let raw = wire("announce_two");
     // Add a withdrawal before the unchanged attributes. Every attribute offset moves.
@@ -906,12 +1049,21 @@ fn all_truncation_prefixes_and_attribute_boundary_failures_are_atomic() {
         );
     }
     let malformed = changed_update(&[0x50, 1, 0], &[0, 0, 0]);
-    atomic_error(
-        &malformed,
+    let recovered = bgp::decode_pcap(
+        &evidence(&malformed, 3),
         metadata(Some(0), 3),
         &mut paired(),
         &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        get(get(&recovered, "message_detail"), "update_disposition"),
+        &Json::from("treat_as_withdraw")
     );
+    assert!(array(get(&recovered, "routes"))
+        .iter()
+        .all(|route| get(route, "action") == &Json::from("withdraw")));
+    Observation::from_normalized(&recovered, None, &Limits::default()).unwrap();
     let mut trailing = wire("keepalive");
     trailing.extend(wire("keepalive"));
     atomic_error(
@@ -1063,7 +1215,7 @@ fn existing_candidate_admission_and_exact_normalized_replay_are_unchanged() {
 #[test]
 fn current_association_accepts_the_new_occurrence_shape_without_mutating_state() {
     let l = Limits::default();
-    let value = decode("announce_two", &mut SessionState::default(), Some(0), 1);
+    let value = decode("announce_two", &mut paired_two(), Some(0), 1);
     let mut state = CandidateState::new(l.clone()).unwrap();
     state
         .apply(Observation::from_normalized(&value, None, &l).unwrap())

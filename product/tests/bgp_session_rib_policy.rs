@@ -1089,6 +1089,31 @@ fn policy_complete_trace_exact_limit_and_one_below() {
     let canonical = reference.encode_canonical(&Limits::default()).unwrap();
     let size = canonical.len();
     assert_eq!(reference.encoded_len(size).unwrap(), size);
+    // The additive typed carrier must retain the canonical trace byte-for-byte.
+    assert_eq!(reference.to_json().encode_bounded(size).unwrap(), canonical);
+    // Parse the actual canonical bytes with the same standard JSON parser used
+    // by repository validation, rather than accepting a string-shaped trace.
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let mut parser = Command::new(python).args(["-c",
+        "import json,sys; value=json.load(sys.stdin); assert isinstance(value['comparisons'],list); assert isinstance(value['excluded'],list); assert isinstance(value['unresolved'],list)"])
+        .stdin(Stdio::piped()).spawn().unwrap();
+    parser
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(canonical.as_bytes())
+        .unwrap();
+    assert!(parser.wait().unwrap().success());
     assert!(canonical.starts_with("{\"candidate_set_fingerprint_sha256\":"));
     assert!(canonical.contains("\"schema\":\"pcap-evidence.bgp.policy-result.v1\""));
     assert!(canonical.contains("\"candidate_store_binding\":\"not_provided_by_policy_api\""));
@@ -1331,4 +1356,547 @@ fn legacy_adapter_preserves_exact_candidate_snapshot() {
     );
     assert!(adapted.legacy_snapshot_sha256().is_some());
     assert!(adapted.apply(announce("new", 0, 1)).is_err());
+}
+
+#[test]
+fn rib_typed_charge_oracle_exact_and_one_below() {
+    // Independent literal accounting fixture: all six owned texts are one byte,
+    // no route entries or JSON. The contract charges 32+6 bytes per text,
+    // structural nodes 256, scalar identities 8, vectors 64 and slots 32.
+    // source=340, session=634, scope=658, event=1254, label index=1024;
+    // generation=898, gap observation=952, gap index=898. Sum=5026.
+    // Prospective work: 3*1254 + 2*3638 mutation + 2*1024 index = 13086.
+    let input = RibEvent {
+        scope: RibScope {
+            source: SourcePartition {
+                kind: PartitionKind::Captured,
+                source_id: "a".into(),
+                partition_id: "p".into(),
+            },
+            session: "s".into(),
+            generation: 0,
+            direction: None,
+            peer: None,
+        },
+        record_id: "g".into(),
+        kind: RibEventKind::Gap { reason: "x".into() },
+    };
+    let mut exact = AdjRibIn::new(Limits {
+        retained_bytes: 5026,
+        output_bytes: 5026,
+        work: 13086,
+        ..Limits::default()
+    })
+    .unwrap();
+    assert_eq!(
+        exact.apply(input.clone()).unwrap(),
+        bgp_rib::ApplyStatus::Applied
+    );
+    assert_eq!(exact.retained_bytes(), 5026);
+    assert_eq!(exact.accounted_work(), 13086);
+    let diagnostics = exact.transaction_diagnostics();
+    assert_eq!(
+        exact.apply(input.clone()).unwrap(),
+        bgp_rib::ApplyStatus::IdenticalReplay
+    );
+    assert_eq!(exact.accounted_work(), 13086);
+    assert_eq!(exact.transaction_diagnostics(), diagnostics);
+    for limits in [
+        Limits {
+            retained_bytes: 5025,
+            ..Limits::default()
+        },
+        Limits {
+            output_bytes: 5025,
+            ..Limits::default()
+        },
+        Limits {
+            work: 13085,
+            ..Limits::default()
+        },
+    ] {
+        let mut rib = AdjRibIn::new(limits).unwrap();
+        assert!(rib.apply(input.clone()).is_err());
+        assert!(rib.events().is_empty());
+        assert!(rib.gaps().is_empty());
+        assert_eq!((rib.retained_bytes(), rib.accounted_work()), (0, 0));
+        assert_eq!(
+            rib.transaction_diagnostics(),
+            bgp_rib::RibTransactionDiagnostics::default()
+        );
+    }
+}
+
+#[test]
+fn rib_prepared_multi_action_failure_retains_indexes_and_history() {
+    let seed = announce("seed", 0, 10);
+    let mut update = announce("multi-stage", 0, 20);
+    if let RibEventKind::Update(actions) = &mut update.kind {
+        // The same key occurs twice: replacement and withdrawal are one atomic record.
+        actions.push(RibAction::Withdraw {
+            prefix: prefix(),
+            path_id: PathId::Absent,
+        });
+        let mut second = prefix();
+        second.address = "198.51.100.0".into();
+        actions.push(RibAction::Announce {
+            prefix: second,
+            path_id: PathId::Absent,
+            attributes: Json::Null,
+            attribute_identity: "second".into(),
+        });
+    }
+    let mut reference = AdjRibIn::new(Limits::default()).unwrap();
+    reference.apply(seed.clone()).unwrap();
+    reference.apply(update.clone()).unwrap();
+    let size = reference.retained_bytes();
+    let work = reference.accounted_work();
+    for limits in [
+        Limits {
+            retained_bytes: size - 1,
+            ..Limits::default()
+        },
+        Limits {
+            output_bytes: size - 1,
+            ..Limits::default()
+        },
+        Limits {
+            work: work - 1,
+            ..Limits::default()
+        },
+    ] {
+        let mut rib = AdjRibIn::new(limits).unwrap();
+        rib.apply(seed.clone()).unwrap();
+        let events = rib.events().to_vec();
+        let entries = rib.entries().clone();
+        let before = (
+            rib.retained_bytes(),
+            rib.accounted_work(),
+            rib.transaction_diagnostics(),
+        );
+        assert!(rib.apply(update.clone()).is_err());
+        assert_eq!(rib.events(), events);
+        assert_eq!(rib.entries(), &entries);
+        assert!(rib.gaps().is_empty() && rib.eors().is_empty() && rib.rejections().is_empty());
+        assert_eq!(
+            (
+                rib.retained_bytes(),
+                rib.accounted_work(),
+                rib.transaction_diagnostics()
+            ),
+            before
+        );
+        assert_eq!(
+            rib.apply(seed.clone()).unwrap(),
+            bgp_rib::ApplyStatus::IdenticalReplay
+        );
+        // Failed label/index publication must not turn this smaller retry into conflict.
+        let mut retry = announce("multi-stage", 0, 10);
+        if let RibEventKind::Update(actions) = &mut retry.kind {
+            actions[0] = RibAction::Reject {
+                prefix: prefix(),
+                path_id: PathId::Absent,
+                reason: "small".into(),
+            };
+        }
+        assert_eq!(rib.apply(retry).unwrap(), bgp_rib::ApplyStatus::Applied);
+    }
+}
+
+#[test]
+fn rib_indexed_old_alternative_replay_and_generation_wide_conflict() {
+    let mut rib = AdjRibIn::new(Limits::default()).unwrap();
+    let first = announce("same-label", 0, 10);
+    rib.apply(first.clone()).unwrap();
+    rib.apply(announce("same-label", 0, 11)).unwrap();
+    rib.apply(announce("same-label", 0, 12)).unwrap();
+    let before = (
+        rib.events().len(),
+        rib.retained_bytes(),
+        rib.accounted_work(),
+    );
+    assert_eq!(
+        rib.apply(first).unwrap(),
+        bgp_rib::ApplyStatus::IdenticalReplay
+    );
+    assert_eq!(
+        (
+            rib.events().len(),
+            rib.retained_bytes(),
+            rib.accounted_work()
+        ),
+        before
+    );
+    assert!(rib
+        .entries()
+        .values()
+        .all(|e| e.status == RouteStatus::Unresolved));
+
+    let mut historical = AdjRibIn::new(Limits::default()).unwrap();
+    historical.apply(announce("old", 0, 1)).unwrap();
+    historical
+        .apply(rib_event(
+            "reset",
+            1,
+            None,
+            RibEventKind::Reset {
+                previous_generation: 0,
+                reason: "boundary".into(),
+            },
+        ))
+        .unwrap();
+    historical.apply(announce("new", 1, 2)).unwrap();
+    let late = announce("late-label", 0, 3);
+    assert_eq!(
+        historical.apply(late.clone()).unwrap(),
+        bgp_rib::ApplyStatus::Historical
+    );
+    assert_eq!(
+        historical.apply(late).unwrap(),
+        bgp_rib::ApplyStatus::IdenticalReplay
+    );
+    assert_eq!(
+        historical.apply(announce("late-label", 0, 4)).unwrap(),
+        bgp_rib::ApplyStatus::IdentityConflict
+    );
+    assert!(historical
+        .entries()
+        .values()
+        .all(|entry| entry.status == RouteStatus::Unresolved));
+}
+
+#[test]
+fn rib_ordinary_updates_stage_only_affected_entries() {
+    // Finite diagnostics over the actual reducer; no timing threshold or corpus.
+    // 100 distinct entries and 100 replacements fit the unchanged defaults.
+    let mut rib = AdjRibIn::new(Limits::default()).unwrap();
+    for i in 0..100u8 {
+        let mut event = announce(&format!("a-{i}"), 0, 1);
+        event.scope.source.source_id = "a".into();
+        event.scope.source.partition_id = "p".into();
+        event.scope.session = "s".into();
+        event.scope.peer = None;
+        if let RibEventKind::Update(actions) = &mut event.kind {
+            if let RibAction::Announce { prefix, .. } = &mut actions[0] {
+                prefix.address = format!("10.{i}.0.0");
+                prefix.length = 16;
+            }
+        }
+        rib.apply(event).unwrap();
+    }
+    let initial = rib.transaction_diagnostics();
+    assert_eq!(initial.staged_entries, 0);
+    assert_eq!(initial.wide_entry_visits, 0);
+    assert_eq!(initial.indexed_event_comparisons, 0);
+    for i in 0..100u8 {
+        let mut event = announce(&format!("b-{i}"), 0, 2);
+        event.scope.source.source_id = "a".into();
+        event.scope.source.partition_id = "p".into();
+        event.scope.session = "s".into();
+        event.scope.peer = None;
+        if let RibEventKind::Update(actions) = &mut event.kind {
+            if let RibAction::Announce { prefix, .. } = &mut actions[0] {
+                prefix.address = format!("10.{i}.0.0");
+                prefix.length = 16;
+            }
+        }
+        rib.apply(event).unwrap();
+    }
+    assert_eq!(rib.events().len(), 200);
+    assert_eq!(rib.entries().len(), 100);
+    let after = rib.transaction_diagnostics();
+    assert_eq!(after.staged_entries, 100);
+    assert_eq!(after.wide_entry_visits, 0);
+    assert_eq!(after.indexed_event_comparisons, 0);
+    assert_eq!(after.copied_versions, 100);
+    assert_eq!(after.copied_witnesses, 100);
+    assert_eq!(after.measured_versions, 300);
+    assert_eq!(after.measured_witnesses, 300);
+    assert_eq!(after.committed_entries, 200);
+    assert_eq!(after.copied_events, 0);
+    assert!(after.moved_events < 400);
+    assert!(rib
+        .entries()
+        .values()
+        .all(|entry| entry.versions.len() == 2 && entry.status == RouteStatus::Active));
+}
+
+#[test]
+fn rib_native_occurrence_literal_charge_and_atomic_replay() {
+    // Independent full entry oracle. One-byte a/p/s/r/i identities, Null JSON,
+    // prefix 0.0.0.0/0. scope=658, key=1268, event=2200, version=1092,
+    // stored entry=5814, label=1024, peer inventory=1242, generation=898,
+    // binding header+one binding=328+1572=1900, origin inventory=296.
+    // Retained=13374. Work=3*2200 +2*(9052+64+1900+336+296)
+    // +2*(1024+1242)=34428. No reference getter derives these thresholds.
+    let event = RibEvent {
+        scope: RibScope {
+            source: SourcePartition {
+                kind: PartitionKind::Captured,
+                source_id: "a".into(),
+                partition_id: "p".into(),
+            },
+            session: "s".into(),
+            generation: 0,
+            direction: Some(0),
+            peer: None,
+        },
+        record_id: "r".into(),
+        kind: RibEventKind::Update(vec![RibAction::Announce {
+            prefix: PrefixIdentity {
+                afi: 1,
+                safi: 1,
+                address: "0.0.0.0".into(),
+                length: 0,
+            },
+            path_id: PathId::Absent,
+            attributes: Json::Null,
+            attribute_identity: "i".into(),
+        }]),
+    };
+    let mut exact = AdjRibIn::new(Limits {
+        retained_bytes: 13374,
+        output_bytes: 13374,
+        work: 34428,
+        ..Limits::default()
+    })
+    .unwrap();
+    assert_eq!(
+        exact.apply_with_origin(event.clone(), [1; 32]).unwrap(),
+        bgp_rib::ApplyStatus::Applied
+    );
+    assert_eq!(
+        (exact.retained_bytes(), exact.accounted_work()),
+        (13374, 34428)
+    );
+    let before = exact.transaction_diagnostics();
+    assert_eq!(
+        exact.apply_with_origin(event.clone(), [1; 32]).unwrap(),
+        bgp_rib::ApplyStatus::IdenticalReplay
+    );
+    assert_eq!(exact.transaction_diagnostics(), before);
+    for limits in [
+        Limits {
+            retained_bytes: 13373,
+            ..Limits::default()
+        },
+        Limits {
+            output_bytes: 13373,
+            ..Limits::default()
+        },
+        Limits {
+            work: 34427,
+            ..Limits::default()
+        },
+        Limits {
+            elements: 4,
+            ..Limits::default()
+        },
+    ] {
+        let mut rib = AdjRibIn::new(limits).unwrap();
+        assert!(rib.apply_with_origin(event.clone(), [1; 32]).is_err());
+        assert!(rib.events().is_empty() && rib.entries().is_empty());
+        assert_eq!((rib.retained_bytes(), rib.accounted_work()), (0, 0));
+    }
+    // Replay adds exactly336 proof units +296 inventory units, no event or
+    // witness. Admitted work=11000 equality +592 inventory +672 proof +1572
+    // binding visit +11628 affected-entry copy/measurement=25464.
+    let mut replay = AdjRibIn::new(Limits {
+        retained_bytes: 14006,
+        output_bytes: 14006,
+        work: 59892,
+        ..Limits::default()
+    })
+    .unwrap();
+    replay.apply_with_origin(event.clone(), [1; 32]).unwrap();
+    let status = replay.entries().values().next().unwrap().status;
+    assert_eq!(
+        replay.apply_with_origin(event.clone(), [2; 32]).unwrap(),
+        bgp_rib::ApplyStatus::IdenticalReplay
+    );
+    assert_eq!(
+        (replay.retained_bytes(), replay.accounted_work()),
+        (14006, 59892)
+    );
+    assert_eq!(replay.events().len(), 1);
+    let entry = replay.entries().values().next().unwrap();
+    assert_eq!(entry.status, status);
+    assert_eq!(entry.versions[0].witnesses, vec!["r".to_string()]);
+    assert_eq!(entry.versions[0].occurrences.len(), 2);
+    let before = (
+        replay.retained_bytes(),
+        replay.accounted_work(),
+        replay.transaction_diagnostics(),
+    );
+    replay.apply_with_origin(event.clone(), [2; 32]).unwrap();
+    assert_eq!(
+        (
+            replay.retained_bytes(),
+            replay.accounted_work(),
+            replay.transaction_diagnostics()
+        ),
+        before
+    );
+    for limits in [
+        Limits {
+            retained_bytes: 14005,
+            ..Limits::default()
+        },
+        Limits {
+            output_bytes: 14005,
+            ..Limits::default()
+        },
+        Limits {
+            work: 59891,
+            ..Limits::default()
+        },
+    ] {
+        let mut rib = AdjRibIn::new(limits).unwrap();
+        rib.apply_with_origin(event.clone(), [1; 32]).unwrap();
+        let entries = rib.entries().clone();
+        let before = (
+            rib.retained_bytes(),
+            rib.accounted_work(),
+            rib.transaction_diagnostics(),
+        );
+        assert!(rib.apply_with_origin(event.clone(), [2; 32]).is_err());
+        assert_eq!(rib.entries(), &entries);
+        assert_eq!(rib.events().len(), 1);
+        assert_eq!(
+            (
+                rib.retained_bytes(),
+                rib.accounted_work(),
+                rib.transaction_diagnostics()
+            ),
+            before
+        );
+        assert_eq!(
+            rib.apply_with_origin(event.clone(), [1; 32]).unwrap(),
+            bgp_rib::ApplyStatus::IdenticalReplay
+        );
+    }
+}
+
+#[test]
+fn rib_native_occurrences_bind_conflict_original_and_all_action_ordinals() {
+    let first = announce("same-label", 0, 10);
+    let mut second = first.clone();
+    if let RibEventKind::Update(actions) = &mut second.kind {
+        actions.insert(
+            0,
+            RibAction::Reject {
+                prefix: prefix(),
+                path_id: PathId::Unknown,
+                reason: "ordinal".into(),
+            },
+        );
+        let mut other = prefix();
+        other.address = "198.51.100.0".into();
+        actions.push(RibAction::Announce {
+            prefix: other,
+            path_id: PathId::Absent,
+            attributes: Json::Null,
+            attribute_identity: "other".into(),
+        });
+    }
+    let mut rib = AdjRibIn::new(Limits::default()).unwrap();
+    rib.apply_with_origin(first.clone(), [1; 32]).unwrap();
+    assert_eq!(
+        rib.apply_with_origin(second.clone(), [2; 32]).unwrap(),
+        bgp_rib::ApplyStatus::IdentityConflict
+    );
+    assert_eq!(
+        rib.apply_with_origin(first.clone(), [3; 32]).unwrap(),
+        bgp_rib::ApplyStatus::IdenticalReplay
+    );
+    let original = rib
+        .entries()
+        .values()
+        .find(|e| e.key.prefix == prefix())
+        .unwrap();
+    assert_eq!(original.versions.len(), 2);
+    assert_eq!(
+        original.versions[0].occurrences,
+        vec![
+            bgp_rib::NativeVersionOccurrence {
+                event_index: 0,
+                observation_sha256: [1; 32],
+                route_index: 0
+            },
+            bgp_rib::NativeVersionOccurrence {
+                event_index: 0,
+                observation_sha256: [3; 32],
+                route_index: 0
+            }
+        ]
+    );
+    assert_eq!(
+        original.versions[1].occurrences,
+        vec![bgp_rib::NativeVersionOccurrence {
+            event_index: 1,
+            observation_sha256: [2; 32],
+            route_index: 1
+        }]
+    );
+    assert_eq!(original.status, RouteStatus::Unresolved);
+    let other = rib
+        .entries()
+        .values()
+        .find(|e| e.key.prefix.address == "198.51.100.0")
+        .unwrap();
+    assert_eq!(other.versions[0].occurrences[0].route_index, 2);
+    assert_eq!(rib.events().len(), 2);
+    // Manual input has an explicit absent carrier. An exact native replay can
+    // attach a checked proof to the actual original version via its binding.
+    let mut manual = AdjRibIn::new(Limits::default()).unwrap();
+    manual.apply(first.clone()).unwrap();
+    assert!(manual.entries().values().next().unwrap().versions[0]
+        .occurrences
+        .is_empty());
+    manual.apply_with_origin(first, [4; 32]).unwrap();
+    assert_eq!(
+        manual.entries().values().next().unwrap().versions[0].occurrences[0].event_index,
+        0
+    );
+}
+
+#[test]
+fn rib_native_occurrences_bind_coalesced_duplicate_actions_and_history() {
+    let mut event = announce("coalesce", 0, 10);
+    if let RibEventKind::Update(actions) = &mut event.kind {
+        actions.push(actions[0].clone());
+    }
+    let mut rib = AdjRibIn::new(Limits::default()).unwrap();
+    rib.apply_with_origin(event.clone(), [5; 32]).unwrap();
+    let entry = rib.entries().values().next().unwrap();
+    assert_eq!(entry.versions.len(), 1);
+    assert_eq!(
+        entry.versions[0]
+            .occurrences
+            .iter()
+            .map(|o| o.route_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let mut reset = event.clone();
+    reset.record_id = "reset".into();
+    reset.scope.direction = None;
+    reset.scope.generation = 1;
+    reset.kind = RibEventKind::Reset {
+        previous_generation: 0,
+        reason: "explicit".into(),
+    };
+    rib.apply(reset).unwrap();
+    rib.apply_with_origin(event, [6; 32]).unwrap();
+    let entry = rib.entries().values().next().unwrap();
+    assert_eq!(entry.status, RouteStatus::Superseded);
+    assert_eq!(
+        entry.versions[0]
+            .occurrences
+            .iter()
+            .map(|o| (o.event_index, o.route_index))
+            .collect::<Vec<_>>(),
+        vec![(0, 0), (0, 1), (0, 0), (0, 1)]
+    );
+    assert_eq!(rib.events().len(), 2);
 }

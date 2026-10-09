@@ -133,6 +133,53 @@ pub struct PolicyResult {
 }
 
 impl PolicyResult {
+    /// Typed output projection for bounded outer carriers. This preserves the
+    /// existing result schema and does not assert a candidate-store binding.
+    pub fn to_json(&self) -> Json {
+        Json::object([
+            (
+                "candidate_set_fingerprint_sha256",
+                self.candidate_set_fingerprint_sha256.clone().into(),
+            ),
+            ("candidate_store_binding", STORE_BINDING_UNAVAILABLE.into()),
+            (
+                "comparisons",
+                Json::array(self.comparisons.iter().map(comparison_json)),
+            ),
+            (
+                "config_fingerprint_sha256",
+                self.config_fingerprint_sha256.clone().into(),
+            ),
+            ("config_provenance", self.config_provenance.clone().into()),
+            (
+                "endpoint_rib_established",
+                self.endpoint_rib_established.into(),
+            ),
+            (
+                "excluded",
+                Json::array(self.excluded.iter().map(|(id, status)| {
+                    Json::object([
+                        ("id", id.clone().into()),
+                        ("status", route_status_name(*status).into()),
+                    ])
+                })),
+            ),
+            ("identity_scope", "canonical_policy_inputs_only".into()),
+            (
+                "propagated_route_established",
+                self.propagated_route_established.into(),
+            ),
+            ("schema", RESULT_SCHEMA.into()),
+            (
+                "selected",
+                self.selected.clone().map_or(Json::Null, Json::from),
+            ),
+            (
+                "unresolved",
+                Json::array(self.unresolved.iter().cloned().map(Json::from)),
+            ),
+        ])
+    }
     /// Exact canonical compact-JSON byte length without a result-sized JSON
     /// tree or output string.
     pub fn encoded_len(&self, limit: usize) -> Result<usize> {
@@ -782,6 +829,7 @@ fn write_member_array(
     values: impl Iterator<Item = Json>,
 ) -> Result<()> {
     write_key(output, used, limit, first, key)?;
+    append_raw(output, used, limit, ":")?;
     append_raw(output, used, limit, "[")?;
     for (index, value) in values.enumerate() {
         if index != 0 {

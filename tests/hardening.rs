@@ -78,6 +78,7 @@ fn fragment(frame: u64, offset: usize, more: bool, protocol: u8, bytes: &[u8]) -
         }),
         payload: EvidenceBytes::from_packet(bytes, id(frame), 0),
         ip_checksum: Checksum::NotPresent,
+        checksum_context: pcap_evidence::wire::ChecksumContext::BaseAddresses,
     }
 }
 fn udp_capture(payloads: &[Vec<u8>]) -> Vec<u8> {

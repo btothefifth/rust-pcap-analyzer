@@ -271,6 +271,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         let scope = Scope {
             section: metadata.section,
             interface: metadata.interface,
+            link_interface: None,
             vlans: Vec::new(),
         };
         let network = match wire::decode_packet(metadata.link_type, data, id, scope) {
@@ -336,6 +337,8 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     p.transport = Some("tcp");
                     if checksum == Checksum::Invalid {
                         p.warnings.push("invalid_tcp_checksum_observed");
+                    } else if checksum == Checksum::NotChecked {
+                        p.warnings.push("unsupported_tcp_checksum_operands");
                     }
                     p.disposition = match &assignment {
                         Assignment::Assigned { flow_id, direction } => Disposition::Tcp {
@@ -360,6 +363,8 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     p.disposition = Disposition::Udp;
                     if datagram.checksum == Checksum::Invalid {
                         p.warnings.push("invalid_udp_checksum_observed");
+                    } else if datagram.checksum == Checksum::NotChecked {
+                        p.warnings.push("unsupported_udp_checksum_operands");
                     }
                 })?;
                 if !datagram.payload.is_empty()

@@ -1,0 +1,989 @@
+"""Finite synthetic proofs for the offline BGP comparison boundary.
+
+The external fixture is authored independently of native conversion. Inverse
+cases alter one declared contract fact and reach its owning consumer. These
+tests qualify no real corpus, endpoint behavior, or normative parser semantics.
+"""
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import struct
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+from tools.research import bgp_compare as bgp
+from tools.research.contract import InvalidResearch, canonical, decode_json
+
+
+def independent_external():
+    return {
+        "schema": "pcap-evidence.bgp.interpretation.v1",
+        "source": {"sha256": hashlib.sha256(b"abcdefghijklmnop").hexdigest(), "bytes": "16"},
+        "normalization": {"profile": "bgp-source-fields-v1", "config_sha256": "c" * 64},
+        "producer": {"id": "independent-fixture", "version": "1", "adapter_version": "1",
+                     "origin": "independent_fixture", "command": []},
+        "observations": [{
+            "record_offset": "2", "entry_index": "0",
+            "source_range": {"kind": "source_range", "start": "2", "end": "10"},
+            "disposition": "accepted",
+            "coverage": {"disposition": "complete", "message": "complete", "attributes": "complete"},
+            "fields": {
+                "message": {"message_type": {"status": "observed", "value": 2}},
+                "attributes": {"raw": {"status": "observed", "value": [
+                    {"type": 8, "bytes": "00000001", "discarded": False},
+                    {"type": 8, "bytes": "00000002", "discarded": True},
+                    {"type": 8, "bytes": "00000001", "discarded": True}]}}}}]}
+
+
+def native_export():
+    # Native-shaped carrier fixture, separate from independent_external().
+    source_hash = hashlib.sha256(b"abcdefghijklmnop").hexdigest()
+    row = {"schema": "pcap-evidence.bgp.evidence-row.v1", "provisional": True,
+           "sequence_ordinal": "0", "source_id": "fixture-source", "checkpoint_id": "fixture-checkpoint",
+           "source_sha256": source_hash, "full_source_bytes": "16", "store_seal": "a" * 64,
+           "record_ordinal": "0", "record_offset": "0", "record_bytes": "16", "record_type": 13, "subtype": 2, "record_sha256": source_hash,
+           "entry_index": "0", "mrt_record_time": {"seconds": "1", "microseconds": None, "validity": "seconds", "precision": "seconds", "time_ns": "1000000000"},
+           "rib_originated_time_ns": None, "observation_time_ns": None,
+           "event": {"kind": "rib_entry", "issues": []},
+           "observation": {"message_type": 0, "message_detail": None, "issues": [], "routes": [
+               {"action": "announce", "prefix": {"afi": 1, "safi": 1, "length": 24, "bytes": "c00002"},
+                "attributes": {"origin": 0}, "imported_attribute_occurrences": [
+                    {"type": 8, "value_hex": "00000001", "discarded": False},
+                    {"type": 8, "value_hex": "00000002", "discarded": True}]}]},
+           "window_disposition": None, "asn_disposition": None,
+           "selected": True, "certain_occurrence_time_claimed": False}
+    entry = {"ordinal": "0", "source_id": "fixture-source", "checkpoint_id": "fixture-checkpoint",
+             "source_sha256": source_hash, "source_bytes": "16", "record_count": "1", "final_chain": "b" * 64,
+             "store_seal": "a" * 64, "predecessor_digest": "0" * 64, "entry_digest": "d" * 64}
+    raw = json.dumps(row, separators=(",", ":")).encode() + b"\n"
+    manifest = {"schema": "pcap-evidence.bgp.evidence-manifest.v1", "complete": True,
+                "rows": "1", "rows_bytes": str(len(raw)), "rows_sha256": hashlib.sha256(raw).hexdigest(),
+                "rows_digest_scope": "exact_ndjson_rows_including_newlines_excluding_manifest",
+                "sequence": {"schema": "pcap-evidence.bgp.source-sequence.v1", "entries": [entry],
+                             "sequence_digest": "e" * 64, "ordering": "caller_file_order", "independent_checkpoints": True},
+                "semantic_profile": "pcap-evidence.bgp.semantic-route-identity.v2", "replay_relationship": "unknown", "window": None,
+                "coverage": {"records": "1", "rows": "1", "observations": "1", "route_free": "0", "opaque": "0",
+                             "rejected": "0", "quarantined": "0", "unsupported": "0", "unknown_time": "0", "unknown_mrt_record_time": "0", "unknown_asn": "0", "selected": "1",
+                             "timestamp_regressions": "0", "witnesses": [], "witnesses_truncated": "0",
+                             "count_unit": "rows_except_records_unknown_mrt_record_time_and_timestamp_regressions"},
+                "semantic_identity": "f" * 64, "endpoint_state_claimed": False,
+                "source_authenticated": False, "resume_cursor_supported": False}
+    seal_fixture_manifest(manifest)
+    return row, raw, manifest
+
+
+def seal_fixture_manifest(manifest):
+    """Independent fixture DTO serialization in the native declared wire order."""
+    def wire(value):
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+    def seal(domain, value):
+        return hashlib.sha256(domain.encode() + b"\0" + value).hexdigest()
+    prior = seal("pcap-evidence/bgp-source-sequence/v1", b"genesis")
+    entry_keys = ("ordinal", "source_id", "checkpoint_id", "source_sha256", "source_bytes", "record_count",
+                  "final_chain", "store_seal", "predecessor_digest")
+    entries = []
+    for entry in manifest["sequence"]["entries"]:
+        entry["predecessor_digest"] = prior
+        payload = {key: entry[key] for key in entry_keys}
+        prior = seal("pcap-evidence/bgp-source-sequence/v1", wire(payload))
+        entry["entry_digest"] = prior
+        entries.append({**payload, "entry_digest": prior})
+    manifest["sequence"]["sequence_digest"] = prior
+    sequence = {"schema": manifest["sequence"]["schema"], "ordering": "caller_file_order", "independent_checkpoints": True,
+                "entries": entries, "sequence_digest": prior}
+    root_keys = ("schema", "complete", "rows", "rows_bytes", "rows_sha256", "rows_digest_scope", "sequence", "semantic_profile",
+                 "replay_relationship", "window", "coverage", "source_authenticated", "endpoint_state_claimed", "resume_cursor_supported")
+    coverage_keys = ("records", "rows", "observations", "route_free", "opaque", "rejected", "unsupported", "unknown_time", "unknown_mrt_record_time",
+                     "unknown_asn", "selected", "timestamp_regressions", "witnesses", "witnesses_truncated", "count_unit")
+    if "quarantined" in manifest["coverage"]:
+        coverage_keys = coverage_keys[:6] + ("quarantined",) + coverage_keys[6:]
+    payload = {key: manifest[key] for key in root_keys}
+    payload["sequence"] = sequence
+    payload["coverage"] = {key: manifest["coverage"][key] for key in coverage_keys}
+    manifest["semantic_identity"] = seal("pcap-evidence/bgp-evidence-manifest/v1", wire(payload))
+
+
+def rebind_rows(row, manifest):
+    # Positive fixture edits must preserve summary/row consistency. Adversarial
+    # tests below mutate and reseal the completed manifest afterwards instead.
+    fixture_row_coverage(row, manifest)
+    raw = json.dumps(row, separators=(",", ":")).encode() + b"\n"
+    manifest.update(rows="1", rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
+    seal_fixture_manifest(manifest)
+    return raw
+
+
+def fixture_row_coverage(row, manifest):
+    """Independent single-record fixture owner, not the candidate's helpers."""
+    event = row["event"]
+    status = next((event[key] for key in ("parse_status", "status", "kind")
+                   if type(event.get(key)) is str), "unknown")
+    routes = row["observation"].get("routes") if type(row["observation"]) is dict else None
+    coverage = manifest["coverage"]
+    coverage.update(records="1", rows="1", observations=str(int(row["observation"] is not None)),
+                    route_free=str(int(not (type(routes) is list and routes))),
+                    opaque=str(int("opaque" in status)), rejected=str(int("reject" in status)),
+                    unsupported=str(int("unsupported" in status)), selected=str(int(row["selected"])),
+                    unknown_time=str(int(row["window_disposition"] == "unknown_time")),
+                    unknown_asn=str(int(row["asn_disposition"] == "unknown_asn")),
+                    unknown_mrt_record_time=str(int(row["mrt_record_time"]["time_ns"] is None)),
+                    timestamp_regressions="0", witnesses=[], witnesses_truncated="0")
+    if "quarantined" in coverage:
+        coverage["quarantined"] = str(int("quarantin" in status))
+    reasons = []
+    if row["window_disposition"] == "unknown_time":
+        reasons.append("unknown_time")
+    if row["mrt_record_time"]["time_ns"] is None:
+        reasons.append(row["mrt_record_time"]["validity"])
+    if row["asn_disposition"] == "unknown_asn":
+        reasons.append("unknown_asn")
+    if any(token in status for token in ("opaque", "reject", "unsupported")) or ("quarantined" in coverage and "quarantin" in status):
+        reasons.append(status)
+    for reason in reasons:
+        coverage["witnesses"].append({key: row.get(key) for key in
+            ("sequence_ordinal", "source_sha256", "record_ordinal", "record_offset", "record_sha256", "entry_index")}
+            | {"reason": reason})
+
+
+def extended_timestamp_export(microseconds):
+    """Real MRT header/ET bytes for missing, invalid, or precise labels."""
+    row, _, manifest = native_export()
+    body = b"" if microseconds is None else struct.pack("!I", microseconds)
+    source = struct.pack("!IHHI", 1, 17, 1, len(body)) + body
+    source_hash = hashlib.sha256(source).hexdigest()
+    known = microseconds is not None and microseconds < 1_000_000
+    validity = "microseconds" if known else "missing_microseconds" if microseconds is None else "invalid_microseconds"
+    row.update(source_sha256=source_hash, full_source_bytes=str(len(source)), record_type=17, subtype=1,
+               record_bytes=str(len(source)), record_sha256=source_hash, entry_index=None, observation=None,
+               event={"event_kind": "malformed_record", "parse_status": "rejected", "issues": []})
+    row["mrt_record_time"] = {"seconds": "1", "microseconds": None if microseconds is None else str(microseconds),
+                              "validity": validity, "precision": "microseconds" if known else "unknown",
+                              "time_ns": str(1_000_000_000 + microseconds * 1000) if known else None}
+    manifest["sequence"]["entries"][0].update(source_sha256=source_hash, source_bytes=str(len(source)))
+    manifest["coverage"].update(observations="0", route_free="1", rejected="1", unknown_mrt_record_time="0" if known else "1")
+    return row, rebind_rows(row, manifest), manifest
+
+
+def write_native_rows(path, count, *, corrupt_suffix=False):
+    """Bounded generated NDJSON only; caller owns TemporaryDirectory cleanup."""
+    row, _, manifest = native_export()
+    row.update(full_source_bytes=str(16 * count), entry_index=None, observation=None,
+               event={"parse_status": "decoded_keepalive", "issues": []})
+    entry = manifest["sequence"]["entries"][0]
+    entry.update(source_bytes=str(16 * count), record_count=str(count))
+    commitment, size = hashlib.sha256(), 0
+    with path.open("wb") as stream:
+        for index in range(count):
+            row.update(record_offset=str(16 * index), record_ordinal=str(index))
+            if corrupt_suffix and index == count - 1:
+                row["record_bytes"] = "15"  # Valid self-seal, incomplete source coverage.
+            part = json.dumps(row, separators=(",", ":")).encode() + b"\n"
+            size += len(part)
+            commitment.update(part)
+            stream.write(part)
+        manifest.update(rows=str(count), rows_bytes=str(size), rows_sha256=commitment.hexdigest())
+        manifest["coverage"].update(records=str(count), rows=str(count), observations="0",
+                                    selected=str(count), route_free=str(count))
+        seal_fixture_manifest(manifest)
+        stream.write(canonical(manifest) + b"\n")
+    return manifest
+
+
+class BgpComparisonTests(unittest.TestCase):
+    def test_all_whole_export_counters_reconcile_after_resealing(self):
+        # Byte/sequence/manifest commitments all pass. Only the semantic count
+        # is changed, including counts previously omitted by the converter.
+        for key in ("records", "rows", "observations", "route_free", "opaque", "rejected",
+                    "quarantined", "unsupported", "unknown_time", "unknown_mrt_record_time",
+                    "unknown_asn", "selected", "timestamp_regressions"):
+            _, raw, manifest = extended_timestamp_export(None)
+            self.assertEqual(bgp.from_native(raw, manifest)["observations"][0]["disposition"], "rejected")
+            manifest["coverage"][key] = str(int(manifest["coverage"][key]) + 1)
+            seal_fixture_manifest(manifest)
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "coverage.*(contradicts|mismatch)"):
+                bgp.from_native(raw, manifest, row_count=1)
+
+    def test_witness_prefix_anchor_reason_and_exact_truncation_are_verified(self):
+        _, raw, manifest = extended_timestamp_export(None)
+        self.assertEqual([w["reason"] for w in manifest["coverage"]["witnesses"]],
+                         ["missing_microseconds", "rejected"])
+        for cap in (0, 1, 2):
+            limited = copy.deepcopy(manifest)
+            limited["coverage"]["witnesses"] = limited["coverage"]["witnesses"][:cap]
+            limited["coverage"]["witnesses_truncated"] = str(2 - cap)
+            seal_fixture_manifest(limited)
+            self.assertEqual(len(bgp.from_native(raw, limited)["observations"]), 1)
+        for key, value in (("sequence_ordinal", "99"), ("source_sha256", "1" * 64),
+                           ("record_ordinal", "99"), ("record_offset", "999"),
+                           ("record_sha256", "not-a-digest"), ("entry_index", "99"),
+                           ("reason", "unsupported")):
+            bad = copy.deepcopy(manifest)
+            bad["coverage"]["witnesses"][0][key] = value
+            seal_fixture_manifest(bad)
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "witness contradicts"):
+                bgp.from_native(raw, bad, row_count=1)
+        for mutation in ("reorder", "duplicate", "extra", "truncated"):
+            bad = copy.deepcopy(manifest)
+            if mutation == "reorder":
+                bad["coverage"]["witnesses"].reverse()
+            elif mutation == "duplicate":
+                bad["coverage"]["witnesses"][1] = bad["coverage"]["witnesses"][0]
+            elif mutation == "extra":
+                bad["coverage"]["witnesses"].append(copy.deepcopy(bad["coverage"]["witnesses"][-1]))
+            else:
+                bad["coverage"]["witnesses_truncated"] = "1"
+            seal_fixture_manifest(bad)
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(InvalidResearch, "witness.*contradicts"):
+                bgp.from_native(raw, bad)
+
+    def test_quarantine_addition_preserves_sealed_legacy_availability(self):
+        for legacy in (False, True):
+            row, _, manifest = native_export()
+            row["event"]["parse_status"] = "quarantined"
+            if legacy:
+                del manifest["coverage"]["quarantined"]
+            raw = rebind_rows(row, manifest)
+            original = copy.deepcopy(manifest)
+            output = bgp.from_native(raw, manifest, row_count=1)
+            expected = "legacy_quarantine_unavailable" if legacy else "complete"
+            self.assertEqual(output["native_coverage_verification"], expected)
+            self.assertEqual(output["native_evidence"], original)
+            self.assertEqual(output["observations"][0]["disposition"], "unknown")
+            self.assertEqual(output["observations"][0]["coverage"]["disposition"], "partial")
+            self.assertEqual(bgp.compare(output, output)["native_coverage_verifications"], [expected, expected])
+            if not legacy:
+                self.assertEqual(manifest["coverage"]["quarantined"], "1")
+                self.assertEqual(manifest["coverage"]["rejected"], "0")
+                self.assertEqual(manifest["coverage"]["witnesses"][0]["reason"], "quarantined")
+            bad = copy.deepcopy(output)
+            bad["native_coverage_verification"] = "complete" if legacy else "legacy_quarantine_unavailable"
+            with self.assertRaisesRegex(InvalidResearch, "availability mismatch"):
+                bgp.validate(bad)
+
+    def test_unretained_rows_own_status_counts_and_witnesses(self):
+        with tempfile.TemporaryDirectory(prefix="bgp-compare-summary-") as temp:
+            path = Path(temp) / "rows.ndjson"
+            manifest = write_native_rows(path, 2)
+            lines = path.read_bytes().splitlines()
+            rows = [json.loads(part) for part in lines[:-1]]
+            rows[1]["event"] = {"parse_status": "quarantined", "issues": []}
+            raw = b"".join(json.dumps(row, separators=(",", ":")).encode() + b"\n" for row in rows)
+            manifest.update(rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
+            manifest["coverage"].update(quarantined="1", witnesses=[{
+                key: rows[1].get(key) for key in ("sequence_ordinal", "source_sha256", "record_ordinal",
+                "record_offset", "record_sha256", "entry_index")} | {"reason": "quarantined"}])
+            seal_fixture_manifest(manifest)
+            self.assertEqual(bgp.from_native(raw, manifest, row_count=1)["observations"][0]["disposition"], "accepted")
+            for key in ("quarantined", "route_free", "timestamp_regressions"):
+                bad = copy.deepcopy(manifest)
+                bad["coverage"][key] = str(int(bad["coverage"][key]) + 1)
+                seal_fixture_manifest(bad)
+                with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "coverage contradicts"):
+                    bgp.from_native(raw, bad, row_count=1)
+            bad = copy.deepcopy(manifest)
+            bad["coverage"]["witnesses"][0]["record_offset"] = "0"
+            seal_fixture_manifest(bad)
+            with self.assertRaisesRegex(InvalidResearch, "witness contradicts"):
+                bgp.from_native(raw, bad, row_count=1)
+
+    def test_record_units_unknown_time_break_and_independent_source_clocks(self):
+        row, _, manifest = native_export()
+        first = manifest["sequence"]["entries"][0]
+        first.update(source_bytes="64", record_count="4")
+        second = copy.deepcopy(first)
+        second.update(ordinal="1", source_id="other", source_bytes="16", record_count="1", source_sha256="1" * 64)
+        manifest["sequence"]["entries"].append(second)
+        rows = []
+        for index, seconds in enumerate((30, None, 20, 10)):
+            current = copy.deepcopy(row)
+            current.update(full_source_bytes="64", record_ordinal=str(index), record_offset=str(index * 16))
+            current["mrt_record_time"].update(seconds=str(25 if seconds is None else seconds),
+                                            time_ns=None if seconds is None else str(seconds * 1_000_000_000))
+            if seconds is None:
+                current.update(record_type=17, observation=None, entry_index=None)
+                current["mrt_record_time"].update(validity="missing_microseconds", precision="unknown")
+            rows.append(current)
+            if index == 0:
+                extra = copy.deepcopy(current)
+                extra["entry_index"] = "1"
+                rows.append(extra)
+        neighbor = copy.deepcopy(row)
+        neighbor.update(sequence_ordinal="1", source_id="other", source_sha256="1" * 64)
+        neighbor["mrt_record_time"].update(seconds="1", time_ns="1000000000")
+        rows.append(neighbor)
+        raw = b"".join(json.dumps(item, separators=(",", ":")).encode() + b"\n" for item in rows)
+        manifest.update(rows="6", rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
+        manifest["coverage"].update(records="5", rows="6", observations="5", selected="6", route_free="1",
+            unknown_mrt_record_time="1", timestamp_regressions="1", witnesses=[{
+                key: rows[2].get(key) for key in ("sequence_ordinal", "source_sha256", "record_ordinal",
+                "record_offset", "record_sha256", "entry_index")} | {"reason": "missing_microseconds"}])
+        seal_fixture_manifest(manifest)
+        output = bgp.from_native(raw, manifest, source_ordinal=1, row_count=1)
+        self.assertEqual(len(output["observations"]), 1)
+        for key, wrong in (("records", "6"), ("unknown_mrt_record_time", "2"), ("timestamp_regressions", "3")):
+            bad = copy.deepcopy(manifest)
+            bad["coverage"][key] = wrong
+            seal_fixture_manifest(bad)
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "coverage contradicts"):
+                bgp.from_native(raw, bad, source_ordinal=1, row_count=1)
+
+    def test_status_summary_priority_preserves_unknown_interpretation(self):
+        for event, counter, reason in (({"parse_status": "quarantined_ambiguous_session"}, "quarantined", "quarantined_ambiguous_session"),
+                                       ({"parse_status": None, "status": "unsupported", "kind": "opaque_record"}, "unsupported", "unsupported"),
+                                       ({"kind": "opaque_record"}, "opaque", "opaque_record"),
+                                       ({"parse_status": "future_status", "status": "rejected"}, None, None)):
+            row, _, manifest = native_export()
+            row["event"] = event
+            raw = rebind_rows(row, manifest)
+            document = bgp.from_native(raw, manifest)
+            converted = document["observations"][0]
+            self.assertEqual(converted["disposition"], "unknown")
+            self.assertEqual(converted["coverage"]["disposition"], "partial")
+            self.assertEqual(converted["evidence"]["event"], event)
+            if counter is not None:
+                self.assertEqual(manifest["coverage"][counter], "1")
+                self.assertEqual([w["reason"] for w in manifest["coverage"]["witnesses"]], [reason])
+            else:
+                self.assertTrue(all(manifest["coverage"][key] == "0" for key in
+                                    ("opaque", "rejected", "quarantined", "unsupported")))
+                self.assertEqual(manifest["coverage"]["witnesses"], [])
+
+    def test_same_anchor_different_source_range_blocks_all_semantic_votes(self):
+        for differing_disposition in (False, True):
+            left, right = independent_external(), independent_external()
+            right["observations"][0]["source_range"]["end"] = "11"
+            if differing_disposition:
+                right["observations"][0]["disposition"] = "rejected"
+            result = bgp.compare(left, right)
+            self.assertEqual(result["counts"], {"agreement": 0, "disagreement": 1, "not_comparable": 3})
+            self.assertEqual(result["rows"][0]["reason"], "source_range_differs")
+            self.assertEqual(result["first_observed_disagreement"], 0)
+            self.assertTrue(all(row["reason"] == "source_range_mismatch" for row in result["rows"][1:]))
+
+    def test_independent_fixture_agreement_is_inert(self):
+        left, right = independent_external(), independent_external()
+        right["producer"]["id"] = "second-fixture"
+        result = bgp.compare(left, right)
+        self.assertEqual(result["counts"], {"agreement": 3, "disagreement": 0, "not_comparable": 0})
+        self.assertFalse(result["consensus_used"])
+        self.assertFalse(result["state_admission"])
+        self.assertFalse(result["semantic_correctness_proven"])
+        self.assertEqual(result["producer_authentication"], "not_established")
+
+    def test_wrong_source_digest_and_length_rejected(self):
+        for key, value in (("sha256", "0" * 64), ("bytes", "17")):
+            left, right = independent_external(), independent_external()
+            right["source"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(InvalidResearch, "source identity mismatch"):
+                bgp.compare(left, right)
+
+    def test_wrong_profile_and_semantic_config_rejected(self):
+        for key, value in (("profile", "other-profile"), ("config_sha256", "d" * 64)):
+            left, right = independent_external(), independent_external()
+            right["normalization"][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                bgp.compare(left, right)
+
+    def test_duplicates_and_discard_disposition_preserved(self):
+        left, right = independent_external(), independent_external()
+        value = right["observations"][0]["fields"]["attributes"]["raw"]["value"]
+        value[1], value[2] = value[2], value[1]
+        result = bgp.compare(left, right)
+        self.assertEqual(result["counts"]["disagreement"], 1)
+        self.assertEqual(len(result["rows"][2]["left"]["value"]), 3)
+        right = independent_external()
+        right["observations"][0]["fields"]["attributes"]["raw"]["value"][1]["discarded"] = False
+        self.assertEqual(bgp.compare(left, right)["counts"]["disagreement"], 1)
+
+    def test_offset_order_numeric_and_entry_zero_distinct(self):
+        left, right = independent_external(), independent_external()
+        for doc in (left, right):
+            late = copy.deepcopy(doc["observations"][0])
+            late.update(record_offset="10", source_range={"kind": "source_range", "start": "10", "end": "16"})
+            earlier = copy.deepcopy(doc["observations"][0])
+            earlier.pop("entry_index")
+            doc["observations"] = [late, doc["observations"][0], earlier]
+        for row in right["observations"]:
+            row["disposition"] = "rejected"
+        result = bgp.compare(left, right)
+        divergent = [r for r in result["rows"] if r["result"] == "disagreement"]
+        self.assertEqual([r["record_offset"] for r in divergent], ["2", "2", "10"])
+        self.assertNotIn("entry_index", divergent[0])
+        self.assertEqual(divergent[1]["entry_index"], "0")
+        self.assertEqual(result["first_observed_disagreement"], 0)
+
+    def test_missing_coverage_never_awards_agreement(self):
+        left, right = independent_external(), independent_external()
+        right["observations"][0]["coverage"].pop("attributes")
+        result = bgp.compare(left, right)
+        self.assertEqual(result["rows"][2]["result"], "not_comparable")
+        self.assertIsNone(result["first_observed_disagreement"])
+
+    def test_partial_group_and_unknown_field_do_not_vote(self):
+        for group_coverage, field_status in (("partial", "observed"), ("complete", "unknown"),
+                                              ("complete", "incomplete"), ("unsupported", "observed")):
+            left, right = independent_external(), independent_external()
+            row = right["observations"][0]
+            row["coverage"]["message"] = group_coverage
+            row["fields"]["message"]["message_type"]["status"] = field_status
+            with self.subTest(coverage=group_coverage, status=field_status):
+                result = bgp.compare(left, right)
+                self.assertEqual(result["rows"][1]["result"], "not_comparable")
+
+    def test_unknown_groups_and_missing_fields_remain_visible(self):
+        left, right = independent_external(), independent_external()
+        for doc in (left, right):
+            row = doc["observations"][0]
+            row["coverage"]["future_group"] = "complete"
+            row["fields"]["future_group"] = {"x": {"status": "observed", "value": [1, 1, 2]}}
+        right["observations"][0]["fields"]["message"].clear()
+        result = bgp.compare(left, right)
+        self.assertEqual(result["counts"]["not_comparable"], 2)
+        self.assertEqual(result["rows"][-1]["reason"], "unknown_field_group")
+        self.assertEqual(result["rows"][-1]["left"]["value"], [1, 1, 2])
+
+    def test_accepted_vs_rejected_differs_with_common_coverage(self):
+        left, right = independent_external(), independent_external()
+        right["observations"][0]["disposition"] = "rejected"
+        self.assertEqual(bgp.compare(left, right)["rows"][0]["reason"], "acceptance_differs")
+        right["observations"][0]["coverage"].pop("disposition")
+        self.assertEqual(bgp.compare(left, right)["rows"][0]["result"], "not_comparable")
+
+    def test_missing_observation_is_unknown(self):
+        left, right = independent_external(), independent_external()
+        right["observations"] = []
+        self.assertEqual(bgp.compare(left, right)["counts"], {"agreement": 0, "disagreement": 0, "not_comparable": 1})
+
+    def test_integer_anchor_normalization_is_exact_and_nonmutating(self):
+        left, right = independent_external(), independent_external()
+        row = right["observations"][0]
+        right["source"]["bytes"] = 16
+        row.update(record_offset=2, entry_index=0)
+        row["source_range"].update(start=2, end=10)
+        original = copy.deepcopy(right)
+        self.assertEqual(bgp.compare(left, right)["counts"]["agreement"], 3)
+        self.assertEqual(right, original)
+        row["fields"]["message"]["message_type"]["value"] = "2"
+        self.assertEqual(bgp.compare(left, right)["counts"]["disagreement"], 1)
+
+    def test_ambiguous_numeric_anchors_rejected(self):
+        for value in (True, 2.0, "02", "+2", "2.0", -1, str(1 << 64)):
+            doc = independent_external()
+            doc["observations"][0]["record_offset"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bgp.validate(doc)
+
+    def test_duplicate_anchor_rejected_after_normalization(self):
+        doc = independent_external()
+        extra = copy.deepcopy(doc["observations"][0])
+        extra["record_offset"] = 2
+        doc["observations"].append(extra)
+        with self.assertRaisesRegex(InvalidResearch, "duplicate BGP source anchor"):
+            bgp.validate(doc)
+
+    def test_strict_input_keys_and_hashes(self):
+        for target in ("root", "source", "producer", "row", "range", "field"):
+            doc = independent_external()
+            row = doc["observations"][0]
+            objects = {"root": doc, "source": doc["source"], "producer": doc["producer"], "row": row,
+                       "range": row["source_range"], "field": row["fields"]["message"]["message_type"]}
+            objects[target]["unexpected"] = True
+            with self.subTest(target=target), self.assertRaisesRegex(InvalidResearch, "keys"):
+                bgp.validate(doc)
+        doc = independent_external()
+        doc["source"]["sha256"] = "A" * 64
+        with self.assertRaises(ValueError):
+            bgp.validate(doc)
+
+    def test_source_ranges_are_tagged_bounded_nonempty_record_ranges(self):
+        for change in ({"kind": "packet_range"}, {"end": "17"}, {"start": "1"}, {"end": "2"}):
+            doc = independent_external()
+            doc["observations"][0]["source_range"].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                bgp.validate(doc)
+
+    def test_invalid_coverage_types_rejected(self):
+        for value in ([], {}, None, 1):
+            doc = independent_external()
+            doc["observations"][0]["coverage"]["message"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                bgp.validate(doc)
+
+    def test_bounded_rows_and_exact_output_limit(self):
+        doc = independent_external()
+        with self.assertRaisesRegex(InvalidResearch, "budget"):
+            bgp.compare(doc, doc, maximum=1)
+        result = bgp.compare(doc, doc)
+        exact = len(canonical(result))
+        self.assertEqual(bgp.compare(doc, doc, output_limit=exact), result)
+        with self.assertRaisesRegex(InvalidResearch, "budget"):
+            bgp.compare(doc, doc, output_limit=exact - 1)
+
+    def test_document_duplicate_keys_depth_nonfinite_and_byte_limits(self):
+        for raw in (b'{"schema":1,"schema":2}', b'[' * 25 + b'0' + b']' * 25, b'{"x":NaN}'):
+            with self.subTest(raw=raw[:30]), self.assertRaises(ValueError):
+                decode_json(raw)
+        with self.assertRaisesRegex(InvalidResearch, "byte budget"):
+            bgp.from_native(b"x" * (bgp.MAX_DOCUMENT + 1))
+
+    def test_commands_are_inert_through_cli_consumer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marker = root / "marker"
+            doc = independent_external()
+            doc["producer"]["command"] = ["sh", "-c", "touch " + str(marker)]
+            path = root / "external.json"
+            path.write_bytes(canonical(doc))
+            before = set(root.iterdir())
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(bgp.main(["compare", str(path), str(path)]), 0)
+            self.assertFalse(json.loads(stdout.getvalue())["state_admission"])
+            self.assertEqual(set(root.iterdir()), before)
+            self.assertFalse(marker.exists())
+
+
+class NativeConversionTests(unittest.TestCase):
+    def test_actual_imported_rib_disposition_is_decoded_candidate_only(self):
+        row, raw, manifest = native_export()
+        document = bgp.from_native(raw, manifest)
+        converted = document["observations"][0]
+        self.assertEqual(converted["disposition"], "accepted")
+        self.assertEqual(converted["coverage"]["disposition"], "complete")
+        self.assertEqual(converted["evidence"]["event"]["kind"], "rib_entry")
+        self.assertEqual(converted["fields"]["message"]["message_type"]["value"], 0)
+        comparison = bgp.compare(document, document)
+        self.assertFalse(comparison["state_admission"])
+        for group in ("nlri", "attributes"):
+            self.assertEqual(converted["coverage"][group], "partial")
+            self.assertTrue(all(field["status"] == "incomplete" for field in converted["fields"][group].values()))
+            self.assertTrue(all(item["result"] == "not_comparable" for item in comparison["rows"] if item["group"] == group))
+
+    def test_imported_zero_requires_actual_rib_event_and_route_evidence(self):
+        for kind, message_type, routes in (
+                ("imported_route", 0, "present"), ("unsupported_rib_entry", 0, "present"),
+                ("opaque_record", 0, "present"), ("rib_entry", 2, "present"),
+                ("rib_entry", False, "present"), ("rib_entry", "0", "present"),
+                ("rib_entry", 0, "empty"), ("rib_entry", 0, "null"),
+                ("rib_entry", 0, "missing"), ("rib_entry", 0, "non_dict"),
+                ("rib_entry", 0, "missing_prefix"), ("rib_entry", 0, "null_prefix"),
+                ("rib_entry", 0, "missing_attributes"), ("rib_entry", 0, "null_attributes"),
+                ("rib_entry", 0, "withdraw"),
+                ("rib_entry", 0, "absent_observation"), (None, 0, "present")):
+            row, _, manifest = native_export()
+            row["event"]["kind"] = kind
+            row["observation"]["message_type"] = message_type
+            if routes in ("empty", "null"):
+                row["observation"]["routes"] = [] if routes == "empty" else None
+            elif routes == "missing":
+                del row["observation"]["routes"]
+            elif routes == "non_dict":
+                row["observation"]["routes"] = [None]
+            elif routes in ("missing_prefix", "missing_attributes"):
+                del row["observation"]["routes"][0][routes.removeprefix("missing_")]
+            elif routes in ("null_prefix", "null_attributes"):
+                row["observation"]["routes"][0][routes.removeprefix("null_")] = None
+            elif routes == "withdraw":
+                row["observation"]["routes"][0]["action"] = "withdraw"
+            elif routes == "absent_observation":
+                row["observation"] = None
+                manifest["coverage"].update(observations="0", route_free="1")
+            raw = rebind_rows(row, manifest)
+            with self.subTest(kind=kind, message_type=message_type, routes=routes):
+                converted = bgp.from_native(raw, manifest)["observations"][0]
+                self.assertEqual(converted["disposition"], "unknown")
+                self.assertEqual(converted["coverage"]["disposition"], "partial")
+
+    def test_rib_evidence_cannot_override_explicit_rejection_or_quarantine(self):
+        for status, expected in (("rejected", "rejected"), ("quarantined", "unknown")):
+            row, _, manifest = native_export()
+            row["event"]["parse_status"] = status
+            raw = rebind_rows(row, manifest)
+            with self.subTest(status=status):
+                converted = bgp.from_native(raw, manifest)["observations"][0]
+                self.assertEqual(converted["disposition"], expected)
+
+    def test_typed_clock_scope_and_legacy_manifests_join_converter(self):
+        for kind in (None, "source", "all_source_clocks", "unrecognized"):
+            _, raw, manifest = native_export()
+            window = {"time_basis": "observation_time", "clock_scope": "all-source-clocks"}
+            if kind is not None:
+                window["clock_scope_kind"] = kind
+            window.update(clock_scope_semantics="independent_source_checkpoint_labels",
+                          start_ns="0", end_ns="1", interval="half_open", certain_occurrence_time_claimed=False, asn=None)
+            manifest["window"] = window
+            seal_fixture_manifest(manifest)
+            if kind == "unrecognized":
+                with self.assertRaisesRegex(InvalidResearch, "clock scope kind"):
+                    bgp.from_native(raw, manifest)
+            else:
+                self.assertEqual(bgp.from_native(raw, manifest)["native_evidence"]["window"], window)
+
+    def test_empty_route_projection_uncertainty_reaches_comparison(self):
+        for detail in ({"route_projection_incomplete": True, "opaque_nlri": []},
+                       {"opaque_nlri": [{"kind": "layout_unresolved"}]},
+                       {"route_projection_incomplete": True,
+                        "opaque_nlri": [{"kind": "layout_unresolved"}]}):
+            row, _, manifest = native_export()
+            row["event"] = {"parse_status": "opaque_update_continuity_gap", "issues": []}
+            row["observation"].update(message_type=2, message_detail=detail, routes=[])
+            manifest["coverage"].update(route_free="1", opaque="1")
+            document = bgp.from_native(rebind_rows(row, manifest), manifest)
+            converted = document["observations"][0]
+            with self.subTest(detail=detail):
+                for group in ("nlri", "attributes"):
+                    self.assertEqual(converted["coverage"][group], "partial")
+                    self.assertTrue(all(field["status"] == "incomplete"
+                                        for field in converted["fields"][group].values()))
+                    results = [item for item in bgp.compare(document, document)["rows"]
+                               if item["group"] == group]
+                    self.assertTrue(results)
+                    self.assertTrue(all(item["result"] == "not_comparable" for item in results))
+
+    def test_valid_empty_update_preserves_route_free_completeness(self):
+        for detail in ({"opaque_nlri": []},
+                       {"route_projection_incomplete": False, "opaque_nlri": []},
+                       {"route_projection_incomplete": False,
+                        "opaque_nlri": [{"kind": "multiprotocol_layout_unresolved"}]}):
+            row, _, manifest = native_export()
+            row["event"] = {"parse_status": "decoded_update_candidate", "issues": []}
+            row["observation"].update(message_type=2, message_detail=detail, routes=[])
+            manifest["coverage"].update(route_free="1")
+            document = bgp.from_native(rebind_rows(row, manifest), manifest)
+            with self.subTest(detail=detail):
+                for group in ("nlri", "attributes"):
+                    self.assertEqual(document["observations"][0]["coverage"][group], "complete")
+                    results = [item for item in bgp.compare(document, document)["rows"]
+                               if item["group"] == group]
+                    self.assertTrue(results)
+                    self.assertTrue(all(item["result"] == "agreement" for item in results))
+
+    def test_native_semantic_uncertainty_survives_conversion_and_comparison(self):
+        for completeness in ("complete", "incomplete", "unresolved", None):
+            row, _, manifest = native_export()
+            route = row["observation"]["routes"][0]
+            identity = {"schema": bgp.NATIVE_PROFILE, "completeness": completeness,
+                        "fingerprint_sha256": "e" * 64 if completeness == "complete" else None,
+                        "opaque_occurrence_fingerprints": ["d" * 64],
+                        "incompleteness_reasons": [] if completeness == "complete" else ["unsupported_attribute"],
+                        "canonical_payload": {} if completeness == "complete" else None}
+            if completeness is not None:
+                route["semantic_identity"] = identity
+            raw = rebind_rows(row, manifest)
+            document = bgp.from_native(raw, manifest)
+            converted = document["observations"][0]
+            semantic = converted["fields"]["nlri"]["semantic_identity"]
+            self.assertEqual(semantic["value"], [identity if completeness is not None else None])
+            comparison = bgp.compare(document, document)
+            for group, name in (("nlri", "semantic_identity"), ("attributes", "route_attributes")):
+                result = next(item for item in comparison["rows"] if item["group"] == group and item["field"] == name)
+                self.assertEqual(result["result"], "agreement" if completeness == "complete" else "not_comparable")
+                self.assertEqual(converted["fields"][group][name]["status"],
+                                 "observed" if completeness == "complete" else "incomplete")
+                self.assertEqual(converted["coverage"][group], "complete" if completeness == "complete" else "partial")
+            raw_result = next(item for item in comparison["rows"] if item["field"] == "imported_attribute_occurrences")
+            self.assertEqual(raw_result["result"], "agreement")
+            self.assertEqual(raw_result["left"]["value"][0], route["imported_attribute_occurrences"])
+
+    def test_streaming_large_export_requires_explicit_source_bound_partition(self):
+        with tempfile.TemporaryDirectory(prefix="bgp-compare-bounded-") as temp:
+            path = Path(temp) / "rows.ndjson"
+            manifest = write_native_rows(path, bgp.MAX_ROWS + 1)
+            self.assertGreater(path.stat().st_size, bgp.MAX_DOCUMENT)
+            self.assertLess(path.stat().st_size, 30 * 1024 * 1024)
+            with self.assertRaisesRegex(InvalidResearch, "interpretation output budget"):
+                bgp.convert_native_file(path)
+            output = bgp.convert_native_file(path, row_start=bgp.MAX_ROWS - 1, row_count=2)
+            self.assertEqual(output["native_partition"], {
+                "schema": "pcap-evidence.bgp.interpretation-partition.v1", "source_ordinal": "0",
+                "row_start": "9999", "row_end": "10001", "source_rows": "10001", "whole_export_verified": True})
+            self.assertEqual([item["record_offset"] for item in output["observations"]], ["159984", "160000"])
+            self.assertEqual(output["native_evidence"], manifest)
+            comparison = bgp.compare(output, output)
+            self.assertEqual(comparison["native_partitions"], [output["native_partition"]] * 2)
+            invalid = copy.deepcopy(output)
+            invalid["native_partition"]["source_ordinal"] = "1"
+            with self.assertRaisesRegex(InvalidResearch, "partition source ordinal"):
+                bgp.validate(invalid)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(bgp.main(["native", str(path), "--row-start", "10000", "--row-count", "1"]), 0)
+            self.assertEqual(json.loads(stdout.getvalue())["native_partition"]["source_rows"], "10001")
+        self.assertFalse(path.exists())
+
+    def test_partition_verifies_unselected_suffix_and_requires_exact_interval(self):
+        with tempfile.TemporaryDirectory(prefix="bgp-compare-suffix-") as temp:
+            path = Path(temp) / "rows.ndjson"
+            write_native_rows(path, 3, corrupt_suffix=True)
+            with self.assertRaisesRegex(InvalidResearch, "cover full source"):
+                bgp.convert_native_file(path, row_start=0, row_count=1)
+            write_native_rows(path, 3)
+            for kwargs in ({"row_start": 3, "row_count": 1}, {"row_start": 2, "row_count": 2},
+                           {"row_start": 0}, {"row_count": 0}, {"row_count": bgp.MAX_ROWS + 1}):
+                with self.subTest(kwargs=kwargs), self.assertRaises(InvalidResearch):
+                    bgp.convert_native_file(path, **kwargs)
+            for suffix in (b'{"torn":', b'{}\n'):
+                write_native_rows(path, 3)
+                with path.open("ab") as stream:
+                    stream.write(suffix)
+                with self.subTest(suffix=suffix), self.assertRaises(InvalidResearch):
+                    bgp.convert_native_file(path, row_count=1)
+
+    def test_two_pass_changed_backing_bytes_are_rejected(self):
+        row, raw, manifest = native_export()
+        changed = copy.deepcopy(row)
+        changed["event"]["issues"] = ["changed"]
+        changed_raw = json.dumps(changed, separators=(",", ":")).encode() + b"\n"
+        class ChangingStream(io.BytesIO):
+            def seek(self, offset, whence=0):
+                self.truncate(0)
+                super().seek(0)
+                self.write(changed_raw)
+                return super().seek(offset, whence)
+        with self.assertRaisesRegex(InvalidResearch, "changed between verification passes"):
+            bgp._from_native_stream(ChangingStream(raw), manifest, row_count=1)
+
+    def test_two_pass_terminal_deletion_duplication_and_reordering_are_rejected(self):
+        _, raw, manifest = native_export()
+        terminal = canonical(manifest) + b"\n"
+        original = raw + terminal
+        for replacement in (raw, raw + terminal * 2, terminal + raw):
+            class ChangingStream(io.BytesIO):
+                def seek(self, offset, whence=0):
+                    self.truncate(0)
+                    super().seek(0)
+                    self.write(replacement)
+                    return super().seek(offset, whence)
+            with self.subTest(replacement=replacement[-30:]), self.assertRaisesRegex(InvalidResearch, "manifest"):
+                bgp._from_native_stream(ChangingStream(original), row_count=1)
+
+    def test_native_admission_boundaries_remain_independent_of_interpretation_limits(self):
+        _, raw, manifest = native_export()
+        export = raw + canonical(manifest) + b"\n"
+        with mock.patch.object(bgp, "MAX_NATIVE_DOCUMENT", len(export)):
+            self.assertEqual(len(bgp.from_native(export)["observations"]), 1)
+            self.assertEqual(len(bgp.from_native(raw, manifest)["observations"]), 1)
+        with mock.patch.object(bgp, "MAX_NATIVE_DOCUMENT", len(export) - 1):
+            with self.assertRaisesRegex(InvalidResearch, "byte budget"):
+                bgp.from_native(export)
+            with self.assertRaisesRegex(InvalidResearch, "byte budget"):
+                bgp.from_native(raw, manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rows.ndjson"
+            write_native_rows(path, 2)
+            with mock.patch.object(bgp, "MAX_NATIVE_ROWS", 2):
+                self.assertEqual(len(bgp.convert_native_file(path, row_count=1)["observations"]), 1)
+            with mock.patch.object(bgp, "MAX_NATIVE_ROWS", 1):
+                with self.assertRaisesRegex(InvalidResearch, "record budget"):
+                    bgp.convert_native_file(path, row_count=1)
+
+    def test_invalid_extended_time_suppresses_derived_clock_for_valid_bgp_bytes(self):
+        for microseconds in (1_000_000, 999_999):
+            row, _, manifest = extended_timestamp_export(microseconds)
+            # A valid KEEPALIVE and AS4 BGP4MP outer payload: the timestamp
+            # interpretation must not depend on malformed BGP message bytes.
+            keepalive = b"\xff" * 16 + struct.pack("!HB", 19, 4)
+            outer = struct.pack("!IIHH4s4s", 64512, 64513, 0, 1, b"\xc0\x00\x02\x01", b"\xc0\x00\x02\x02")
+            body = struct.pack("!I", microseconds) + outer + keepalive
+            source = struct.pack("!IHHI", 1, 17, 4, len(body)) + body
+            source_hash = hashlib.sha256(source).hexdigest()
+            clock = None if microseconds >= 1_000_000 else str(1_000_000_000 + microseconds * 1000)
+            row.update(source_sha256=source_hash, full_source_bytes=str(len(source)), subtype=4,
+                       record_bytes=str(len(source)), record_sha256=source_hash,
+                       observation_time_ns=clock,
+                       event={"event_kind": "message", "parse_status": "decoded_keepalive", "issues": []},
+                       observation={"message_type": 4, "message_detail": None, "routes": [], "issues": [], "observed_at_ns": clock})
+            manifest["sequence"]["entries"][0].update(source_sha256=source_hash, source_bytes=str(len(source)))
+            manifest["coverage"].update(observations="1", rejected="0")
+            raw = rebind_rows(row, manifest)
+            doc = bgp.from_native(raw, manifest)
+            with self.subTest(microseconds=microseconds):
+                self.assertEqual(doc["observations"][0]["evidence"]["observation"]["observed_at_ns"], clock)
+                self.assertEqual(doc["observations"][0]["fields"]["framing"]["mrt_record_time"]["status"],
+                                 "unknown" if clock is None else "observed")
+                if clock is None:
+                    # Old exporter promotion is rejected despite a valid seal.
+                    row["observation_time_ns"] = "2000000000"
+                    raw = rebind_rows(row, manifest)
+                    with self.assertRaisesRegex(InvalidResearch, "cannot establish an observation time"):
+                        bgp.from_native(raw, manifest)
+                    row["observation_time_ns"] = None
+                    # The original normalized carrier remains inert metadata;
+                    # no equality join to a quarantined clock is required.
+                    row["observation"]["observed_at_ns"] = "2000000000"
+                    raw = rebind_rows(row, manifest)
+                    self.assertEqual(bgp.from_native(raw, manifest)["observations"][0]["evidence"]["observation"]["observed_at_ns"], "2000000000")
+
+    def test_extended_timestamp_missing_and_invalid_retained_as_unknown(self):
+        for microseconds, validity in ((None, "missing_microseconds"), (1_000_000, "invalid_microseconds"),
+                                       ((1 << 32) - 1, "invalid_microseconds")):
+            row, raw, manifest = extended_timestamp_export(microseconds)
+            doc = bgp.from_native(raw, manifest)
+            time = doc["observations"][0]["fields"]["framing"]["mrt_record_time"]
+            with self.subTest(microseconds=microseconds):
+                self.assertEqual(time["status"], "unknown")
+                self.assertEqual(time["value"]["validity"], validity)
+                self.assertEqual(time["value"]["precision"], "unknown")
+                self.assertIsNone(time["value"]["time_ns"])
+                self.assertEqual(time["value"]["microseconds"], row["mrt_record_time"]["microseconds"])
+                comparison = bgp.compare(doc, doc)
+                result = next(r for r in comparison["rows"] if r["field"] == "mrt_record_time")
+                self.assertEqual(result["result"], "not_comparable")
+                self.assertEqual(doc["native_evidence"]["coverage"]["unknown_mrt_record_time"], "1")
+
+    def test_extended_timestamp_precision_zero_and_upper_valid_boundary(self):
+        for microseconds in (0, 999_999):
+            _, raw, manifest = extended_timestamp_export(microseconds)
+            doc = bgp.from_native(raw, manifest)
+            time = doc["observations"][0]["fields"]["framing"]["mrt_record_time"]
+            with self.subTest(microseconds=microseconds):
+                self.assertEqual(time["status"], "observed")
+                self.assertEqual(time["value"]["precision"], "microseconds")
+                self.assertEqual(time["value"]["time_ns"], str(1_000_000_000 + microseconds * 1000))
+
+    def test_extended_unknown_timestamp_cannot_be_promoted_to_seconds(self):
+        for microseconds in (None, 1_000_000):
+            row, _, manifest = extended_timestamp_export(microseconds)
+            row["mrt_record_time"].update(validity="seconds", precision="seconds", time_ns="1000000000")
+            raw = rebind_rows(row, manifest)
+            with self.subTest(microseconds=microseconds), self.assertRaisesRegex(InvalidResearch, "time representation mismatch"):
+                bgp.from_native(raw, manifest)
+
+    def test_ordinary_mrt_time_keeps_seconds_precision(self):
+        row, _, manifest = native_export()
+        row["mrt_record_time"]["microseconds"] = "1000000"
+        raw = rebind_rows(row, manifest)
+        doc = bgp.from_native(raw, manifest)
+        time = doc["observations"][0]["fields"]["framing"]["mrt_record_time"]
+        self.assertEqual(time["status"], "observed")
+        self.assertEqual(time["value"]["precision"], "seconds")
+        self.assertEqual(time["value"]["time_ns"], "1000000000")
+
+    def test_native_record_type_exact_u16(self):
+        for field, value in (("record_type", "17"), ("record_type", True), ("subtype", 1 << 16)):
+            row, _, manifest = native_export()
+            row[field] = value
+            raw = rebind_rows(row, manifest)
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(InvalidResearch, "u16 JSON integers"):
+                bgp.from_native(raw, manifest)
+
+    def test_extended_unknown_timestamp_coverage_cannot_claim_zero(self):
+        _, raw, manifest = extended_timestamp_export(None)
+        manifest["coverage"]["unknown_mrt_record_time"] = "0"
+        seal_fixture_manifest(manifest)
+        with self.assertRaisesRegex(InvalidResearch, "coverage contradicts"):
+            bgp.from_native(raw, manifest)
+
+    def test_native_identity_and_sequence_chain_adversaries(self):
+        for target in ("manifest", "entry", "predecessor", "terminal", "profile"):
+            _, raw, manifest = native_export()
+            if target == "manifest":
+                manifest["semantic_identity"] = "f" * 64
+            elif target == "profile":
+                manifest["semantic_profile"] = "old-profile"
+            elif target == "terminal":
+                manifest["sequence"]["sequence_digest"] = "f" * 64
+            elif target == "predecessor":
+                manifest["sequence"]["entries"][0]["predecessor_digest"] = "f" * 64
+            else:
+                manifest["sequence"]["entries"][0]["entry_digest"] = "f" * 64
+            with self.subTest(target=target), self.assertRaisesRegex(InvalidResearch, "identity|digest|predecessor|profile"):
+                bgp.from_native(raw, manifest)
+
+    def test_rehashed_invalid_native_time_and_record_ranges(self):
+        for target in ("time", "offset", "record_bytes"):
+            row, _, manifest = native_export()
+            if target == "time":
+                row["mrt_record_time"]["time_ns"] = "1000000001"
+            elif target == "offset":
+                row.update(record_offset="1", record_bytes="15")
+            else:
+                row["record_bytes"] = "12"
+            raw = rebind_rows(row, manifest)
+            with self.subTest(target=target), self.assertRaisesRegex(InvalidResearch, "representation|gap|full source"):
+                bgp.from_native(raw, manifest)
+
+    def test_native_rows_preserve_record_provenance_and_raw_occurrences(self):
+        _, raw, manifest = native_export()
+        doc = bgp.from_native(raw, manifest)
+        row = doc["observations"][0]
+        self.assertEqual(row["source_range"], {"kind": "source_range", "start": "0", "end": "16"})
+        self.assertEqual(row["disposition"], "accepted")
+        self.assertEqual(len(row["fields"]["raw_evidence"]["imported_attribute_occurrences"]["value"][0]), 2)
+        self.assertEqual(row["evidence"]["event"], json.loads(raw)["event"])
+        self.assertEqual(doc["native_evidence"], manifest)
+        self.assertNotIn("frames", row["evidence"])
+
+    def test_embedded_manifest_and_sidecar_consistency(self):
+        _, raw, manifest = native_export()
+        stream = raw + canonical(manifest) + b"\n"
+        self.assertEqual(bgp.from_native(stream), bgp.from_native(raw, manifest))
+        wrong = copy.deepcopy(manifest)
+        wrong["rows_bytes"] = "1"
+        with self.assertRaisesRegex(InvalidResearch, "sidecar/terminal"):
+            bgp.from_native(stream, wrong)
+        with self.assertRaisesRegex(InvalidResearch, "after terminal"):
+            bgp.from_native(stream + raw)
+
+    def test_native_digest_count_and_truncation_rejected(self):
+        for field, value in (("rows_sha256", "0" * 64), ("rows", "0"), ("rows_bytes", "0"), ("complete", False)):
+            _, raw, manifest = native_export()
+            manifest[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bgp.from_native(raw, manifest)
+        _, raw, manifest = native_export()
+        with self.assertRaisesRegex(InvalidResearch, "newline"):
+            bgp.from_native(raw[:-1], manifest)
+
+    def test_rehashed_wrong_source_seal_and_range_rejected(self):
+        for field, value in (("source_sha256", "0" * 64), ("full_source_bytes", "17"),
+                             ("store_seal", "b" * 64), ("record_bytes", "17"), ("record_ordinal", "1")):
+            row, _, manifest = native_export()
+            row[field] = value
+            raw = rebind_rows(row, manifest)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                bgp.from_native(raw, manifest)
+
+    def test_unknown_container_status_does_not_admit_or_agree_disposition(self):
+        row, _, manifest = native_export()
+        row["event"]["parse_status"] = "quarantined_coverage_unknown"
+        raw = rebind_rows(row, manifest)
+        doc = bgp.from_native(raw, manifest)
+        self.assertEqual(doc["observations"][0]["disposition"], "unknown")
+        self.assertEqual(bgp.compare(doc, doc)["rows"][0]["result"], "not_comparable")
+
+    def test_multiple_sources_require_selection(self):
+        row, raw, manifest = native_export()
+        extra = copy.deepcopy(manifest["sequence"]["entries"][0])
+        extra.update(ordinal="1", source_id="second-fixture", checkpoint_id="second-checkpoint", source_sha256="1" * 64)
+        manifest["sequence"]["entries"].append(extra)
+        second = copy.deepcopy(row)
+        second.update(sequence_ordinal="1", source_id="second-fixture", checkpoint_id="second-checkpoint", source_sha256="1" * 64)
+        raw += json.dumps(second, separators=(",", ":")).encode() + b"\n"
+        manifest.update(rows="2", rows_bytes=str(len(raw)), rows_sha256=hashlib.sha256(raw).hexdigest())
+        manifest["coverage"].update(records="2", rows="2", observations="2", selected="2")
+        seal_fixture_manifest(manifest)
+        with self.assertRaisesRegex(InvalidResearch, "explicit source ordinal"):
+            bgp.from_native(raw, manifest)
+        self.assertEqual(len(bgp.from_native(raw, manifest, source_ordinal=0)["observations"]), 1)
+        self.assertEqual(bgp.from_native(raw, manifest, source_ordinal=1)["source"]["sha256"], "1" * 64)
+        with self.assertRaisesRegex(InvalidResearch, "ordinal absent"):
+            bgp.from_native(raw, manifest, source_ordinal=2)
+
+    def test_native_cli_joins_real_file_reader(self):
+        _, raw, manifest = native_export()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "export.ndjson"
+            path.write_bytes(raw + canonical(manifest) + b"\n")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(bgp.main(["native", str(path)]), 0)
+            self.assertEqual(json.loads(stdout.getvalue())["source"]["bytes"], "16")
+
+
+if __name__ == "__main__":
+    unittest.main()

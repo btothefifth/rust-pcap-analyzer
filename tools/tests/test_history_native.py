@@ -11,6 +11,20 @@ from tools import history_native as h
 
 def blob(b):return struct.pack('<I',len(b))+b
 
+def key_wire(*,section=0,interface=0,link_interface=None,legacy=False):
+    link=b'' if legacy else (b'\0' if link_interface is None else b'\1'+struct.pack('<I',link_interface))
+    endpoints=b'\4'+bytes([192,0,2,1])+struct.pack('<H',40000)+b'\4'+bytes([192,0,2,2])+struct.pack('<H',502)
+    return struct.pack('<II',section,interface)+link+b'\0\0'+endpoints
+
+def encode_decoded_key(key):
+    link=b'\0' if key['link_interface'] is None else b'\1'+struct.pack('<I',key['link_interface'])
+    vlans=key['vlans'];tunnels=key['tunnels']
+    endpoints=b''.join(struct.pack('<B',family)+address+struct.pack('<H',port)
+                       for family,address,port in key['endpoints'])
+    return (struct.pack('<II',key['section'],key['interface'])+link+struct.pack('<B',len(vlans))
+            +struct.pack('<'+'H'*len(vlans),*vlans)+struct.pack('<B',len(tunnels))
+            +b''.join(blob(value.encode('utf-8')) for value in tunnels)+endpoints)
+
 def capture():
     # Classic little-endian PCAP, raw IPv4/TCP, one explicitly witnessed payload.
     tcp=struct.pack('!HHIIHHHH',40000,502,100,0,0x5018,4096,0,0)+b'abc'
@@ -21,11 +35,12 @@ def capture():
     return global_header+record,record,packet,tcp
 
 
-def build_fixture(root,*,mutate_row=False,mutate_witness=False,placement_duplicates=False):
+def build_fixture(root,*,mutate_row=False,mutate_witness=False,placement_duplicates=False,legacy=False):
     raw,record,packet,tcp=capture();source=root/'source.pcap';source.write_bytes(raw)
     work=root/'history';work.mkdir()
     limits=[1024**4,1024**4,20_000_000_000,2*1024*1024,64,128,2048,16,16*1024*1024,32768,16,65536,4096,128*1024*1024,10000]
-    config=blob(h.ENGINE)+struct.pack('<'+'Q'*15,*limits)+b'\0'
+    engine=b'pcap-evidence-history/1;state-policy/1' if legacy else h.ENGINE
+    config=blob(engine)+struct.pack('<'+'Q'*15,*limits)+b'\0'
     body=hashlib.sha256(raw).digest()+struct.pack('<Q',len(raw))+blob(config)
     prefix=h.MAGIC+struct.pack('<I',len(body))+body;previous=hashlib.sha256(prefix).digest();journal=bytearray(prefix+previous);sequence=0
     def emit(kind,body):
@@ -36,7 +51,7 @@ def build_fixture(root,*,mutate_row=False,mutate_witness=False,placement_duplica
         return at,previous,sequence
     row=struct.pack('<QQQIIIIII32s',1,24,40+(1 if mutate_row else 0),len(packet),len(packet),0,0,101,0,hashlib.sha256(packet).digest())
     emit(1,row+struct.pack('<Q',len(record))+hashlib.sha256(record).digest()+b'\1'+struct.pack('<QBq',1000123,6,0))
-    key=struct.pack('<II',0,0)+b'\0\0'+b'\4'+bytes([192,0,2,1])+struct.pack('<H',40000)+b'\4'+bytes([192,0,2,2])+struct.pack('<H',502)
+    key=key_wire(legacy=legacy)
     witness=struct.pack('<IIQQIQ',0,len(tcp),1,24,20,60+(1 if mutate_witness else 0))
     inp=blob(key)+b'\0'+struct.pack('<Q',1)+b'\1'+(1_000_123_000).to_bytes(16,'little',signed=True)+blob(tcp)+struct.pack('<I',1)+witness
     gen=hashlib.sha256(b'not-a-normative-generation;fixture-only').digest()
@@ -55,6 +70,25 @@ class IndependentJournal(unittest.TestCase):
         source,work=build_fixture(self.root);r=h.verify(source,work)
         self.assertEqual((r['packets'],r['tcp_records'],r['intervals']),(1,1,1))
         self.assertTrue(r['source_witnesses_checked']);self.assertFalse(r['semantic_replay_verified'])
+    def test_link_interface_canonical_roundtrip_and_independent_container_scope(self):
+        keys=[key_wire(),key_wire(link_interface=0),key_wire(link_interface=7),
+              key_wire(link_interface=8),key_wire(interface=7,link_interface=7)]
+        decoded=[h.decode_key(raw) for raw in keys]
+        self.assertEqual([key['link_interface'] for key in decoded],[None,0,7,8,7])
+        self.assertEqual([key['interface'] for key in decoded],[0,0,0,0,7])
+        for raw,key in zip(keys,decoded):self.assertEqual(encode_decoded_key(key),raw)
+        self.assertEqual(len(set(keys)),5)
+        self.assertEqual(keys[2][8:13],b'\1\7\0\0\0')
+    def test_noncanonical_link_interface_presence_rejected(self):
+        raw=bytearray(key_wire());raw[8]=2
+        with self.assertRaisesRegex(h.InvalidHistory,'boolean'):h.decode_key(raw)
+    def test_present_link_interface_requires_complete_u32(self):
+        with self.assertRaises(h.TruncatedHistory):h.decode_key(struct.pack('<II',0,0)+b'\1\7\0\0')
+    def test_legacy_engine_fails_closed_and_preserves_store_for_rebuild(self):
+        s,w=build_fixture(self.root,legacy=True);before={p.name:p.read_bytes() for p in w.iterdir()}
+        with self.assertRaisesRegex(h.InvalidHistory,'rebuild a new workspace from the immutable original capture'):
+            h.verify(s,w)
+        self.assertEqual(before,{p.name:p.read_bytes() for p in w.iterdir()})
     def test_torn_terminal(self):
         s,w=build_fixture(self.root);p=w/'journal.bin';p.write_bytes(p.read_bytes()[:-7])
         with self.assertRaises(h.TruncatedHistory):h.verify(s,w)

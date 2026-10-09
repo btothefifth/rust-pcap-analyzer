@@ -13,7 +13,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
-const ROW: usize = 64;
+// Private scratch format: original byte identity plus exact capture time.
+const ROW: usize = 65;
 
 pub struct PacketMap {
     source: File,
@@ -79,6 +80,10 @@ impl PacketMap {
         row[8..16].copy_from_slice(&offset.to_le_bytes());
         row[16..24].copy_from_slice(&(cap as u64).to_le_bytes());
         row[24..56].copy_from_slice(&hash);
+        if let Some(time) = capture_time(get(&event.data, "timestamp_ns")) {
+            row[56..64].copy_from_slice(&time.to_le_bytes());
+            row[64] = 1;
+        }
         self.index.seek(SeekFrom::Start(end - ROW as u64))?;
         self.index.write_all(&row)?;
         self.rows = frame;
@@ -91,6 +96,18 @@ impl PacketMap {
             },
             0,
         ))
+    }
+    // Select by capture-frame ordinal, never by timestamp or span layout.
+    // Call only after materialization verifies every contributing raw span.
+    fn observed_at_ns(&mut self, raw: &EvidenceBytes) -> Result<Option<i64>> {
+        let Some(span) = raw.spans().iter().max_by_key(|span| span.packet.frame) else {
+            return Ok(None);
+        };
+        let mut row = [0u8; ROW];
+        self.index
+            .seek(SeekFrom::Start((span.packet.frame - 1) * ROW as u64))?;
+        self.index.read_exact(&mut row)?;
+        Ok((row[64] == 1).then(|| i64::from_le_bytes(row[56..64].try_into().unwrap())))
     }
     pub fn namespace(&self) -> [u8; 32] {
         self.namespace
@@ -203,6 +220,37 @@ impl PacketMap {
         self.index.sync_all()?;
         Ok(())
     }
+}
+
+fn capture_time(value: Option<&Json>) -> Option<i64> {
+    let Some(Json::String(text)) = value else {
+        return None;
+    };
+    let time = text.parse::<i64>().ok()?;
+    (time.to_string() == *text).then_some(time)
+}
+
+// The stream producer names canonical endpoint a as source and b as
+// destination in FlowStart.key. These labels do not establish BGP role truth.
+fn flow_endpoints(data: &Json) -> Option<(std::net::IpAddr, std::net::IpAddr)> {
+    let key = get(data, "key")?;
+    if get(key, "transport") != Some(&Json::String("tcp".into())) {
+        return None;
+    }
+    let endpoint = |ip_key, port_key| {
+        let Some(Json::String(text)) = get(key, ip_key) else {
+            return None;
+        };
+        let address = text.parse::<std::net::IpAddr>().ok()?;
+        if address.to_string() != *text || number(get(key, port_key)).ok()? > u16::MAX as u64 {
+            return None;
+        }
+        Some(address)
+    };
+    Some((
+        endpoint("source_ip", "source_port")?,
+        endpoint("destination_ip", "destination_port")?,
+    ))
 }
 
 fn hash_source(source: &mut File) -> Result<[u8; 32]> {
@@ -399,6 +447,7 @@ pub struct DeepSink<'a> {
     dnp_file: super::dnp_file::FileReconciler,
     bgp: super::bgp_manager::CapturedSessionManager,
     bgp_seen: BTreeSet<u64>,
+    flow_endpoints: BTreeMap<u64, (std::net::IpAddr, std::net::IpAddr)>,
     bgp_pending_boundaries: BTreeMap<u64, Vec<(String, String)>>,
     bgp_pending_count: usize,
     bgp_pending_overflow: bool,
@@ -431,6 +480,7 @@ impl<'a> DeepSink<'a> {
             dnp_file: super::dnp_file::FileReconciler::new(),
             bgp,
             bgp_seen: BTreeSet::new(),
+            flow_endpoints: BTreeMap::new(),
             bgp_pending_boundaries: BTreeMap::new(),
             bgp_pending_count: 0,
             bgp_pending_overflow: false,
@@ -548,10 +598,27 @@ impl<'a> DeepSink<'a> {
                 )?;
             }
         }
-        if matches!(e.kind, EventKind::StreamGap | EventKind::StreamConflict) {
+        if e.kind == EventKind::FlowStart {
             if let Some(id) = e.session {
-                if let Some(s) = self.iec.get_mut(&id) {
-                    s.gap();
+                self.flow_endpoints.remove(&id);
+                if self.flow_endpoints.len() < self.limits.elements {
+                    if let Some(endpoints) = flow_endpoints(&e.data) {
+                        self.flow_endpoints.insert(id, endpoints);
+                    }
+                }
+            }
+        }
+        // A scoped BGP framing issue means the stream decoder omitted source
+        // bytes. It carries the same continuity consequence as a transport
+        // gap, without manufacturing a withdrawal or successor generation.
+        let bgp_issue = e.kind == EventKind::ProtocolIssue && e.protocol.as_deref() == Some("bgp");
+        let transport_boundary = matches!(e.kind, EventKind::StreamGap | EventKind::StreamConflict);
+        if transport_boundary || bgp_issue {
+            if let Some(id) = e.session {
+                if transport_boundary {
+                    if let Some(s) = self.iec.get_mut(&id) {
+                        s.gap();
+                    }
                 }
                 let record_id = event_record_id(e, self.inner.run_id(), &self.limits)?;
                 let reason = event_boundary_reason(e);
@@ -562,13 +629,16 @@ impl<'a> DeepSink<'a> {
                 }
                 let result = self.retain_or_apply_bgp_boundary(id, record_id.clone(), reason);
                 if let Some(result) = result {
+                    let receipt = result?;
                     set(
                         &mut own.data,
                         "depth_bgp_boundary",
-                        bgp_boundary_json(&record_id, result),
+                        bgp_boundary_json(&record_id, Ok(receipt)),
                     )?;
                 }
-                self.dnp_file.reset_session(id);
+                if transport_boundary {
+                    self.dnp_file.reset_session(id);
+                }
             }
         }
         if e.kind == EventKind::FlowEnd {
@@ -577,6 +647,7 @@ impl<'a> DeepSink<'a> {
                     s.gap();
                 }
                 self.dnp_file.reset_session(id);
+                self.flow_endpoints.remove(&id);
                 self.remove_pending_bgp_session(id);
                 let was_bgp = self.bgp_seen.remove(&id);
                 if was_bgp {
@@ -597,6 +668,7 @@ impl<'a> DeepSink<'a> {
         }
         if e.kind == EventKind::Boundary {
             self.iec.clear();
+            self.flow_endpoints.clear();
             self.bacnet = super::bacnet::Session::new(self.limits.clone())?;
             self.dnp_file.reset();
             self.bgp_pending_boundaries.clear();
@@ -677,14 +749,46 @@ impl<'a> DeepSink<'a> {
             } else if protocol == "bgp" && !e.evidence.spans.is_empty() {
                 let raw = self.map.materialize(&e.evidence, &self.limits)?;
                 let record_id = event_record_id(e, self.inner.run_id(), &self.limits)?;
+                let endpoints = e.session.and_then(|id| self.flow_endpoints.get(&id));
+                let (peer, local) = match (e.direction, endpoints) {
+                    (Some(0), Some((a, b))) => (Some(a.to_string()), Some(b.to_string())),
+                    (Some(1), Some((a, b))) => (Some(b.to_string()), Some(a.to_string())),
+                    _ => (None, None),
+                };
+                let observed_at_ns = self.map.observed_at_ns(&raw)?;
+                set(
+                    &mut own.data,
+                    "depth_bgp_capture_metadata",
+                    Json::object([
+                        ("time_basis", "latest_contributing_capture_frame".into()),
+                        ("time_available", observed_at_ns.is_some().into()),
+                        ("clock_calibration", "unknown".into()),
+                        ("clock_uncertainty_ns", Json::Null),
+                        (
+                            "endpoint_basis",
+                            "flow_start_canonical_ip_pair_and_direction".into(),
+                        ),
+                        ("endpoints_available", peer.is_some().into()),
+                        (
+                            "endpoint_unavailable_reason",
+                            if peer.is_some() {
+                                Json::Null
+                            } else if !matches!(e.direction, Some(0 | 1)) {
+                                "direction_missing_or_unknown".into()
+                            } else {
+                                "flow_start_missing_invalid_or_not_retained".into()
+                            },
+                        ),
+                    ]),
+                )?;
                 let metadata = super::bgp::PcapMetadata {
                     source_id: self.inner.run_id().to_owned(),
                     record_id: record_id.clone(),
-                    observed_at_ns: None,
+                    observed_at_ns,
                     session: e.session,
                     direction: e.direction,
-                    peer: None,
-                    local: None,
+                    peer,
+                    local,
                 };
                 if let Some(id) = e.session {
                     let first_bgp_message = self.bgp_seen.insert(id);
@@ -694,12 +798,12 @@ impl<'a> DeepSink<'a> {
                     if let Some(journal) = self.bgp_journal.as_mut() {
                         journal.message(id, &raw, &metadata)?;
                     }
-                    let result = (if first_bgp_message {
-                        self.prepare_bgp_session(id, &record_id)
-                    } else {
-                        Ok(())
-                    })
-                    .and_then(|()| self.bgp.apply_message(id, &raw, metadata));
+                    // Preparation is boundary admission, not malformed wire
+                    // evidence. Any failure must stop publication.
+                    if first_bgp_message {
+                        self.prepare_bgp_session(id, &record_id)?;
+                    }
+                    let result = self.bgp.apply_message(id, &raw, metadata);
                     match result {
                         Ok(receipt) => {
                             let summary = self
@@ -713,7 +817,22 @@ impl<'a> DeepSink<'a> {
                                 bgp_apply_json(&record_id, &receipt, &summary),
                             )?;
                         }
+                        Err(error) if error.code == ErrorCode::LimitExceeded => return Err(error),
                         Err(error) => {
+                            // The raw MESSAGE is already the journal carrier.
+                            // Replay derives one gap from its rejection; adding
+                            // a GAP record here would count the omission twice.
+                            let boundary_id = format!("{record_id}:rejected-message");
+                            let receipt = self.bgp.observe_gap(
+                                id,
+                                boundary_id.clone(),
+                                "sealed_source_message_rejected".into(),
+                            )?;
+                            set(
+                                &mut own.data,
+                                "depth_bgp_boundary",
+                                bgp_boundary_json(&boundary_id, Ok(receipt)),
+                            )?;
                             set(&mut own.data, "depth_bgp", outcome_json(Err(error.clone())))?;
                             set(
                                 &mut own.data,
@@ -843,13 +962,17 @@ mod tests {
     use pcap_evidence_stream::{events::Evidence, EvidenceStatus};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct NullSink;
+    #[derive(Default)]
+    struct NullSink {
+        emitted: u64,
+    }
     impl EventSink for NullSink {
         fn run_id(&self) -> &str {
             "sink-test"
         }
         fn emit(&mut self, _event: &Event) -> Result<u64> {
-            Ok(1)
+            self.emitted += 1;
+            Ok(self.emitted)
         }
     }
 
@@ -873,6 +996,523 @@ mod tests {
         event.protocol = Some("bgp".into());
         event.evidence = Evidence::bytes(&raw);
         event
+    }
+
+    fn with_test_sink(limits: Limits, bytes: &[u8], test: impl FnOnce(&mut DeepSink<'_>, &Path)) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "pcap-depth-sink-omission-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("source.bin");
+        std::fs::write(&source, bytes).unwrap();
+        let mut inner = NullSink::default();
+        let mut sink = DeepSink::new(
+            &mut inner,
+            File::open(source).unwrap(),
+            &root.join("packet.map"),
+            4096,
+            limits,
+            Context::default(),
+        )
+        .unwrap();
+        test(&mut sink, &root);
+        drop(sink);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn protocol_issue(session: Option<u64>, protocol: &str) -> Event {
+        let mut event = Event::new(
+            EventKind::ProtocolIssue,
+            EvidenceStatus::Incomplete,
+            Json::object([("reason", "synthetic_omission".into())]),
+        );
+        event.session = session;
+        event.protocol = Some(protocol.into());
+        event
+    }
+
+    fn map_message(sink: &mut DeepSink<'_>, bytes: &[u8]) -> Event {
+        let packet = Event::new(
+            EventKind::Packet,
+            EvidenceStatus::Observed,
+            Json::object([
+                ("frame", "1".into()),
+                ("record_offset", "0".into()),
+                ("data_offset", "0".into()),
+                ("captured_length", bytes.len().to_string().into()),
+                ("packet_sha256", sha256::hex(&sha256::digest(bytes)).into()),
+                ("link_type", 228usize.into()),
+            ]),
+        );
+        sink.augment(&packet).unwrap();
+        let mut event = message(1);
+        event.evidence = Evidence::bytes(&EvidenceBytes::from_packet(
+            bytes,
+            PacketId {
+                capture: sink.map.namespace(),
+                frame: 1,
+                record_offset: 0,
+            },
+            0,
+        ));
+        event
+    }
+
+    fn captured_packet(frame: u64, offset: usize, bytes: &[u8], time: Json) -> Event {
+        Event::new(
+            EventKind::Packet,
+            EvidenceStatus::Observed,
+            Json::object([
+                ("frame", frame.to_string().into()),
+                ("record_offset", (frame * 100).to_string().into()),
+                ("data_offset", offset.to_string().into()),
+                ("captured_length", bytes.len().to_string().into()),
+                ("packet_sha256", sha256::hex(&sha256::digest(bytes)).into()),
+                ("link_type", 228usize.into()),
+                ("timestamp_ns", time),
+            ]),
+        )
+    }
+
+    fn flow_start(session: u64, a: &str, b: &str) -> Event {
+        let mut event = Event::new(
+            EventKind::FlowStart,
+            EvidenceStatus::Candidate,
+            Json::object([(
+                "key",
+                Json::object([
+                    ("source_ip", a.into()),
+                    ("source_port", 50000usize.into()),
+                    ("destination_ip", b.into()),
+                    ("destination_port", 179usize.into()),
+                    ("transport", "tcp".into()),
+                ]),
+            )]),
+        );
+        event.session = Some(session);
+        event
+    }
+
+    fn normalized(event: &Event) -> &Json {
+        get(&event.data, "depth_bgp").unwrap()
+    }
+
+    #[test]
+    fn captured_metadata_selects_latest_frame_across_reordered_spans_and_sealed_replay() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        let segments = [&keepalive[..5], &keepalive[5..10], &keepalive[10..]];
+        // The greatest contributing frame occurs first, middle and last in
+        // reconstructed byte order. Neither end of the span list selects time.
+        for frame_order in [[3usize, 1, 2], [1, 3, 2], [1, 2, 3]] {
+            let mut chunks = [&[][..]; 3];
+            for (segment, frame) in segments.iter().zip(frame_order) {
+                chunks[frame - 1] = *segment;
+            }
+            let mut source: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+            source.push(b'x');
+            for latest in [
+                Json::from("-50"),
+                Json::from("0"),
+                Json::from("-9223372036854775808"),
+                Json::Null,
+                Json::from("9223372036854775808"),
+                Json::from("not-a-time"),
+            ] {
+                with_test_sink(Limits::default(), &source, |sink, root| {
+                    let journal = root.join("metadata.journal");
+                    sink.enable_bgp_journal(&journal, 8192).unwrap();
+                    sink.augment(&flow_start(9, "198.51.100.1", "198.51.100.2"))
+                        .unwrap();
+                    let times = [Json::from("1000"), Json::from("9000"), latest.clone()];
+                    let mut offset = 0;
+                    let mut pieces = Vec::new();
+                    for (index, chunk) in chunks.iter().enumerate() {
+                        let frame = index as u64 + 1;
+                        sink.augment(&captured_packet(frame, offset, chunk, times[index].clone()))
+                            .unwrap();
+                        pieces.push(EvidenceBytes::from_packet(
+                            chunk,
+                            PacketId {
+                                capture: sink.map.namespace(),
+                                frame,
+                                record_offset: frame * 100,
+                            },
+                            0,
+                        ));
+                        offset += chunk.len();
+                    }
+                    // An unrelated later packet is carried only in packet refs;
+                    // it contributes no raw span and must not select message time.
+                    sink.augment(&captured_packet(4, offset, b"x", "20000".into()))
+                        .unwrap();
+                    let mut raw = pieces[frame_order[0] - 1].clone();
+                    raw.append(&pieces[frame_order[1] - 1], 4096).unwrap();
+                    raw.append(&pieces[frame_order[2] - 1], 4096).unwrap();
+                    assert_eq!(raw.data(), keepalive);
+                    assert_eq!(
+                        raw.spans()
+                            .iter()
+                            .map(|s| s.packet.frame)
+                            .collect::<Vec<_>>(),
+                        frame_order.map(|f| f as u64)
+                    );
+                    let mut event = message(1);
+                    event.evidence = Evidence::bytes(&raw);
+                    event.evidence.packets.push(PacketId {
+                        capture: sink.map.namespace(),
+                        frame: 4,
+                        record_offset: 400,
+                    });
+                    let output = sink.augment(&event).unwrap();
+                    let expected = match &latest {
+                        Json::String(text) if text == "-50" => Some(-50),
+                        Json::String(text) if text == "0" => Some(0),
+                        Json::String(text) if text == "-9223372036854775808" => Some(i64::MIN),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        get(normalized(&output), "observed_at_ns"),
+                        Some(&expected.map_or(Json::Null, |t| t.to_string().into()))
+                    );
+                    assert_eq!(
+                        get(normalized(&output), "peer"),
+                        Some(&Json::from("198.51.100.1"))
+                    );
+                    assert_eq!(
+                        get(normalized(&output), "local"),
+                        Some(&Json::from("198.51.100.2"))
+                    );
+                    let basis = get(&output.data, "depth_bgp_capture_metadata").unwrap();
+                    assert_eq!(
+                        get(basis, "time_available"),
+                        Some(&Json::Bool(expected.is_some()))
+                    );
+                    sink.map.verify_source().unwrap();
+                    sink.bgp_journal.take().unwrap().seal().unwrap();
+                    let archive =
+                        super::super::bgp_store::replay(&journal, 8192, Limits::default()).unwrap();
+                    assert_eq!(archive.observations.len(), 1);
+                    assert_eq!(archive.observations[0].source().observed_at_ns, expected);
+                    assert_eq!(
+                        archive.observations[0].source().peer.as_deref(),
+                        Some("198.51.100.1")
+                    );
+                    assert_eq!(
+                        archive.observations[0].source().local.as_deref(),
+                        Some("198.51.100.2")
+                    );
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn captured_endpoint_direction_missing_retention_and_cleanup_controls() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        with_test_sink(Limits::default(), &keepalive, |sink, _| {
+            let original = map_message(sink, &keepalive);
+            sink.augment(&flow_start(9, "198.51.100.1", "198.51.100.2"))
+                .unwrap();
+            for (direction, expected) in [
+                (Some(0), Some(("198.51.100.1", "198.51.100.2"))),
+                (Some(1), Some(("198.51.100.2", "198.51.100.1"))),
+                (None, None),
+                (Some(2), None),
+            ] {
+                let mut event = original.clone();
+                event.direction = direction;
+                let output = sink.augment(&event).unwrap();
+                if direction == Some(2) {
+                    assert_eq!(
+                        get(normalized(&output), "status"),
+                        Some(&Json::from("rejected"))
+                    );
+                } else {
+                    assert_eq!(
+                        get(normalized(&output), "peer"),
+                        Some(&expected.map_or(Json::Null, |e| e.0.into()))
+                    );
+                    assert_eq!(
+                        get(normalized(&output), "local"),
+                        Some(&expected.map_or(Json::Null, |e| e.1.into()))
+                    );
+                }
+                assert_eq!(
+                    get(
+                        get(&output.data, "depth_bgp_capture_metadata").unwrap(),
+                        "endpoints_available"
+                    ),
+                    Some(&Json::Bool(expected.is_some()))
+                );
+            }
+            let mut other_session = original.clone();
+            other_session.session = Some(11);
+            let output = sink.augment(&other_session).unwrap();
+            assert_eq!(get(normalized(&output), "peer"), Some(&Json::Null));
+            assert_eq!(get(normalized(&output), "local"), Some(&Json::Null));
+            assert_eq!(
+                get(normalized(&output), "observed_at_ns"),
+                Some(&Json::Null)
+            );
+            for kind in [EventKind::FlowEnd, EventKind::Boundary] {
+                let mut end = protocol_issue(Some(9), "bgp");
+                end.kind = kind;
+                sink.augment(&end).unwrap();
+                let output = sink.augment(&original).unwrap();
+                assert_eq!(get(normalized(&output), "peer"), Some(&Json::Null));
+                // End the synthetic unavailable occurrence before ID reuse.
+                let mut occurrence_end = end.clone();
+                occurrence_end.kind = EventKind::FlowEnd;
+                sink.augment(&occurrence_end).unwrap();
+                sink.augment(&flow_start(9, "2001:db8::1", "2001:db8::2"))
+                    .unwrap();
+                let output = sink.augment(&original).unwrap();
+                assert_eq!(
+                    get(normalized(&output), "peer"),
+                    Some(&Json::from("2001:db8::1"))
+                );
+                assert_eq!(
+                    get(normalized(&output), "local"),
+                    Some(&Json::from("2001:db8::2"))
+                );
+            }
+            let mut end = protocol_issue(Some(9), "bgp");
+            end.kind = EventKind::FlowEnd;
+            sink.augment(&end).unwrap();
+            // Retention pressure on non-BGP flow starts preserves progress and
+            // explicitly leaves skipped sessions unavailable, without borrowing.
+            sink.flow_endpoints.clear();
+            sink.limits.elements = 1;
+            sink.augment(&flow_start(10, "192.0.2.1", "192.0.2.2"))
+                .unwrap();
+            sink.augment(&flow_start(9, "198.51.100.1", "198.51.100.2"))
+                .unwrap();
+            assert_eq!(sink.flow_endpoints.len(), 1);
+            sink.limits.elements = Limits::default().elements;
+            let output = sink.augment(&original).unwrap();
+            assert_eq!(get(normalized(&output), "peer"), Some(&Json::Null));
+            assert_eq!(
+                get(
+                    get(&output.data, "depth_bgp_capture_metadata").unwrap(),
+                    "endpoints_available"
+                ),
+                Some(&Json::Bool(false))
+            );
+            sink.augment(&flow_start(9, "invalid", "198.51.100.2"))
+                .unwrap();
+            assert!(!sink.flow_endpoints.contains_key(&9));
+        });
+    }
+
+    #[test]
+    fn packet_map_exact_disk_budget_and_one_below_include_capture_time() {
+        with_test_sink(Limits::default(), b"ab", |_, root| {
+            for budget in [ROW as u64 * 2, ROW as u64 * 2 - 1] {
+                let path = root.join(format!("bounded-{budget}.map"));
+                let mut map = PacketMap::create(
+                    File::open(root.join("source.bin")).unwrap(),
+                    &path,
+                    budget,
+                    "run",
+                )
+                .unwrap();
+                map.record(&captured_packet(1, 0, b"a", "0".into()))
+                    .unwrap();
+                let result = map.record(&captured_packet(2, 1, b"b", "-1".into()));
+                if budget == ROW as u64 * 2 {
+                    result.unwrap();
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), budget);
+                } else {
+                    assert_eq!(result.unwrap_err().field, "depth_packet_map_disk");
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), ROW as u64);
+                    assert_eq!(map.rows, 1);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn bgp_protocol_issue_scope_pending_and_identical_replay() {
+        with_test_sink(Limits::default(), &[], |sink, _| {
+            let mut iec = super::super::iec104::Session::default();
+            iec.active = Some(true);
+            sink.iec.insert(9, iec);
+            let iec_before = sink.iec[&9].json();
+            // Non-BGP and sessionless issues cannot supply managed BGP scope.
+            sink.augment(&protocol_issue(Some(9), "dnp3")).unwrap();
+            sink.augment(&protocol_issue(None, "bgp")).unwrap();
+            assert_eq!(sink.bgp_pending_count, 0);
+            assert_eq!(sink.bgp.active_sessions(), 0);
+
+            // A known session needs no invented direction. Before its first
+            // BGP message, keep the exact boundary without allocating state.
+            let issue = protocol_issue(Some(9), "bgp");
+            let record_id = event_record_id(&issue, sink.inner.run_id(), &sink.limits).unwrap();
+            sink.augment(&issue).unwrap();
+            assert_eq!(sink.iec[&9].json(), iec_before);
+            assert_eq!(sink.bgp_pending_count, 1);
+            assert_eq!(sink.bgp_pending_boundaries[&9][0].0, record_id);
+            assert_eq!(sink.bgp.active_sessions(), 0);
+            sink.prepare_bgp_session(9, "first-message").unwrap();
+            sink.bgp_seen.insert(9);
+            let replay = sink.augment(&issue).unwrap();
+            assert_eq!(sink.bgp.summary(9).unwrap().gaps, 1);
+            assert_eq!(sink.bgp.summary(9).unwrap().generation, 0);
+            assert_eq!(
+                get(get(&replay.data, "depth_bgp_boundary").unwrap(), "replayed"),
+                Some(&Json::Bool(true))
+            );
+            assert_eq!(sink.iec[&9].json(), iec_before);
+            let mut transport_gap = issue;
+            transport_gap.kind = EventKind::StreamGap;
+            sink.augment(&transport_gap).unwrap();
+            assert!(sink.iec[&9].tainted);
+            assert_eq!(sink.iec[&9].active, None);
+        });
+    }
+
+    #[test]
+    fn bgp_boundary_admission_failure_is_fatal_and_atomic() {
+        for kind in [
+            EventKind::ProtocolIssue,
+            EventKind::StreamGap,
+            EventKind::StreamConflict,
+        ] {
+            let limits = Limits {
+                elements: 1,
+                ..Limits::default()
+            };
+            with_test_sink(limits, &[], |sink, root| {
+                sink.enable_bgp_journal(&root.join("bgp.journal.partial"), 4096)
+                    .unwrap();
+                sink.bgp
+                    .observe_gap(9, "first-gap".into(), "observed_gap".into())
+                    .unwrap();
+                sink.bgp_seen.insert(9);
+                let mut event = protocol_issue(Some(9), "bgp");
+                event.kind = kind;
+                let error = sink.augment(&event).unwrap_err();
+                assert_eq!(error.code, ErrorCode::LimitExceeded);
+                assert_eq!(sink.bgp.summary(9).unwrap().gaps, 1);
+                assert_eq!(sink.bgp.summary(9).unwrap().generation, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn bgp_preparation_failure_is_fatal_before_message_rejection() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        let limits = Limits {
+            elements: 1,
+            ..Limits::default()
+        };
+        with_test_sink(limits, &keepalive, |sink, root| {
+            sink.enable_bgp_journal(&root.join("bgp.journal.partial"), 4096)
+                .unwrap();
+            assert!(sink
+                .retain_or_apply_bgp_boundary(9, "retained-gap".into(), "observed_gap".into())
+                .is_none());
+            assert!(sink
+                .retain_or_apply_bgp_boundary(9, "overflow-gap".into(), "observed_gap".into())
+                .is_none());
+            assert!(sink.bgp_pending_overflow);
+            let event = map_message(sink, &keepalive);
+            let error = sink.augment(&event).unwrap_err();
+            assert_eq!(error.code, ErrorCode::LimitExceeded);
+            // Admission may retain the first gap, but cannot publish a rejected
+            // source message or allow the owning analyze caller to seal.
+            let summary = sink.bgp.summary(9).unwrap();
+            assert_eq!(summary.gaps, 1);
+            assert_eq!(summary.session_events, 1);
+            assert_eq!(summary.generation, 0);
+        });
+    }
+
+    #[test]
+    fn bgp_message_capacity_failure_propagates_through_event_sink() {
+        let mut keepalive = vec![255; 16];
+        keepalive.extend_from_slice(&[0, 19, 4]);
+        for active in [1, 2] {
+            let limits = Limits {
+                active,
+                ..Limits::default()
+            };
+            with_test_sink(limits, &keepalive, |sink, root| {
+                let partial = root.join("bgp.journal.partial");
+                sink.enable_bgp_journal(&partial, 4096).unwrap();
+                let first = map_message(sink, &keepalive);
+                // Packet mapping uses augment directly. This public emit must
+                // be the first event actually forwarded to the inner sink.
+                assert_eq!(EventSink::emit(sink, &first).unwrap(), 1);
+                let before = sink.bgp.snapshot(9).unwrap();
+                assert_eq!(before.summary.session_events, 1);
+                assert_eq!(before.summary.gaps, 0);
+                let mut second = first.clone();
+                second.session = Some(10);
+                if active == 1 {
+                    let error = EventSink::emit(sink, &second).unwrap_err();
+                    assert_eq!(error.code, ErrorCode::LimitExceeded);
+                    assert_eq!(error.field, "bgp_manager_active_sessions");
+                    assert_eq!(sink.bgp.snapshot(9).unwrap(), before);
+                    assert!(!sink.bgp.contains(10));
+                    assert_eq!(sink.bgp.active_sessions(), 1);
+                    // The attempted source MESSAGE precedes manager admission
+                    // in the journal. It remains unsealed recovery evidence;
+                    // no caller here requests finish after the producer error.
+                    assert!(partial.is_file());
+                    assert!(!root.join("bgp.journal").exists());
+                    let raw = std::fs::read(&partial).unwrap();
+                    assert!(raw.len() < 4096);
+                    assert_eq!(&raw[..8], b"PCBGP001");
+                    // v1: fixed header, length-prefixed source label, then
+                    // 73-byte record envelopes. The body starts with session.
+                    let source_len = u32::from_le_bytes(raw[42..46].try_into().unwrap());
+                    let mut offset = 46 + source_len as usize;
+                    let mut scopes = Vec::new();
+                    while offset < raw.len() {
+                        assert_eq!(raw[offset], 1, "only raw MESSAGE carriers are retained");
+                        let size =
+                            u64::from_le_bytes(raw[offset + 1..offset + 9].try_into().unwrap());
+                        scopes.push(u64::from_le_bytes(
+                            raw[offset + 73..offset + 81].try_into().unwrap(),
+                        ));
+                        offset += 73 + size as usize;
+                    }
+                    assert_eq!(offset, raw.len());
+                    assert_eq!(scopes, [9, 10]);
+                    let error = super::super::bgp_store::replay(&partial, 4096, Limits::default())
+                        .unwrap_err();
+                    assert_eq!(error.code, ErrorCode::Truncated);
+                    assert_eq!(error.field, "bgp_journal_record");
+                    // Identical replay is still accepted. The returned inner
+                    // count proves the failed second event was not forwarded.
+                    assert_eq!(EventSink::emit(sink, &first).unwrap(), 2);
+                    assert_eq!(sink.bgp.snapshot(9).unwrap(), before);
+                } else {
+                    assert_eq!(EventSink::emit(sink, &second).unwrap(), 2);
+                    assert_eq!(sink.bgp.active_sessions(), 2);
+                    assert_eq!(sink.bgp.snapshot(9).unwrap(), before);
+                    assert_eq!(sink.bgp.summary(10).unwrap().session_events, 1);
+                    assert_eq!(sink.bgp.summary(10).unwrap().gaps, 0);
+                    sink.map.verify_source().unwrap();
+                    sink.bgp_journal.take().unwrap().seal().unwrap();
+                    let archive =
+                        super::super::bgp_store::replay(&partial, 4096, Limits::default()).unwrap();
+                    assert_eq!(archive.sessions.len(), 2);
+                    assert_eq!(archive.messages, 2);
+                    assert_eq!(archive.boundaries, 0);
+                    assert_eq!(archive.rejected_records, 0);
+                }
+            });
+        }
     }
 
     #[test]
@@ -904,7 +1544,7 @@ mod tests {
         let map_path = root.join("packet.map");
         std::fs::write(&source_path, []).unwrap();
         let source = File::open(&source_path).unwrap();
-        let mut inner = NullSink;
+        let mut inner = NullSink::default();
         let mut sink = DeepSink::new(
             &mut inner,
             source,

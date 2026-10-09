@@ -1,6 +1,6 @@
 """Independent Phase 1 BGP wire arithmetic, without calling the Rust decoder.
 
-The expected values are hand derived from RFC 4271, 4724, 6793, 7313, 7911,
+The expected values are hand derived from RFC 4271, 6286, 7606, 4724, 6793, 7313, 7911,
 8654, 9234 and 9494. This is a fixture oracle, not endpoint-state evidence.
 """
 
@@ -183,6 +183,21 @@ class Phase1WireVectors(unittest.TestCase):
         self.assertEqual(int.from_bytes(large[16:18], "big"), 4097)
         coalesced = large + message(4)
         self.assertEqual(coalesced[4097:4116], b"\xff" * 16 + b"\0\x13\4")
+
+    def test_nonzero_integer_id_and_malformed_attribute_outer_boundary(self):
+        for value in (1, 0xc0000201, 0xe0000001, 0xffffffff):
+            raw = bytearray(opened(64512, []))
+            raw[24:28] = value.to_bytes(4, "big")
+            self.assertEqual(int.from_bytes(raw[24:28], "big"), value)
+            self.assertEqual(len(raw[24:28]), 4)
+        malformed = update(bytes.fromhex("400101"), bytes.fromhex("18cb0071"))
+        withdrawal = update(b"", withdrawn=bytes.fromhex("18cb0071"))
+        self.assertEqual(len(malformed), 30)
+        self.assertEqual(malformed[21:23], b"\0\3")
+        self.assertEqual(malformed[23:26], bytes.fromhex("400101"))
+        self.assertEqual(malformed[26:], bytes.fromhex("18cb0071"))
+        self.assertEqual(len(withdrawal), 27)
+        self.assertEqual((malformed + withdrawal)[30:], withdrawal)
 
     def test_eor_and_protocol_reset_wire_neighbors(self):
         conventional = update(b"")

@@ -306,6 +306,334 @@ fn dnp3_pcap_depth_consumes_assembled_and_fragment_evidence() {
     fs::remove_dir_all(workspace).expect("remove isolated test workspace");
 }
 
+// Each fixture traverses TCP reconstruction, the shallow framer, DeepSink,
+// sealed persistence, and fresh CLI consumers. Wire bytes and expectations are
+// independent of the deep reducer; the malformed attribute length and /33 are
+// deliberate complete-message witnesses.
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn capture_bgp_omission(mode: &str) -> Vec<u8> {
+    let cap = bgp_capability(65, &70_000u32.to_be_bytes());
+    let opens = [
+        bgp_open(23_456, [192, 0, 2, 1], std::slice::from_ref(&cap)),
+        bgp_open(23_456, [192, 0, 2, 2], &[cap]),
+    ];
+    let route = bgp_update();
+    let withdrawal = bgp_message(2, &[0, 4, 24, 203, 0, 113, 0, 0]);
+    let mut next_route = route.clone();
+    *next_route.last_mut().unwrap() = 114;
+    let bad = match mode {
+        "framer" => bgp_message(2, &[0, 0, 0, 3, 0x40, 1, 1, 24, 203, 0, 113]),
+        "header" => {
+            let mut bad = route.clone();
+            bad[0] = 0;
+            bad
+        }
+        "deep" => {
+            let mut bad = route.clone();
+            let length = bad.len();
+            bad[length - 4] = 33;
+            bad
+        }
+        "valid" => route.clone(),
+        _ => panic!("unknown fixture"),
+    };
+    let mut packets = Vec::new();
+    for session in 0..2u8 {
+        let left = [10, 0, session, 1];
+        let right = [10, 0, session, 2];
+        let port = 50_000 + u16::from(session);
+        let mut add = |reverse: bool, sequence, acknowledgment, flags, payload: &[u8]| {
+            packets.push(tcp_packet(
+                if reverse { right } else { left },
+                if reverse { left } else { right },
+                if reverse { 179 } else { port },
+                if reverse { port } else { 179 },
+                sequence,
+                acknowledgment,
+                flags,
+                1,
+                payload,
+            ));
+        };
+        add(false, 1000, 0, 0x02, &[]);
+        add(true, 2000, 1001, 0x12, &[]);
+        add(false, 1001, 2001, 0x10, &[]);
+        add(false, 1001, 2001, 0x18, &opens[0]);
+        let mut left_end = 1001 + opens[0].len() as u32;
+        add(true, 2001, left_end, 0x18, &opens[1]);
+        let mut right_end = 2001 + opens[1].len() as u32;
+        add(false, left_end, right_end, 0x18, &route);
+        if session == 0 && mode == "valid" {
+            // Identical TCP retransmission must not duplicate a source message.
+            add(false, left_end, right_end, 0x18, &route);
+        }
+        left_end += route.len() as u32;
+        if session == 0 {
+            let continuation = if mode == "deep" {
+                &next_route
+            } else {
+                &withdrawal
+            };
+            let chunk = [bad.as_slice(), continuation.as_slice()].concat();
+            add(false, left_end, right_end, 0x18, &chunk);
+            left_end += chunk.len() as u32;
+            // The untouched direction continues after the omitted/rejected
+            // record. Its independent /24 cannot restore lost continuity.
+            add(true, right_end, left_end, 0x18, &next_route);
+            right_end += next_route.len() as u32;
+        }
+        add(false, left_end, right_end, 0x11, &[]);
+        add(true, right_end, left_end + 1, 0x11, &[]);
+        add(false, left_end + 1, right_end + 1, 0x10, &[]);
+    }
+    let mut writer = PcapWriter::new(
+        Vec::new(),
+        Endian::Little,
+        false,
+        228,
+        65_535,
+        Limits::default(),
+    )
+    .unwrap();
+    for (index, packet) in packets.iter().enumerate() {
+        writer
+            .packet(
+                Timestamp::legacy((index + 1) as u32, 0, false).unwrap(),
+                packet.len() as u32,
+                packet,
+            )
+            .unwrap();
+    }
+    assert!(packets.len() <= 40);
+    let capture = writer.finish().unwrap();
+    assert!(capture.len() <= 10_000);
+    capture
+}
+
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn assert_capture_bgp_omission(mode: &str) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "pcap-depth-omission-{mode}-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let input = root.join("capture.pcap");
+    let workspace = root.join("workspace");
+    fs::write(&input, capture_bgp_omission(mode)).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_pcap-depth"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture {root:?}: {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(&[
+        "analyze",
+        input.to_str().unwrap(),
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--max-index-bytes",
+        "4096",
+        "--max-output-bytes",
+        "1000000",
+        "--max-bgp-journal-bytes",
+        "1000000",
+    ]);
+    let journal = workspace.join("bgp.journal");
+    for operation in ["state", "query", "export", "policy"] {
+        let output = root.join(format!("{operation}.json"));
+        let mut args = vec![
+            "bgp",
+            operation,
+            journal.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ];
+        let profile = root.join("policy.txt");
+        if operation == "query" {
+            args.extend(["--session", "1"]);
+        }
+        if operation == "policy" {
+            fs::write(&profile, "schema=pcap-evidence.bgp.persisted-policy.v1\nprovenance=synthetic-capture\ncomparison_context=offline-capture\nmissing_local_preference=100\nmed_rule=skip\nage_rule=skip\n").unwrap();
+            args.extend(["--policy-profile", profile.to_str().unwrap()]);
+        }
+        run(&args);
+    }
+    let rich = root.join("rich.json");
+    run(&[
+        "bgp",
+        "query",
+        journal.to_str().unwrap(),
+        "--prefix",
+        "203.0.113.0/24",
+        "--output",
+        rich.to_str().unwrap(),
+    ]);
+    let all = root.join("all.json");
+    run(&[
+        "bgp",
+        "query",
+        journal.to_str().unwrap(),
+        "--afi",
+        "1",
+        "--output",
+        all.to_str().unwrap(),
+    ]);
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let checked = Command::new(python).args(["-c", r#"
+import hashlib,json,pathlib,struct,sys
+root=pathlib.Path(sys.argv[1]); mode=sys.argv[2]
+def load(name): return json.loads((root/name).read_text())
+events=[json.loads(x)['event'] for x in (root/'workspace/events.ndjson').read_text().splitlines()]
+assert not any('invalid_transport_checksum_observed' in json.dumps(e) for e in events)
+messages=[e for e in events if e.get('protocol')=='bgp' and e['kind']=='protocol.message']
+prior=[e for e in messages if e['session']=='1' and e['data'].get('depth_bgp_pipeline',{}).get('state',{}).get('active_routes')==1]
+assert prior, 'fixture did not reach a valid prior route'
+first_route=next(e for e in prior if e['data']['depth_bgp_pipeline']['state']['route_entries']==1)
+assert first_route['data']['depth_bgp_pipeline']['state']['gaps']==0
+immediate={e['session']:e['data']['depth_bgp_session_summary'] for e in events if 'depth_bgp_session_summary' in e['data']}
+state=load('state.json'); snapshots={s['summary']['session']:s for s in state['sessions']}
+query=load('query.json'); assert len(query['occurrences'])==1
+assert query['occurrences'][0]==snapshots['1']
+export=[json.loads(x) for x in (root/'export.json').read_text().splitlines()]
+assert {s['summary']['session']:s for s in export if s.get('schema')=='pcap-evidence.bgp.session-snapshot.v1'}==snapshots
+for sid in ['1','2']:
+    assert immediate[sid]==snapshots[sid]['summary'], (mode,'immediate/replay summary mismatch',immediate[sid],snapshots[sid]['summary'])
+    assert immediate[sid]['generation']==0
+    assert not snapshots[sid]['state']['reset_records']
+assert immediate['2']['gaps']==0 and immediate['2']['active_routes']==1
+assert immediate['2']['route_entries']==1
+rich=load('rich.json')['routes']; rows=load('all.json')['routes']
+assert len(rich)==2 and all(not r['native_current'] for r in rows), 'END is historical, not selectable'
+original=next(r for r in rows if r['session']=='1' and r['prefix']=='203.0.113.0/24')
+assert any(first_route['data']['depth_bgp_pipeline']['record_id'] in v['witnesses'] for v in original['alternatives']), 'prior route witness lost'
+assert all(r['generation']==0 for r in rows)
+# Every closed candidate is excluded by policy, even the unaffected Active history.
+def walk(x):
+    if isinstance(x,dict):
+        yield x
+        for v in x.values(): yield from walk(v)
+    elif isinstance(x,list):
+        for v in x: yield from walk(v)
+policy=list(walk(load('policy.json')))
+assert any(x.get('schema')=='pcap-evidence.bgp.policy-result.v1' for x in policy)
+assert all(x.get('selected') is None for x in policy if 'selected' in x)
+if mode=='valid':
+    assert immediate['1']['gaps']==0 and immediate['1']['withdrawn_routes']==1
+    assert original['status']=='withdrawn'
+    assert len(messages)==9, 'retransmission duplicated a framed message'
+elif mode=='framer':
+    assert immediate['1']['gaps']==0, ('recoverable attribute error invented a gap',immediate['1'])
+    assert immediate['1']['withdrawn_routes']==1 and immediate['1']['active_routes']==1
+    assert original['status']=='withdrawn'
+    assert not any(e['kind']=='protocol.issue' and e.get('protocol')=='bgp' for e in events)
+    recovered=[e for e in messages if e['session']=='1' and e['data'].get('depth_bgp',{}).get('message_detail',{}).get('update_disposition')=='treat_as_withdraw']
+    assert len(recovered)==1
+    first=recovered[0]
+    following=messages[messages.index(first)+1]
+    assert following['session']=='1' and following['direction']==first['direction']
+    expected=bytes.fromhex('ffffffffffffffffffffffffffffffff001e020000000340010118cb0071')
+    successor=bytes.fromhex('ffffffffffffffffffffffffffffffff001b02000418cb00710000')
+    capture=(root/'capture.pcap').read_bytes()
+    for event,raw in [(first,expected),(following,successor)]:
+        evidence=event['evidence']
+        assert evidence['reconstructed_sha256']==hashlib.sha256(raw).hexdigest()
+        assert int(evidence['byte_length'])==len(raw) and len(evidence['spans'])==1
+        span=evidence['spans'][0]
+        offset=int(span['record_offset'])+16+int(span['packet_start'])
+        assert capture[offset:offset+len(raw)]==raw
+    assert first['evidence']['spans'][0]['record_offset']==following['evidence']['spans'][0]['record_offset']
+    assert int(following['evidence']['spans'][0]['packet_start'])==int(first['evidence']['spans'][0]['packet_start'])+len(expected)
+    # Sealed MESSAGE records retain each exact frame separately; no GAP is
+    # invented for an attribute grammar error recoverable by the deep producer.
+    journal=(root/'workspace/bgp.journal').read_bytes(); pos=42
+    source_len=struct.unpack_from('<I',journal,pos)[0]; pos+=4+source_len
+    kinds=[]; bodies=[]
+    while pos<len(journal):
+        kind=journal[pos]; size=struct.unpack_from('<Q',journal,pos+1)[0]
+        kinds.append(kind); body=journal[pos+73:pos+73+size]
+        if kind==1: bodies.append(body)
+        pos+=73+size
+    assert 2 not in kinds and 3 not in kinds and kinds.count(1)==len(messages)
+    assert kinds.count(4)==2 and kinds[-1]==255
+    assert sum(expected in body for body in bodies)==1
+    assert sum(successor in body for body in bodies)==1
+    assert state['rejected_records']=='0' and state['boundaries']=='0'
+    assert len(messages)==9, 'coalesced successor was omitted or duplicated'
+else:
+    assert immediate['1']['gaps']==1, (mode,'one omission must produce one scoped gap',immediate['1'])
+    assert immediate['1']['active_routes']==0 and immediate['1']['withdrawn_routes']==0
+    assert immediate['1']['superseded_routes']==0
+    assert all(r['status']=='unresolved' for r in rows if r['session']=='1')
+    assert all(v['disposition']=='current' for v in original['alternatives']), 'omission invented withdrawal or supersession'
+    later=[e for e in messages if e['session']=='1' and e['data'].get('depth_bgp_pipeline',{}).get('state',{}).get('gaps')==1]
+    assert later and all(e['data']['depth_bgp_pipeline']['state']['active_routes']==0 for e in later)
+    if mode=='header':
+        issues=[e for e in events if e['kind']=='protocol.issue' and e.get('protocol')=='bgp']
+        assert len(issues)==1 and issues[0]['session']=='1' and issues[0]['direction'] is not None
+        issue=issues[0]; assert issue['data']['depth_bgp_boundary']['generation']==0
+        assert issue['data']['depth_bgp_boundary']['previous_generation']==0
+        bad=bytearray.fromhex('ffffffffffffffffffffffffffffffff002f020000001440010100400206020100011170400304c000020118cb0071')
+        bad[0]=0
+        expected=bytes(bad)+bytes.fromhex('ffffffffffffffffffffffffffffffff001b02000418cb00710000')
+        assert issue['evidence']['reconstructed_sha256']==hashlib.sha256(expected).hexdigest()
+        assert int(issue['evidence']['byte_length'])==len(expected)
+        assert len(messages)==7, 'invalid common header unexpectedly resynchronized into successor'
+        assert state['rejected_records']=='0' and state['boundaries']=='1'
+    else:
+        rejected=[e for e in messages if e['data'].get('depth_bgp_pipeline',{}).get('status')=='rejected']
+        assert len(rejected)==1 and rejected[0]['session']=='1'
+        assert state['rejected_records']=='1' and state['boundaries']=='0', 'MESSAGE rejection must not add journal GAP'
+print(json.dumps({'mode':mode,'capture_sha256':hashlib.sha256((root/'capture.pcap').read_bytes()).hexdigest(),'immediate':immediate,'rejected_records':state['rejected_records'],'boundaries':state['boundaries']},sort_keys=True))
+"#, root.to_str().unwrap(), mode]).output().unwrap();
+    assert!(
+        checked.status.success(),
+        "JSON oracle failed; retained fixture {root:?}: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&checked.stdout));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn bgp_capture_attribute_recovery_preserves_successor_and_exact_replay() {
+    assert_capture_bgp_omission("framer");
+}
+
+#[test]
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn bgp_capture_bad_common_header_preserves_scoped_gap_without_resynchronization() {
+    assert_capture_bgp_omission("header");
+}
+
+#[test]
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn bgp_capture_deep_rejection_preserves_scoped_uncertainty_and_replay() {
+    assert_capture_bgp_omission("deep");
+}
+
+#[test]
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn bgp_capture_valid_withdrawal_and_retransmission_control() {
+    assert_capture_bgp_omission("valid");
+}
+
 #[test]
 #[cfg(all(feature = "standard", feature = "binary"))]
 fn bgp_pcap_depth_emits_normalized_route_evidence() {
@@ -560,7 +888,7 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
     );
     let state_bytes = fs::read(&state).expect("MRT state output");
     let state_text = String::from_utf8(state_bytes.clone()).expect("MRT state is UTF-8");
-    assert!(state_text.contains("pcap-evidence.bgp.mrt-replay.v3"));
+    assert!(state_text.contains("pcap-evidence.bgp.mrt-replay.v4"));
     assert!(state_text.contains("\"status\":\"collector_candidate\""));
     assert!(state_text.contains("\"status\":\"missing_scope\""));
     assert!(state_text.contains("\"address\":\"203.0.113.0\""));
@@ -582,7 +910,7 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
         .expect("MRT query process runs");
     assert!(queried.status.success());
     let query_text = fs::read_to_string(&query).expect("MRT query output");
-    assert!(query_text.contains("pcap-evidence.bgp.imported-session-query.v3"));
+    assert!(query_text.contains("pcap-evidence.bgp.imported-session-query.v4"));
     assert!(query_text.contains("collector_candidate"));
     assert!(query_text.contains("\"observation_index\":\"0\""));
     assert!(query_text.contains("\"observations\":["));
@@ -600,12 +928,19 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
         .expect("MRT export process runs");
     assert!(exported.status.success());
     let export_text = fs::read_to_string(&export).expect("MRT export output");
-    assert!(export_text.contains("pcap-evidence.bgp.export-header.v3"));
+    assert!(export_text.contains("pcap-evidence.bgp.export-header.v4"));
     assert!(export_text.contains("\"source_kind\":\"imported\""));
     assert!(export_text.contains("pcap-evidence.bgp.mrt-record-summary.v1"));
     assert!(export_text.contains("pcap-evidence.bgp.mrt-observation.v1"));
     assert!(export_text.contains("pcap-evidence.bgp.collector-candidate.v2"));
     assert_eq!(export_text.matches("\"normalized_observation\"").count(), 1);
+    let export_lines: Vec<_> = export_text.lines().collect();
+    assert_eq!(export_lines.len(), 6);
+    assert!(export_lines[0].contains("pcap-evidence.bgp.export-header.v4"));
+    assert!(export_lines[1].contains("pcap-evidence.bgp.adj-rib-in-candidate.v1"));
+    assert!(export_lines[1].contains("\"entries\":[]"));
+    assert!(export_lines[1].contains("\"end_of_rib\":[]"));
+    assert!(export_lines[1].contains("\"endpoint_state_claimed\":false"));
 
     let overwrite = Command::new(env!("CARGO_BIN_EXE_pcap-depth"))
         .args([
@@ -659,4 +994,116 @@ fn bgp_mrt_cli_persists_replays_queries_and_exports_source_bound_candidates() {
     assert!(!corrupt_output.exists());
 
     fs::remove_dir_all(root).expect("remove isolated MRT test workspace");
+}
+
+// Ordinary PCAP admission, raw-span reconstruction, journal sealing and fresh
+// query join. Capture clocks deliberately regress; they never order messages.
+#[test]
+#[cfg(all(feature = "standard", feature = "binary"))]
+fn captured_bgp_metadata_survives_sealing_and_fresh_peer_query() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "pcap-captured-metadata-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let input = root.join("capture.pcap");
+    let workspace = root.join("workspace");
+    let mut capture = capture_ordered_bgp_session();
+    let seconds = [1u32, 2, 3, 40, 50, 9000, 7, 8000, 9000, 10000];
+    let mut offset = 24;
+    for time in seconds {
+        capture[offset..offset + 4].copy_from_slice(&time.to_le_bytes());
+        let captured = u32::from_le_bytes(capture[offset + 8..offset + 12].try_into().unwrap());
+        offset += 16 + captured as usize;
+    }
+    assert_eq!(offset, capture.len());
+    fs::write(&input, capture).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_pcap-depth"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(&[
+        "analyze",
+        input.to_str().unwrap(),
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--max-index-bytes",
+        "4096",
+        "--max-output-bytes",
+        "1000000",
+        "--max-bgp-journal-bytes",
+        "1000000",
+    ]);
+    let journal = workspace.join("bgp.journal");
+    assert!(journal.is_file());
+    assert!(!workspace.join("bgp.journal.partial").exists());
+    let state = root.join("state.json");
+    run(&[
+        "bgp",
+        "state",
+        journal.to_str().unwrap(),
+        "--output",
+        state.to_str().unwrap(),
+    ]);
+    for (peer, name) in [("10.0.0.1", "matching.json"), ("10.0.0.2", "opposite.json")] {
+        let output = root.join(name);
+        run(&[
+            "bgp",
+            "query",
+            journal.to_str().unwrap(),
+            "--prefix",
+            "203.0.113.0/24",
+            "--peer",
+            peer,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+    }
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let checked = Command::new(python).args(["-c", r#"
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+events=[json.loads(line)['event'] for line in (root/'workspace/events.ndjson').read_text().splitlines()]
+messages=[e for e in events if e.get('protocol')=='bgp' and e['kind']=='protocol.message']
+assert len(messages)==3
+for e in messages:
+    n=e['data']['depth_bgp']; m=e['data']['depth_bgp_capture_metadata']
+    assert m['time_basis']=='latest_contributing_capture_frame' and m['time_available'] is True
+    assert m['clock_calibration']=='unknown' and m['clock_uncertainty_ns'] is None
+    assert m['endpoints_available'] is True
+    assert (n['peer'],n['local']) == (('10.0.0.1','10.0.0.2') if e['direction']==0 else ('10.0.0.2','10.0.0.1'))
+    assert n['endpoint_state_established'] is False and n['causality_established'] is False
+update=next(e for e in messages if e['data']['depth_bgp']['message_type']==2)
+assert [int(s['frame']) for s in update['evidence']['spans']]==[7,6]
+assert update['data']['depth_bgp']['observed_at_ns']=='7000000000'
+state=json.loads((root/'state.json').read_text())
+assert state['fresh_process_reduction'] is True
+rows=json.loads((root/'matching.json').read_text())['routes']
+assert len(rows)==1 and rows[0]['peer']=='10.0.0.1' and rows[0]['direction']==0
+assert rows[0]['observed_at_ns']=='7000000000'
+assert json.loads((root/'opposite.json').read_text())['routes']==[]
+"#, root.to_str().unwrap()]).output().unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
 }

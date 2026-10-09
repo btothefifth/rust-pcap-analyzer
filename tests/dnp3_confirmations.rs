@@ -923,3 +923,76 @@ fn real_cli_emits_the_additive_section_without_changing_the_capture() {
     assert!(text.contains("\"transaction_candidates\":["));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+fn app_from_capture(name: &str, direction: usize, capture: [u8; 32]) -> ApplicationAnalysis {
+    let stream = StreamResult {
+        base_sequence: Some(1000),
+        anchored_by_syn: true,
+        chunks: vec![StreamChunk {
+            offset: 0,
+            bytes: EvidenceBytes::from_packet(&wire(name), PacketId { capture, ..id(30) }, 54),
+        }],
+        gaps: vec![],
+        conflicts: vec![],
+        duplicate_observed_bytes: 0,
+    };
+    ApplicationAnalysis {
+        flow: 0,
+        direction,
+        protocol: "dnp3",
+        data: ApplicationData::Dnp3(dnp3::decode(&stream, &Limits::default()).unwrap()),
+    }
+}
+
+#[test]
+fn invalid_fragment_taints_only_its_capture_and_numeric_flow() {
+    let mut apps = pair();
+    let mut other = app_from_capture("solicited_target", 1, [43; 32]);
+    data_mut(&mut other).fragments[0].sequence = 7;
+    apps.push(other);
+    let rows = candidates(&apps);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == "candidate_confirmation")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.status == "unclassified")
+            .count(),
+        1
+    );
+    assert!(rows
+        .iter()
+        .find(|row| row.status == "candidate_confirmation")
+        .unwrap()
+        .unclassified_fragments
+        .is_empty());
+}
+
+#[test]
+fn invalid_fragment_with_unknown_capture_scope_is_explicit_and_conservative() {
+    let mut apps = pair();
+    let mut bad = app_from_capture("solicited_target", 1, [43; 32]);
+    // Keep the supplied link source in capture B while replacing APDU source
+    // with capture C. No coherent source scope can be assigned to this row.
+    let fragment = &mut data_mut(&mut bad).fragments[0];
+    fragment.raw = EvidenceBytes::from_packet(
+        fragment.raw.data(),
+        PacketId {
+            capture: [44; 32],
+            ..id(30)
+        },
+        65,
+    );
+    apps.push(bad);
+    let rows = candidates(&apps);
+    no_candidate(&rows);
+    assert!(rows
+        .iter()
+        .any(|row| row.reason == "unverified_fragment_capture_scope_unknown_in_same_flow"));
+    assert!(rows
+        .iter()
+        .any(|row| row.status == "unclassified" && row.error.is_some()));
+}

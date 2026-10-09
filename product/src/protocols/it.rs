@@ -15,126 +15,93 @@ pub fn bgp(b: &[u8]) -> Result<Decoded> {
     let mut d = Decoded::new(Protocol::Bgp, n)
         .num("message_type", b[18], 18, 19)
         .num("message_length", n as u64, 16, 18);
+    // The common header owns stream boundaries. Complete message bodies must
+    // reach the source-bound deep producer even when their grammar is invalid:
+    // otherwise one rejected body erases coalesced successors in Stream::drain.
+    // Metadata below is optional and bounded by this message, never a successor.
+    let b = &b[..n];
     match b[18] {
         1 => {
-            if n < 29 || b[19] != 4 {
-                return Err(bad("bgp_open", "short OPEN or unsupported version"));
+            if n >= 29 {
+                d = d
+                    .num("version", b[19], 19, 20)
+                    .num("autonomous_system_16", be16(b, 20), 20, 22)
+                    .num("hold_time", be16(b, 22), 22, 24)
+                    .num("identifier", be32(b, 24), 24, 28);
             }
-            if n > 4096 {
-                return Err(bad("bgp_open", "OPEN exceeds base message limit"));
-            }
-            let extended = b[28] != 0 && b.get(29) == Some(&255);
-            let (start, options, header) = if extended {
-                if n < 32 {
-                    return Err(bad(
-                        "bgp_open_options",
-                        "truncated extended optional length",
-                    ));
-                }
-                (32, usize::from(be16(b, 30)), 3)
-            } else {
-                (29, usize::from(b[28]), 2)
-            };
-            if start + options != n {
-                return Err(bad("bgp_open_options", "inconsistent option extent"));
-            }
-            let mut p = start;
-            while p < n {
-                if p + header > n {
-                    return Err(bad("bgp_open_options", "truncated option"));
-                }
-                let length = if extended {
-                    usize::from(be16(b, p + 1))
-                } else {
-                    usize::from(b[p + 1])
-                };
-                let end = p + header + length;
-                if end > n {
-                    return Err(bad("bgp_open_options", "option exceeds OPEN"));
-                }
-                p = end;
-            }
-            d = d
-                .num("version", b[19], 19, 20)
-                .num("autonomous_system_16", be16(b, 20), 20, 22)
-                .num("hold_time", be16(b, 22), 22, 24)
-                .num("identifier", be32(b, 24), 24, 28);
+            d.issues.push("open_body_requires_source_bound_validation");
         }
         2 => {
-            if n < 23 {
-                return Err(bad("bgp_update", "short UPDATE"));
-            }
-            let withdrawn = usize::from(be16(b, 19));
-            let at = 21 + withdrawn;
-            if at + 2 > n {
-                return Err(bad("bgp_update", "withdrawn range exceeds message"));
-            }
-            let attr = usize::from(be16(b, at));
-            let end = at + 2 + attr;
-            if end > n {
-                return Err(bad("bgp_attributes", "attributes exceed message"));
-            }
-            let mut p = at + 2;
-            let mut count = 0u64;
-            while p < end {
-                if count >= 256 {
-                    return Err(Error::limit("bgp_attributes"));
+            if n >= 23 {
+                let withdrawn = usize::from(be16(b, 19));
+                d = d.num("withdrawn_bytes", withdrawn as u64, 19, 21);
+                let at = 21 + withdrawn;
+                if at + 2 <= n {
+                    let end = at + 2 + usize::from(be16(b, at));
+                    if end <= n {
+                        if let Some(count) = bgp_attribute_count(b, at + 2, end) {
+                            d = d.num("attribute_count", count, at + 2, end);
+                        }
+                    }
                 }
-                if p + 3 > end {
-                    return Err(bad("bgp_attributes", "truncated attribute header"));
-                }
-                let extended = b[p] & 0x10 != 0;
-                let head = if extended { 4 } else { 3 };
-                if p + head > end {
-                    return Err(bad("bgp_attributes", "truncated extended length"));
-                }
-                let len = if extended {
-                    usize::from(be16(b, p + 2))
-                } else {
-                    usize::from(b[p + 2])
-                };
-                p += head;
-                if p + len > end {
-                    return Err(bad("bgp_attributes", "attribute data exceeds block"));
-                }
-                p += len;
-                count += 1;
             }
-            // NLRI may carry ADD-PATH identifiers. The stateless framer cannot
-            // select that grammar; the source-bound depth producer does so.
-            d = d.num("withdrawn_bytes", withdrawn as u64, 19, 21).num(
-                "attribute_count",
-                count,
-                at + 2,
-                end,
-            );
+            // NLRI may carry ADD-PATH identifiers and malformed attributes may
+            // have RFC 7606 dispositions. The stateless framer selects neither.
             d.issues.push("path_attribute_semantics_opaque");
         }
         3 => {
-            if n < 21 {
-                return Err(bad("bgp_notification", "short NOTIFICATION"));
+            if n >= 21 {
+                d = d
+                    .num("error_code", b[19], 19, 20)
+                    .num("error_subcode", b[20], 20, 21);
             }
-            d = d
-                .num("error_code", b[19], 19, 20)
-                .num("error_subcode", b[20], 20, 21);
+            d.issues
+                .push("notification_body_requires_source_bound_validation");
         }
         4 => {
             if n != 19 {
-                return Err(bad(
-                    "bgp_keepalive",
-                    "KEEPALIVE must have only the common header",
-                ));
+                d.issues
+                    .push("keepalive_body_requires_source_bound_validation");
             }
         }
         5 => {
-            if n != 23 {
-                return Err(bad("bgp_route_refresh", "invalid route-refresh length"));
+            if n >= 23 {
+                d = d.num("afi", be16(b, 19), 19, 21).num("safi", b[22], 22, 23);
             }
-            d = d.num("afi", be16(b, 19), 19, 21).num("safi", b[22], 22, 23);
+            d.issues
+                .push("route_refresh_body_requires_source_bound_validation");
         }
         _ => return Err(bad("bgp_type", "unsupported BGP message type")),
     }
     Ok(d)
+}
+
+// Preserve the existing count only for a completely bounded attribute block.
+// Failure supplies no count; it cannot reject the complete outer BGP message.
+fn bgp_attribute_count(b: &[u8], mut p: usize, end: usize) -> Option<u64> {
+    let mut count = 0u64;
+    while p < end {
+        if count >= 256 || p + 3 > end {
+            return None;
+        }
+        let extended = b[p] & 0x10 != 0;
+        let head = if extended { 4 } else { 3 };
+        if p + head > end {
+            return None;
+        }
+        let length = if extended {
+            usize::from(be16(b, p + 2))
+        } else {
+            usize::from(b[p + 2])
+        };
+        p += head;
+        if p + length > end {
+            return None;
+        }
+        p += length;
+        count += 1;
+    }
+    Some(count)
 }
 
 pub fn netflow(b: &[u8]) -> Result<Decoded> {

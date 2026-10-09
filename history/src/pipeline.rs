@@ -296,6 +296,9 @@ impl Pipeline<'_> {
                 Ok(Transport::Udp(u)) if u.checksum == wire::Checksum::Invalid => {
                     self.notice("invalid_outer_udp_checksum_observed_not_repaired", &[frame])?
                 }
+                Ok(Transport::Udp(u)) if u.checksum == wire::Checksum::NotChecked => {
+                    self.notice("unsupported_outer_udp_checksum_operands", &[frame])?
+                }
                 Err(e) => return self.notice(&format!("outer_udp_decode:{e}"), &[frame]),
                 _ => {}
             }
@@ -305,7 +308,9 @@ impl Pipeline<'_> {
                 if depth >= 4 {
                     return self.notice("tunnel_depth_limit", &[frame]);
                 }
-                path.push(format!("{}>{}:{}", d.source, d.destination, hop));
+                // peel() already binds the tunnel identity to canonical outer
+                // endpoints. Reintroducing direction here splits one conversation.
+                path.push(hop);
                 return self.layers(inner, path, frame, when, depth + 1);
             }
             Err(e) => {
@@ -321,6 +326,9 @@ impl Pipeline<'_> {
             Ok(_) => return self.notice("transport_not_tcp", &[frame]),
             Err(e) => return self.notice(&format!("tcp_decode:{e}"), &[frame]),
         };
+        if segment.checksum == wire::Checksum::NotChecked {
+            self.notice("unsupported_transport_checksum_operands", &[frame])?;
+        }
         let (a, b, direction) = if segment.source <= segment.destination {
             (segment.source, segment.destination, 0)
         } else {
@@ -329,6 +337,7 @@ impl Pipeline<'_> {
         let key = Key {
             section: d.scope.section,
             interface: d.scope.interface,
+            link_interface: d.scope.link_interface,
             vlans: d.scope.vlans.clone(),
             tunnels: path,
             a,
@@ -381,6 +390,10 @@ impl Pipeline<'_> {
             decision
                 .reasons
                 .push("invalid_tcp_checksum_observed_not_repaired".into());
+        } else if segment.checksum == wire::Checksum::NotChecked {
+            decision
+                .reasons
+                .push("unsupported_transport_checksum_operands".into());
         }
         let (offset, digest) = self
             .journal
@@ -554,6 +567,7 @@ pub fn analyze_file(
                 let scope = Scope {
                     section: meta.section,
                     interface: meta.interface,
+                    link_interface: None,
                     vlans: Vec::new(),
                 };
                 match network::decode(meta.link_type, &raw, scope) {
@@ -676,7 +690,9 @@ pub fn recover_file(
         match reader.next_record() {
             Ok(Some(r)) => {
                 if r.kind == journal::ABORT || r.kind == journal::SEAL {
-                    break;
+                    // Do not include a terminal record in the replay prefix,
+                    // but keep reading so Reader verifies EOF after it.
+                    continue;
                 }
                 prefix = reader.position;
             }

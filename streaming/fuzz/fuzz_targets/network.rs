@@ -22,6 +22,7 @@ fuzz_target!(|data: &[u8]| {
         let scope = Scope {
             section: 0,
             interface: 0,
+            link_interface: None,
             vlans: vec![],
         };
         if let Ok(Decoded::Ip(d, _)) = network::decode(link, &bytes, scope) {

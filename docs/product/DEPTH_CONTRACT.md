@@ -116,11 +116,33 @@ Existing product framing rows in PROTOCOLS.md remain valid as a separate
 surface. This table describes the deeper observer and must not be read as a
 blanket full-support claim.
 
+The IEC104 session observer clears pending STARTDT requests in both directions
+when the caller reports a transport gap; a later confirmation cannot inherit
+the preceding request, and the session remains tainted. A fresh captured
+request/confirmation pair can still be observed after that boundary. The public
+`deep::iso::CotpSession` assigns logical DT ordinals independently for each
+caller-supplied scope. Completion, a gap, or a rejected push in one scope does
+not advance or reset another scope's pending TSDU.
+
+OPC UA DiagnosticInfo preserves the encoded string-table indices, including
+recursive inner diagnostics and Read/Write result diagnostics. In
+[OPC 10000-6 section 5.2.2.12 Table 22](https://reference.opcfoundation.org/specs/OPC-10000-6/5.2.2.12),
+bit `0x08` indicates Locale and bit `0x04` indicates LocalizedText; Locale is
+encoded before LocalizedText when both are present. These are finite depth
+profile rules, not complete protocol or endpoint qualification. The focused
+regressions are in `product/tests/deep_nonbgp_feedback.rs`; their existence does
+not establish an executed validation result.
+
 ## Stateful continuation and replay boundaries
 
 deep::continuation::Parser accepts arbitrary verified history pages for the
 supported stream protocols. It retains application state across ordinary page
 boundaries and emits a completed report only after a validated frame boundary.
+COTP payload and all concurrently open OPC UA request/channel payloads share the
+parser's aggregate retained-evidence allowance, independently of the per-unit
+input limit. Completion, OPC UA abort, explicit cut and rejected-feed cleanup
+release those payloads. OPC UA abort chunks validate and advance the channel
+sequence before discarding the matching request assembly.
 
 The following events cut state explicitly:
 
@@ -129,7 +151,11 @@ The following events cut state explicitly:
 - an explicit caller cut;
 - the selected range ending while application state is pending.
 
-The cut report retains discarded state evidence and marks the result incomplete.
+Every rejected feed poisons the parser until an explicit caller cut, including
+token changes, discontinuities, framing failures and budget errors. COTP and OPC
+UA rejected-feed cleanup immediately discards their pending assemblies; an error
+never leaves an old payload eligible for subsequent assembly. The cut report
+retains state still present at the cut and marks the result incomplete.
 It does not pretend the preceding or following page is contiguous. Duplicate
 segments are observed without appending them; conflicting duplicates poison the
 scope until the caller cuts it. This is the intended conservative behavior for

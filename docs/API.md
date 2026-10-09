@@ -259,6 +259,30 @@ Configuration fields include limits, capture parse mode, overlap policy, checksu
 policy, idle timeout in integer nanoseconds and explicit DNP3/Modbus port lists.
 Protocol service-role configuration is not inferred from which side sent the SYN.
 
+Network `Scope` keeps the capture `section` and `interface` separately from
+`link_interface`, the optional interface index in a Linux SLL2 header. Fragment
+and TCP reconstruction use all three plus the VLAN stack; reports and streaming
+flow keys preserve `link_interface` as a number or `null`. Linux SLL has no such
+index. A shared capture interface does not combine traffic from distinct SLL2
+interfaces.
+
+`Datagram::checksum_context` records whether the supported pseudo-header uses
+the base IP addresses. IPv6 Routing headers, IPv6 Home Address options, and IPv4
+loose/strict source-route options currently produce `ChecksumContext::Unsupported`.
+Under `Observe`, their TCP checksums and nonzero UDP checksums are
+`Checksum::NotChecked`;
+`RequireValid` returns `UnsupportedNetwork` with field
+`transport_checksum_operands`. The parser does not infer a final destination or
+home source from unsupported option semantics. Ordinary checksums retain their
+valid/invalid result, IPv4 UDP zero remains optional, and IPv6 UDP zero remains
+invalid. The context survives fragment reconstruction and extension headers
+following a Fragment header. This is a bounded checksum limitation, not support
+for the routing or mobility profiles.
+The checksum operand boundary follows
+[RFC 8200 section 8.1](https://www.rfc-editor.org/rfc/rfc8200#section-8.1),
+[RFC 6275 sections 6.3 and 11.3.1](https://www.rfc-editor.org/rfc/rfc6275#section-6.3),
+and [RFC 9293 section 3.9.2.1](https://www.rfc-editor.org/rfc/rfc9293#section-3.9.2.1).
+
 ### Configured UDP DNP3 and advisory probes
 
 When either endpoint of a decoded UDP datagram uses a configured DNP3 port,

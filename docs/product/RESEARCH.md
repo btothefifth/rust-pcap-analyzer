@@ -88,6 +88,8 @@ reducer; rerun adapters on the final witness before adjudication/export.
 Adjudication bundles retain the original research capture, both attributed views,
 comparison, referenced standards and exact packet/range witnesses. Verification
 recomputes the diff and checks ranges through the independent container map.
+Creation and verification include the completion manifest in the expanded-byte
+budget and charge the same final member inventory before publication.
 Structurally malformed captures can remain bundle subjects; unresolved packet
 references stay unresolved. The GUI export requires explicit raw-capture consent.
 

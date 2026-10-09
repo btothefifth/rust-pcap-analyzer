@@ -25,7 +25,8 @@ and protocol messages are produced when a bounded active reconstruction window
 is flushed. A slow sink blocks the producer; a sink error stops processing. There
 is no unbounded internal event queue or final, capture-sized JSON tree.
 
-An active key includes capture section, interface, VLANs, tunnel namespace,
+An active key includes capture section, capture interface, optional SLL2 link
+interface index, VLANs, tunnel namespace,
 transport and normalized endpoints. Within each key, the original TCP tracker
 still distinguishes its conservative connection generations. A session ID names
 an **analysis scope**, not an authenticated endpoint connection. A window ID names

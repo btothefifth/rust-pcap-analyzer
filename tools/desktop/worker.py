@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from .store import initialize
+from .storage import MIN_JOB_BUDGET
 from .resources import publish_state, ResourceGuard, WorkerStopped
 from tools.evidence.index import ChainReader, _project
 from tools.evidence.common import canonical
@@ -55,18 +56,30 @@ def _source_digest(source, guard):
     return value.hexdigest()
 
 
+def _checkpoint(db):
+    result=db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if result[0] != 0 or result[1] != 0:
+        raise WorkerStopped("wal_checkpoint_busy; preserve partial evidence")
+
+
 def run(directory, source, mode, engine=None, profile="ics-full",
         disk_budget=10*1024**3, timeout_seconds=86400):
     directory = Path(directory)
     source = Path(source).resolve(strict=True)
     if not source.is_file():
         raise ValueError("regular input required")
+    if type(disk_budget)is not int or disk_budget<MIN_JOB_BUDGET:
+        raise ValueError("worker requires minimum 512 KiB admitted envelope")
+    # Main DB + one bounded WAL transaction + spool + checkpoint/init margin.
+    # Native/SQLite writes are monitored logically, not an OS quota.
+    data_budget=(disk_budget-128*1024)//4
     guard = ResourceGuard(directory, disk_budget, timeout_seconds)
     status_path = directory / "state.json"
     run_id = directory.name
     current = dict(id=run_id, state="running", mode=mode, source_name=source.name,
                    source_bytes=str(source.stat().st_size), packets="0", events="0",
-                   source_binding="provisional", semantic_replay_verified=False)
+                   source_binding="provisional", semantic_replay_verified=False,
+                   disk_budget=str(disk_budget))
     state(status_path, current)
     db = proc = log = error_thread = None
     count = events = committed_count = committed_events = 0
@@ -77,14 +90,18 @@ def run(directory, source, mode, engine=None, profile="ics-full",
             guard.check()
             db = initialize(directory / "events.sqlite")
             page_size = db.execute("PRAGMA page_size").fetchone()[0]
-            db.execute("PRAGMA max_page_count=" + str(max(16, disk_budget // 3 // page_size)))
-            db.execute("PRAGMA journal_size_limit=" + str(min(16*1024**2, disk_budget // 8)))
+            db.execute("PRAGMA max_page_count=" + str(max(22, data_budget // page_size)))
+            db.execute("PRAGMA journal_size_limit=0")
+            db.execute("PRAGMA temp_store=MEMORY")
+            db.execute("PRAGMA cache_spill=OFF")
+            db.execute("PRAGMA wal_autocheckpoint=1")
+            _checkpoint(db)
             if mode == "rust":
                 if engine is None or not Path(engine).is_file():
                     raise ValueError("configured Rust engine unavailable")
                 command = [str(Path(engine).resolve()), "analyze", str(source), "--profile", profile,
                            "--format", "ndjson", "--run-id", run_id,
-                           "--max-output-bytes", str(disk_budget // 3)]
+                           "--max-output-bytes", str(data_budget)]
                 proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, shell=False)
                 guard.attach(proc)
@@ -113,7 +130,7 @@ def run(directory, source, mode, engine=None, profile="ics-full",
                 for wrapper, event in chain:
                     guard.check()
                     line = canonical(wrapper) + b"\n"
-                    if written + len(line) > disk_budget // 3:
+                    if written + len(line) > data_budget:
                         raise WorkerStopped("event_spool_disk_budget")
                     if not db.in_transaction:
                         db.execute("BEGIN")
@@ -131,11 +148,16 @@ def run(directory, source, mode, engine=None, profile="ics-full",
                     events += 1
                     if event["kind"] == "capture.complete":
                         terminal = event["data"]
+                    # Each transaction contains one bounded event; checkpoint
+                    # before admitting the next so WAL history cannot grow.
+                    db.commit()
+                    committed_count, committed_events = count, events
+                    _checkpoint(db)
                     if events % 1000 == 0 or time.monotonic() - last > 0.5:
                         db.commit()
                         committed_count, committed_events = count, events
                         log.flush()
-                        db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                        _checkpoint(db)
                         last = time.monotonic()
                         guard.sample(); guard.check()
                         current.update(packets=str(count), events=str(events))
@@ -150,7 +172,7 @@ def run(directory, source, mode, engine=None, profile="ics-full",
                     or _source_digest(source, guard) != terminal["source_sha256"]
                     or str(source.stat().st_size) != terminal["source_bytes"]):
                 raise ValueError("terminal source binding/count mismatch")
-            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            _checkpoint(db)
             guard.sample(); guard.check()
             current.update(state="complete", packets=str(count), events=str(events),
                            source_binding="bytes_and_spans_checked", source_sha256=terminal["source_sha256"],

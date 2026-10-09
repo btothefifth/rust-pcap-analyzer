@@ -43,6 +43,12 @@ field comparisons, first-divergence inspection, case search/audit and raw-witnes
 export. Importing an interpretation does not execute its declared command. A raw
 capture export requires explicit acknowledgment. Catalog entries remain pending
 qualification instead of being displayed as passing conformance.
+Research receipts are browsed in bounded pages of at most 100 examined entries.
+The pager exposes continuation and unreadable-receipt errors; selected comparison
+options remain available while moving to another page. Job changes clear the
+inspector and capture a new request generation. Event, packet, reverse-span,
+research and status replies from an earlier job generation cannot update the
+current workspace, and inspector actions retain the job that produced their event.
 
 ## Local security boundary
 
@@ -75,6 +81,10 @@ recorded real backend responses offline in Chromium, using an in-memory transpor
 it is explicitly not a live browser-to-server test. `gui_smoke.py` is supplied for
 that separate real-browser gate. The authoring host's managed browser policy blocked
 loopback navigation, so that gate remains BLOCKED rather than bypassing policy.
+`desktop/web/app.test.mjs` exercises the actual controller with small DOM and
+transport doubles for two-job request races and two-page receipt navigation. It
+establishes controller behavior only; it adds no browser, layout or live HTTP
+qualification claim.
 
 No Tauri wrapper, signed installer, native file association, full platform keyboard/
 accessibility certification, or shipped Windows/Linux desktop package is claimed.

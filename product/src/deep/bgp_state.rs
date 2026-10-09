@@ -5,6 +5,7 @@
 //! not authenticated or re-derived from packet bytes by this consumer.
 use super::bgp::{RouteAction, SourceKind, SCHEMA as ROUTE_SCHEMA};
 use super::bgp_import::{GenerationBoundary, ImportContext, ImportPartition};
+use super::bgp_session::Family;
 use super::model::{bad, Limits};
 use pcap_evidence::{json::Json, sha256, Error, Result};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -322,9 +323,54 @@ impl Observation {
                 "control message contains routes",
             ));
         }
+        if kind == SourceKind::Imported {
+            let mut closure_work = 0usize;
+            for route in raw_routes {
+                if let Some(inventory) = optional_member(route, "imported_attribute_occurrences")? {
+                    if optional_member(inventory, "message_prefix_hex")?.is_some()
+                        && optional_member(inventory, "message_suffix_hex")?.is_some()
+                    {
+                        let work = imported_message_closure_work(inventory)?;
+                        closure_work = add(closure_work, work, "bgp_state_semantic_identity")?;
+                        if closure_work > limits.work {
+                            return Err(Error::limit("bgp_state_semantic_identity"));
+                        }
+                    }
+                }
+            }
+        }
+        if kind == SourceKind::Captured {
+            // Aggregate repeated route inventories before any raw-value allocation.
+            let mut bytes = 0usize;
+            let mut work = 0usize;
+            for route in raw_routes {
+                for range in array(member(route, "attribute_ranges")?)? {
+                    if let Some(raw) = optional_member(range, "value_hex")? {
+                        let length = text(raw)?.len();
+                        bytes = add(bytes, length / 2, "bgp_state_raw_extended")?;
+                        work = add(
+                            work,
+                            length
+                                .checked_mul(6)
+                                .ok_or_else(|| Error::limit("bgp_state_raw_extended"))?,
+                            "bgp_state_raw_extended",
+                        )?;
+                    }
+                }
+            }
+            if bytes > limits.retained_bytes || work > limits.work {
+                return Err(Error::limit("bgp_state_raw_extended"));
+            }
+        }
         let mut routes = Vec::new();
         for raw in raw_routes {
-            routes.push(parse_route(raw, kind, extent, limits)?);
+            routes.push(parse_route(
+                raw,
+                kind,
+                extent,
+                import_context.as_ref(),
+                limits,
+            )?);
         }
         let mut observation = Self::finish(
             source,
@@ -464,6 +510,46 @@ impl Observation {
     }
     pub fn kind(&self) -> ObservationKind {
         self.kind
+    }
+    /// Explicit captured EOR projection, not an inference from empty routes.
+    /// `None` means this observation representation has no EOR metadata owner;
+    /// `Some([])` is an explicit non-EOR projection. Imported boundaries retain
+    /// their source-specific typed event owners instead of borrowing wire claims.
+    pub fn end_of_rib_families(&self) -> Result<Option<Vec<Family>>> {
+        if self.kind != ObservationKind::Routes {
+            return Ok(Some(Vec::new()));
+        }
+        if self.source.kind != SourceKind::Captured {
+            return Ok(None);
+        }
+        let Some(detail) = optional_member(&self.normalized, "message_detail")? else {
+            return Ok(None);
+        };
+        let Some(families) = optional_member(detail, "end_of_rib")? else {
+            return Ok(None);
+        };
+        let families = array(families)?;
+        if families.len() > 1 {
+            return Err(bad(
+                "bgp_state_eor",
+                0,
+                "one captured UPDATE cannot establish multiple EOR markers",
+            ));
+        }
+        let families = families
+            .iter()
+            .map(|family| {
+                let afi = u16::try_from(number(member(family, "afi")?)?)
+                    .map_err(|_| bad("bgp_state_eor", 0, "AFI out of range"))?;
+                let safi = u8::try_from(number(member(family, "safi")?)?)
+                    .map_err(|_| bad("bgp_state_eor", 0, "SAFI out of range"))?;
+                if afi == 0 || safi == 0 {
+                    return Err(bad("bgp_state_eor", 0, "nonzero AFI and SAFI required"));
+                }
+                Ok(Family { afi, safi })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(families))
     }
     pub fn routes(&self) -> &[RouteObservation] {
         &self.routes
@@ -1485,6 +1571,7 @@ fn parse_route(
     raw: &Json,
     kind: SourceKind,
     extent: usize,
+    import_context: Option<&ImportContext>,
     limits: &Limits,
 ) -> Result<RouteObservation> {
     let action = match text(member(raw, "action")?)? {
@@ -1574,6 +1661,80 @@ fn parse_route(
             "imported attributes cannot assert wire ranges",
         ));
     }
+    if kind == SourceKind::Captured {
+        validate_captured_raw_extended_values(ranges, limits)?;
+    }
+    let imported_inventory = optional_member(raw, "imported_attribute_occurrences")?;
+    if kind == SourceKind::Imported
+        && import_context.is_some_and(|context| context.direction.is_some())
+        && imported_inventory.is_none()
+        && optional_member(raw, "semantic_identity")?.is_some_and(|identity| {
+            matches!(optional_member(identity, "completeness"), Ok(Some(Json::String(value))) if value == "complete")
+        })
+    {
+        return Err(identity_attribute_mismatch("complete imported wire identity needs occurrence inventory"));
+    }
+    let (ranges, extent) = if let Some(inventory) = imported_inventory {
+        if kind != SourceKind::Imported {
+            return Err(identity_attribute_mismatch(
+                "imported inventory on captured route",
+            ));
+        }
+        let context = import_context.ok_or_else(|| {
+            identity_attribute_mismatch("imported inventory needs source context")
+        })?;
+        let fields = object(inventory)?;
+        let names = [
+            "schema",
+            "coordinate_system",
+            "message_length",
+            "message_sha256",
+            "occurrences",
+            "message_prefix_hex",
+            "message_suffix_hex",
+        ];
+        let legacy_carrier = fields.len() == 5
+            && optional_member(inventory, "message_prefix_hex")?.is_none()
+            && optional_member(inventory, "message_suffix_hex")?.is_none();
+        if (fields.len() != names.len() && !legacy_carrier)
+            || fields.iter().any(|(name, _)| !names.contains(name))
+            || text(member(inventory, "schema")?)?
+                != "pcap-evidence.bgp.imported-attribute-occurrences.v1"
+            || text(member(inventory, "coordinate_system")?)? != "bgp-message-relative"
+        {
+            return Err(identity_attribute_mismatch(
+                "imported occurrence inventory schema",
+            ));
+        }
+        let length = position(member(inventory, "message_length")?)?;
+        let digest = text(member(inventory, "message_sha256")?)?;
+        validate_hash(digest)?;
+        if length < 19
+            || length > limits.input_bytes
+            || !context.provenance.iter().any(|range| {
+                range.end.checked_sub(range.start) == Some(length as u64)
+                    && range.sha256.as_deref() == Some(digest)
+            })
+        {
+            return Err(identity_attribute_mismatch(
+                "imported message source extent or digest",
+            ));
+        }
+        let occurrences = array(member(inventory, "occurrences")?)?;
+        if legacy_carrier {
+            if optional_member(raw, "semantic_identity")?.is_some_and(|identity| {
+                matches!(optional_member(identity, "completeness"), Ok(Some(Json::String(value))) if value == "complete")
+            }) {
+                return Err(identity_attribute_mismatch("complete imported identity needs message closure"));
+            }
+        } else {
+            validate_imported_message_closure(inventory, occurrences, length, digest, limits)?;
+        }
+        validate_imported_occurrence_values(occurrences, length, limits)?;
+        (occurrences, length)
+    } else {
+        (ranges, extent)
+    };
     let semantic_identity = match optional_member(raw, "semantic_identity")? {
         None => Json::Null,
         Some(identity) => {
@@ -1643,7 +1804,12 @@ fn parse_route(
         identities.push(canonical(&Json::Object(
             object(range)?
                 .iter()
-                .filter(|(key, _)| !matches!(*key, "start" | "end" | "value_start" | "value_end"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        *key,
+                        "start" | "end" | "value_start" | "value_end" | "value_hex"
+                    )
+                })
                 .cloned()
                 .collect(),
         )));
@@ -1670,12 +1836,28 @@ fn validate_semantic_identity(
     limits: &Limits,
 ) -> Result<Json> {
     let completeness = text(member(identity, "completeness")?)?;
-    if text(member(identity, "schema")?)? != super::bgp::SEMANTIC_IDENTITY_SCHEMA {
+    let schema = text(member(identity, "schema")?)?;
+    let legacy = schema == super::bgp::LEGACY_SEMANTIC_IDENTITY_SCHEMA;
+    if schema != super::bgp::SEMANTIC_IDENTITY_SCHEMA && !legacy {
         return Err(bad(
             "bgp_state_semantic_identity",
             0,
             "unsupported semantic identity schema",
         ));
+    }
+    if !legacy {
+        let names = [
+            "schema",
+            "completeness",
+            "fingerprint_sha256",
+            "canonical_payload",
+            "opaque_occurrence_fingerprints",
+            "incompleteness_reasons",
+        ];
+        let fields = object(identity)?;
+        if fields.len() != names.len() || fields.iter().any(|(name, _)| !names.contains(name)) {
+            return Err(identity_attribute_mismatch("semantic identity field shape"));
+        }
     }
     let fingerprint = member(identity, "fingerprint_sha256")?;
     let payload = member(identity, "canonical_payload")?;
@@ -1706,17 +1888,50 @@ fn validate_semantic_identity(
                     "identity payload disagrees with route envelope",
                 ));
             }
+            if legacy
+                && (ranges.iter().any(|range| {
+                    matches!(
+                        optional_member(range, "type"),
+                        Ok(Some(Json::Number(6 | 17 | 18)))
+                    )
+                }) || matches!(
+                    optional_member(route_attributes, "atomic_aggregate")?,
+                    Some(Json::Bool(true))
+                ))
+            {
+                return Err(identity_attribute_mismatch(
+                    "legacy identity omits current semantic fields",
+                ));
+            }
+            validate_complete_occurrences(ranges)?;
             validate_identity_attributes(
                 member(payload, "attributes")?,
                 route_attributes,
                 ranges,
                 source_kind,
+                legacy,
                 limits,
             )?;
+            if !legacy {
+                let fields = object(payload)?;
+                if fields.len() != 2
+                    || fields
+                        .iter()
+                        .any(|(name, _)| !["route_key", "attributes"].contains(name))
+                {
+                    return Err(identity_attribute_mismatch("semantic payload field shape"));
+                }
+            }
             let encoded = payload.encode_bounded(limits.input_bytes)?;
+            if !legacy && encoded != canonical(payload).encode_bounded(limits.input_bytes)? {
+                return Err(identity_attribute_mismatch(
+                    "semantic payload canonical field order",
+                ));
+            }
             let payload_len = u64::try_from(encoded.len())
                 .map_err(|_| Error::limit("bgp_state_semantic_identity"))?;
-            let domain = b"pcap-evidence.bgp.semantic-route-identity.v1\0";
+            let mut domain = schema.as_bytes().to_vec();
+            domain.push(0);
             let total = domain
                 .len()
                 .checked_add(8)
@@ -1726,7 +1941,7 @@ fn validate_semantic_identity(
             preimage
                 .try_reserve_exact(total)
                 .map_err(|_| Error::limit("bgp_state_semantic_identity"))?;
-            preimage.extend_from_slice(domain);
+            preimage.extend_from_slice(&domain);
             preimage.extend_from_slice(&payload_len.to_be_bytes());
             preimage.extend_from_slice(encoded.as_bytes());
             let actual = sha256::hex(&sha256::digest(&preimage));
@@ -1766,6 +1981,7 @@ fn validate_identity_attributes(
     route_attributes: &Json,
     ranges: &[Json],
     source_kind: SourceKind,
+    legacy: bool,
     limits: &Limits,
 ) -> Result<()> {
     const IDENTITY_FIELDS: [&str; 10] = [
@@ -1781,12 +1997,24 @@ fn validate_identity_attributes(
         "cluster_list",
     ];
     let identity_fields = object(identity_attributes)?;
-    if identity_fields.len() != IDENTITY_FIELDS.len()
-        || identity_fields
-            .iter()
-            .any(|(name, _)| !IDENTITY_FIELDS.contains(name))
+    if identity_fields.len() != IDENTITY_FIELDS.len() + usize::from(!legacy)
+        || identity_fields.iter().any(|(name, _)| {
+            !IDENTITY_FIELDS.contains(name) && (legacy || *name != "atomic_aggregate")
+        })
     {
         return Err(identity_attribute_mismatch("identity attribute shape"));
+    }
+    if !legacy {
+        let expected = if !ranges.is_empty() || source_kind == SourceKind::Captured {
+            first_effective_attribute(ranges, 6)?.is_some()
+        } else {
+            boolean(member(route_attributes, "atomic_aggregate")?)?
+        };
+        if boolean(member(identity_attributes, "atomic_aggregate")?)? != expected {
+            return Err(identity_attribute_mismatch(
+                "ATOMIC_AGGREGATE source projection",
+            ));
+        }
     }
     for name in [
         "origin",
@@ -1812,12 +2040,11 @@ fn validate_identity_attributes(
         return Err(identity_attribute_mismatch("AS_PATH or Communities"));
     }
 
-    // Captured envelopes retain the source occurrence that supplies Large
-    // Communities. MRT-normalized route attributes currently omit that field,
-    // so imported identities cannot be cross-checked for it at this seam.
+    // Captured and BGP4MP envelopes retain the first effective occurrence;
+    // directionless TABLE_DUMP envelopes carry a separate validated projection.
     let identity_large_communities =
         canonical_large_communities(member(identity_attributes, "large_communities")?, limits)?;
-    if source_kind == SourceKind::Captured {
+    if source_kind == SourceKind::Captured || !ranges.is_empty() {
         validate_captured_attribute_projection(route_attributes, ranges, limits)?;
         let empty = Json::Array(Vec::new());
         let source_value = first_effective_attribute(ranges, 32)?.unwrap_or(&empty);
@@ -1840,6 +2067,642 @@ fn first_effective_attribute(ranges: &[Json], code: u8) -> Result<Option<&Json>>
         .transpose()
 }
 
+fn boolean(value: &Json) -> Result<bool> {
+    match value {
+        Json::Bool(value) => Ok(*value),
+        _ => Err(identity_attribute_mismatch("boolean semantic field")),
+    }
+}
+
+fn raw_occurrence_value(range: &Json, limits: &Limits) -> Result<Vec<u8>> {
+    raw_hex_value(text(member(range, "value_hex")?)?, limits)
+}
+
+/// Optional captured raw type-16 values bind literally to their existing value
+/// digest and source ranges. Older hash-only observations remain representable.
+fn validate_captured_raw_extended_values(ranges: &[Json], limits: &Limits) -> Result<()> {
+    let mut raw_bytes = 0usize;
+    let mut work = 0usize;
+    for range in ranges {
+        let Some(hex) = optional_member(range, "value_hex")? else {
+            continue;
+        };
+        if byte(member(range, "type")?)? != 16 {
+            return Err(identity_attribute_mismatch(
+                "captured raw value is restricted to type 16",
+            ));
+        }
+        let hex = text(hex)?;
+        raw_bytes = add(raw_bytes, hex.len() / 2, "bgp_state_raw_extended")?;
+        work = add(
+            work,
+            hex.len()
+                .checked_mul(6)
+                .ok_or_else(|| Error::limit("bgp_state_raw_extended"))?,
+            "bgp_state_raw_extended",
+        )?;
+    }
+    if raw_bytes > limits.retained_bytes || work > limits.work {
+        return Err(Error::limit("bgp_state_raw_extended"));
+    }
+    for range in ranges {
+        if optional_member(range, "value_hex")?.is_none() {
+            continue;
+        }
+        let value = raw_occurrence_value(range, limits)?;
+        let start = position(member(range, "value_start")?)?;
+        let end = position(member(range, "value_end")?)?;
+        let digest = text(member(range, "sha256")?)?;
+        validate_hash(digest)?;
+        if start.checked_add(value.len()) != Some(end)
+            || sha256::hex(&sha256::digest(&value)) != digest
+        {
+            return Err(identity_attribute_mismatch(
+                "captured raw extended-community value binding",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn raw_hex_value(hex: &str, limits: &Limits) -> Result<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return Err(identity_attribute_mismatch("imported raw value length"));
+    }
+    if hex.len() / 2 > limits.input_bytes.min(limits.retained_bytes) || hex.len() > limits.work {
+        return Err(Error::limit("bgp_state_semantic_identity"));
+    }
+    let nibble = |byte| match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(identity_attribute_mismatch(
+            "canonical raw value hexadecimal",
+        )),
+    };
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(hex.len() / 2)
+        .map_err(|_| Error::limit("bgp_state_semantic_identity"))?;
+    for pair in hex.as_bytes().chunks_exact(2) {
+        bytes.push(nibble(pair[0])? * 16 + nibble(pair[1])?);
+    }
+    Ok(bytes)
+}
+
+fn validate_imported_message_closure(
+    inventory: &Json,
+    ranges: &[Json],
+    length: usize,
+    digest: &str,
+    limits: &Limits,
+) -> Result<()> {
+    if ranges.len() > limits.elements {
+        return Err(Error::limit("bgp_state_semantic_identity"));
+    }
+    let prefix_hex = text(member(inventory, "message_prefix_hex")?)?;
+    let suffix_hex = text(member(inventory, "message_suffix_hex")?)?;
+    let mut hex_bytes = add(
+        prefix_hex.len(),
+        suffix_hex.len(),
+        "bgp_state_semantic_identity",
+    )?;
+    let mut wire_bytes = hex_bytes / 2;
+    if prefix_hex.len() % 2 != 0 || suffix_hex.len() % 2 != 0 {
+        return Err(identity_attribute_mismatch(
+            "imported message closure hexadecimal",
+        ));
+    }
+    for range in ranges {
+        let value_hex = text(member(range, "value_hex")?)?;
+        if value_hex.len() % 2 != 0 {
+            return Err(identity_attribute_mismatch(
+                "imported message closure hexadecimal",
+            ));
+        }
+        hex_bytes = add(hex_bytes, value_hex.len(), "bgp_state_semantic_identity")?;
+        wire_bytes = add(
+            wire_bytes,
+            value_hex.len() / 2,
+            "bgp_state_semantic_identity",
+        )?;
+        wire_bytes = add(
+            wire_bytes,
+            if byte(member(range, "flags")?)? & 0x10 == 0 {
+                3
+            } else {
+                4
+            },
+            "bgp_state_semantic_identity",
+        )?;
+    }
+    // Charge carrier scanning, two value decodes, reconstruction and hashing
+    // before any raw allocation. Envelope tree/input budgets run before this.
+    let work = imported_message_closure_work(inventory)?;
+    if work > limits.work
+        || length
+            .checked_mul(2)
+            .is_none_or(|bytes| bytes > limits.retained_bytes)
+        || wire_bytes != length
+    {
+        return if wire_bytes != length {
+            Err(identity_attribute_mismatch(
+                "imported message closure inventory length",
+            ))
+        } else {
+            Err(Error::limit("bgp_state_semantic_identity"))
+        };
+    }
+    let prefix = raw_hex_value(prefix_hex, limits)?;
+    let suffix = raw_hex_value(suffix_hex, limits)?;
+    if prefix.len() < 23
+        || prefix[..16] != [255; 16]
+        || usize::from(u16::from_be_bytes([prefix[16], prefix[17]])) != length
+        || prefix[18] != 2
+    {
+        return Err(identity_attribute_mismatch(
+            "imported message closure UPDATE header",
+        ));
+    }
+    let withdrawn = usize::from(u16::from_be_bytes([prefix[19], prefix[20]]));
+    let attribute_start = add(23, withdrawn, "bgp_state_semantic_identity")?;
+    if prefix.len() != attribute_start {
+        return Err(identity_attribute_mismatch(
+            "imported message closure prefix extent",
+        ));
+    }
+    let attribute_length = usize::from(u16::from_be_bytes([
+        prefix[attribute_start - 2],
+        prefix[attribute_start - 1],
+    ]));
+    let attribute_end = add(
+        attribute_start,
+        attribute_length,
+        "bgp_state_semantic_identity",
+    )?;
+    if attribute_end > length || attribute_end.checked_add(suffix.len()) != Some(length) {
+        return Err(identity_attribute_mismatch(
+            "imported message closure declared attribute extent",
+        ));
+    }
+    let mut message = Vec::new();
+    message
+        .try_reserve_exact(length)
+        .map_err(|_| Error::limit("bgp_state_semantic_identity"))?;
+    message.extend_from_slice(&prefix);
+    for range in ranges {
+        if position(member(range, "start")?)? != message.len() {
+            return Err(identity_attribute_mismatch(
+                "imported message closure occurrence start",
+            ));
+        }
+        let flags = byte(member(range, "flags")?)?;
+        let value = raw_occurrence_value(range, limits)?;
+        message.extend([flags, byte(member(range, "type")?)?]);
+        if flags & 0x10 == 0 {
+            message.push(u8::try_from(value.len()).map_err(|_| {
+                identity_attribute_mismatch("imported message closure short length")
+            })?);
+        } else {
+            message.extend(
+                u16::try_from(value.len())
+                    .map_err(|_| {
+                        identity_attribute_mismatch("imported message closure extended length")
+                    })?
+                    .to_be_bytes(),
+            );
+        }
+        if position(member(range, "value_start")?)? != message.len() {
+            return Err(identity_attribute_mismatch(
+                "imported message closure value start",
+            ));
+        }
+        message.extend_from_slice(&value);
+        if position(member(range, "end")?)? != message.len()
+            || position(member(range, "value_end")?)? != message.len()
+        {
+            return Err(identity_attribute_mismatch(
+                "imported message closure occurrence end",
+            ));
+        }
+    }
+    if message.len() != attribute_end {
+        return Err(identity_attribute_mismatch(
+            "imported message closure attribute inventory",
+        ));
+    }
+    message.extend_from_slice(&suffix);
+    if message.len() != length || sha256::hex(&sha256::digest(&message)) != digest {
+        return Err(identity_attribute_mismatch(
+            "imported message closure digest",
+        ));
+    }
+    Ok(())
+}
+
+fn imported_message_closure_work(inventory: &Json) -> Result<usize> {
+    let mut bytes = add(
+        text(member(inventory, "message_prefix_hex")?)?.len(),
+        text(member(inventory, "message_suffix_hex")?)?.len(),
+        "bgp_state_semantic_identity",
+    )?;
+    for range in array(member(inventory, "occurrences")?)? {
+        bytes = add(
+            bytes,
+            text(member(range, "value_hex")?)?.len(),
+            "bgp_state_semantic_identity",
+        )?;
+    }
+    add(
+        bytes,
+        position(member(inventory, "message_length")?)?
+            .checked_mul(4)
+            .ok_or_else(|| Error::limit("bgp_state_semantic_identity"))?,
+        "bgp_state_semantic_identity",
+    )
+}
+
+fn validate_imported_occurrence_values(
+    ranges: &[Json],
+    extent: usize,
+    limits: &Limits,
+) -> Result<()> {
+    if ranges.len() > limits.elements {
+        return Err(Error::limit("bgp_state_semantic_identity"));
+    }
+    let mut previous_end = None;
+    for range in ranges {
+        let start = position(member(range, "start")?)?;
+        let end = position(member(range, "end")?)?;
+        let value_start = position(member(range, "value_start")?)?;
+        let header = if byte(member(range, "flags")?)? & 0x10 != 0 {
+            4
+        } else {
+            3
+        };
+        let value = raw_occurrence_value(range, limits)?;
+        if start < 23
+            || previous_end.is_some_and(|previous| previous != start)
+            || start.checked_add(header) != Some(value_start)
+            || value_start.checked_add(value.len()) != Some(end)
+            || end > extent
+            || position(member(range, "value_end")?)? != end
+            || text(member(range, "sha256")?)? != sha256::hex(&sha256::digest(&value))
+        {
+            return Err(identity_attribute_mismatch(
+                "imported raw occurrence extent, order or digest",
+            ));
+        }
+        previous_end = Some(end);
+        // Invalid source occurrences remain evidence. Complete-identity admission
+        // separately rejects them, so no failed decode acquires semantics here.
+        if !boolean(member(member(range, "validation")?, "length_valid")?)? {
+            continue;
+        }
+        let code = byte(member(range, "type")?)?;
+        let decoded = member(range, "decoded")?;
+        let scalar = |width: usize| -> Result<u64> {
+            if value.len() != width {
+                return Err(identity_attribute_mismatch("imported scalar width"));
+            }
+            Ok(value
+                .iter()
+                .fold(0u64, |number, byte| (number << 8) | u64::from(*byte)))
+        };
+        let expected = match code {
+            1 => {
+                let origin = scalar(1)?;
+                if origin > 2 {
+                    return Err(identity_attribute_mismatch("ORIGIN raw value domain"));
+                }
+                Some(Json::from(origin))
+            }
+            4 | 5 | 35 => Some(Json::from(scalar(4)?)),
+            6 => {
+                if !value.is_empty() {
+                    return Err(identity_attribute_mismatch("ATOMIC_AGGREGATE raw value"));
+                }
+                Some(Json::Bool(true))
+            }
+            3 | 9 => {
+                scalar(4)?;
+                Some(Json::from(
+                    Ipv4Addr::new(value[0], value[1], value[2], value[3]).to_string(),
+                ))
+            }
+            7 | 18 => {
+                let width = if code == 18 || value.len() == 8 { 4 } else { 2 };
+                if value.len() != width + 4 {
+                    return Err(identity_attribute_mismatch("AGGREGATOR raw width"));
+                }
+                let asn = value[..width]
+                    .iter()
+                    .fold(0u32, |number, byte| (number << 8) | u32::from(*byte));
+                if asn == 0 {
+                    return Err(identity_attribute_mismatch("AGGREGATOR raw AS zero"));
+                }
+                Some(Json::from(format!(
+                    "{}:{}",
+                    asn,
+                    Ipv4Addr::new(
+                        value[width],
+                        value[width + 1],
+                        value[width + 2],
+                        value[width + 3]
+                    )
+                )))
+            }
+            8 => {
+                if value.is_empty() || value.len() % 4 != 0 {
+                    return Err(identity_attribute_mismatch("Communities raw width"));
+                }
+                Some(Json::array(value.chunks_exact(4).map(|chunk| {
+                    Json::from(u32::from_be_bytes(chunk.try_into().unwrap()))
+                })))
+            }
+            10 => {
+                if value.len() % 4 != 0 {
+                    return Err(identity_attribute_mismatch("CLUSTER_LIST raw width"));
+                }
+                Some(Json::array(value.chunks_exact(4).map(|chunk| {
+                    Json::from(Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]).to_string())
+                })))
+            }
+            32 => {
+                if value.is_empty() || value.len() % 12 != 0 {
+                    return Err(identity_attribute_mismatch("Large Communities raw width"));
+                }
+                Some(Json::array(value.chunks_exact(12).map(|chunk| {
+                    Json::array(
+                        chunk
+                            .chunks_exact(4)
+                            .map(|part| Json::from(u32::from_be_bytes(part.try_into().unwrap()))),
+                    )
+                })))
+            }
+            2 | 17 => {
+                let raw_path = if code == 17 {
+                    member(decoded, "raw_segments")?
+                } else {
+                    decoded
+                };
+                if matches!(raw_path, Json::Array(_)) {
+                    let path = decoded_source_path(raw_path, limits)?;
+                    let count: usize = path.iter().map(|segment| segment.values.len()).sum();
+                    let headers = path.len() * 2;
+                    let width = if code == 17 {
+                        4
+                    } else if value.len() == headers + count * 2 {
+                        2
+                    } else {
+                        4
+                    };
+                    let actual = super::bgp::parse_as_path(&value, width, limits)?;
+                    if (code == 17 && value.len() < 6)
+                        || actual.iter().any(|segment| segment.values.contains(&0))
+                    {
+                        return Err(identity_attribute_mismatch("AS_PATH raw value domain"));
+                    }
+                    if canonical_as_path(&source_path_json(&actual), limits)?
+                        != canonical_as_path(raw_path, limits)?
+                    {
+                        return Err(identity_attribute_mismatch("AS_PATH raw value projection"));
+                    }
+                    if code == 17 {
+                        let usable: Vec<_> = actual
+                            .into_iter()
+                            .filter(|segment| !matches!(segment.kind, 3 | 4))
+                            .collect();
+                        if canonical_as_path(&source_path_json(&usable), limits)?
+                            != canonical_as_path(member(decoded, "usable_segments")?, limits)?
+                        {
+                            return Err(identity_attribute_mismatch("AS4_PATH usable projection"));
+                        }
+                    }
+                }
+                None
+            }
+            14 | 15 => {
+                let known = if code == 14 {
+                    optional_member(decoded, "next_hop")?.is_some()
+                } else {
+                    matches!(decoded, Json::Array(_))
+                };
+                if known {
+                    let mut matched = false;
+                    for add_path in [false, true] {
+                        match super::bgp::source_mp_value(&value, code, add_path, limits) {
+                            Ok(source) => matched |= canonical(&source) == canonical(decoded),
+                            Err(error) if error.code == pcap_evidence::ErrorCode::LimitExceeded => {
+                                return Err(error)
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    if !matched {
+                        return Err(identity_attribute_mismatch(
+                            "multiprotocol raw value projection",
+                        ));
+                    }
+                }
+                None
+            }
+            _ => None,
+        };
+        if expected.is_some_and(|expected| canonical(&expected) != canonical(decoded)) {
+            return Err(identity_attribute_mismatch(
+                "imported raw scalar or collection projection",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_complete_occurrences(ranges: &[Json]) -> Result<()> {
+    let supported = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 17, 18, 32];
+    let mut seen = BTreeSet::new();
+    for range in ranges {
+        let code = byte(member(range, "type")?)?;
+        let disposition = text(member(range, "disposition")?)?;
+        if !seen.insert(code)
+            && disposition == "discard_later_occurrence"
+            && !matches!(code, 14 | 15)
+        {
+            continue;
+        }
+        let interpretation = text(member(range, "interpretation")?)?;
+        let validation = member(range, "validation")?;
+        let flags = byte(member(range, "flags")?)?;
+        let known_discard = disposition == "attribute_discard"
+            && (matches!(code, 17 | 18)
+                || (matches!(code, 5 | 9 | 10)
+                    && interpretation == "decoded_but_discarded_for_external_peer"));
+        if !supported.contains(&code)
+            || (disposition != "accept_evidence_only" && !known_discard)
+            || super::bgp::attribute_flags(code).is_some_and(|expected| flags & 0xc0 != expected)
+            || flags & 0x20 != 0
+            || !boolean(member(validation, "flags_valid")?)?
+            || !boolean(member(validation, "length_valid")?)?
+            || !boolean(member(validation, "multiplicity_valid")?)?
+            || boolean(member(validation, "partial_bit_unexpected")?)?
+            || matches!(
+                interpretation,
+                "wire_shape_only_not_negotiated"
+                    | "unresolved_asn_width"
+                    | "unresolved_capability_context"
+                    | "unresolved_next_hop_context"
+                    | "opaque_family_capability_or_add_path_layout"
+            )
+        {
+            return Err(identity_attribute_mismatch(
+                "incomplete occurrence in complete identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decoded_source_path(value: &Json, limits: &Limits) -> Result<Vec<super::bgp::AsPathSegment>> {
+    let value = canonical_as_path(value, limits)?;
+    array(&value)?
+        .iter()
+        .map(|segment| {
+            Ok(super::bgp::AsPathSegment {
+                kind: byte(member(segment, "kind")?)?,
+                values: array(member(segment, "values")?)?
+                    .iter()
+                    .map(|value| {
+                        u32::try_from(number(value)?)
+                            .map_err(|_| identity_attribute_mismatch("ASN out of range"))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            })
+        })
+        .collect()
+}
+
+fn source_path_json(path: &[super::bgp::AsPathSegment]) -> Json {
+    Json::array(path.iter().map(|segment| {
+        Json::object([
+            ("kind", segment.kind.into()),
+            (
+                "values",
+                Json::array(segment.values.iter().copied().map(Json::from)),
+            ),
+        ])
+    }))
+}
+
+/// Recompute the effective RFC 6793 values from the retained first source
+/// occurrences. Neither a supplied fingerprint nor its effective summary is
+/// used as the expected value.
+fn effective_source_as4(ranges: &[Json], limits: &Limits) -> Result<(Json, Json)> {
+    let base = canonical_source_as_path_from_ranges(ranges, limits)?;
+    let mut aggregator = first_effective_attribute(ranges, 7)?
+        .cloned()
+        .unwrap_or(Json::Null);
+    let first = |code: u8| -> Result<Option<&Json>> {
+        for range in ranges {
+            if byte(member(range, "type")?)? == code {
+                return Ok(Some(range));
+            }
+        }
+        Ok(None)
+    };
+    let as4_path = first(17)?;
+    let as4_aggregator = first(18)?;
+    if as4_path.is_none() && as4_aggregator.is_none() {
+        return Ok((base, aggregator));
+    }
+    let Some(base_range) = first_effective_occurrence(ranges, 2)? else {
+        return Ok((base, aggregator));
+    };
+    let base_path = decoded_source_path(&base, limits)?;
+    let value_bytes = number(member(base_range, "value_end")?)?
+        .checked_sub(number(member(base_range, "value_start")?)?)
+        .ok_or_else(|| identity_attribute_mismatch("AS_PATH source extent"))?;
+    let count: u64 = base_path
+        .iter()
+        .map(|segment| segment.values.len() as u64)
+        .sum();
+    let headers = base_path.len() as u64 * 2;
+    let width = if count == 0 {
+        match first_effective_occurrence(ranges, 7)? {
+            Some(range) => match number(member(range, "value_end")?)?
+                .checked_sub(number(member(range, "value_start")?)?)
+            {
+                Some(6) => 2,
+                Some(8) => 4,
+                _ => return Err(identity_attribute_mismatch("AGGREGATOR source width")),
+            },
+            None => 0,
+        }
+    } else {
+        let body = value_bytes
+            .checked_sub(headers)
+            .ok_or_else(|| identity_attribute_mismatch("AS_PATH source length"))?;
+        if body == count * 2 {
+            2
+        } else if body == count * 4 {
+            4
+        } else {
+            return Err(identity_attribute_mismatch("AS_PATH source width"));
+        }
+    };
+    let base_asn = match &aggregator {
+        Json::String(value) => value
+            .split(':')
+            .next()
+            .and_then(|value| value.parse::<u32>().ok()),
+        _ => None,
+    };
+    let non_as_trans_pair = base_asn.is_some_and(|asn| asn != 23456) && as4_aggregator.is_some();
+    let path_reconstruction = as4_path
+        .map(|range| -> Result<_> {
+            let path =
+                decoded_source_path(member(member(range, "decoded")?, "raw_segments")?, limits)?;
+            Ok(super::bgp::reconstruct_as4_suffix(&base_path, &path))
+        })
+        .transpose()?;
+    for (code, range) in [(17, as4_path), (18, as4_aggregator)] {
+        if let Some(range) = range {
+            let discard = width == 4
+                || non_as_trans_pair
+                || (code == 17
+                    && path_reconstruction
+                        .as_ref()
+                        .is_some_and(|(_, status)| *status == "longer_as4_path_ignored"));
+            let supplied_discard = text(member(range, "disposition")?)? == "attribute_discard";
+            // Empty base paths with no AGGREGATOR do not expose an ASN width
+            // in their value bytes. Preserve the existing fail-closed context
+            // gate, while deriving every distinguishable discard category here.
+            if width != 0 && supplied_discard != discard {
+                return Err(identity_attribute_mismatch(
+                    "AS4 discard category source projection",
+                ));
+            }
+        }
+    }
+    // NEW/NEW discards transition attributes, including when AS_PATH is empty.
+    if width == 4 || (width == 0 && as4_path.into_iter().chain(as4_aggregator).all(|range|
+        matches!(optional_member(range, "disposition"), Ok(Some(Json::String(value))) if value == "attribute_discard"))) {
+        return Ok((base, aggregator));
+    }
+    if let (Some(base_asn), Some(as4_aggregator)) = (base_asn, as4_aggregator) {
+        if base_asn != 23456 {
+            return Ok((base, aggregator));
+        }
+        aggregator = member(as4_aggregator, "decoded")?.clone();
+    }
+    let mut effective = base_path;
+    if let Some((reconstructed, _)) = path_reconstruction {
+        effective = reconstructed;
+    }
+    Ok((
+        canonical_as_path(&source_path_json(&effective), limits)?,
+        aggregator,
+    ))
+}
+
 fn first_effective_occurrence(ranges: &[Json], code: u8) -> Result<Option<&Json>> {
     for range in ranges {
         if byte(member(range, "type")?)? == code {
@@ -1860,7 +2723,7 @@ fn validate_captured_attribute_projection(
 ) -> Result<()> {
     let empty = Json::Array(Vec::new());
     let null = Json::Null;
-    let source_path = canonical_source_as_path_from_ranges(ranges, limits)?;
+    let (source_path, source_aggregator) = effective_source_as4(ranges, limits)?;
     if source_path != canonical_as_path(member(route_attributes, "as_path")?, limits)? {
         return Err(identity_attribute_mismatch("source AS_PATH projection"));
     }
@@ -1879,9 +2742,6 @@ fn validate_captured_attribute_projection(
         }
     }
 
-    let source_aggregator = first_effective_attribute(ranges, 7)?
-        .cloned()
-        .unwrap_or(Json::Null);
     if canonical(&source_aggregator) != canonical(member(route_attributes, "aggregator")?) {
         return Err(identity_attribute_mismatch("AGGREGATOR source projection"));
     }

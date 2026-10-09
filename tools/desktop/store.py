@@ -56,13 +56,18 @@ def query(path,filters=None):
             sql+=f" AND e.{key}=?";args.append(value)
     if f.get("frame"):
         sql+=" AND EXISTS(SELECT 1 FROM event_packets ep WHERE ep.seq=e.seq AND ep.frame=?)";args.append(decimal(f["frame"]))
+    address=port=None
     if f.get("ip"):
         import ipaddress
         address=str(ipaddress.ip_address(f["ip"]))
-        sql+=" AND EXISTS(SELECT 1 FROM sessions s WHERE s.session=e.session AND (s.source_ip=? OR s.destination_ip=?))";args.extend([address,address])
-    if f.get("port"):
+    if f.get("port") not in (None,""):
         port=int(f["port"])
         if not 0<=port<=65535:raise ValueError("port range")
+    if address is not None and port is not None:
+        sql+=" AND EXISTS(SELECT 1 FROM sessions s WHERE s.session=e.session AND ((s.source_ip=? AND s.source_port=?) OR (s.destination_ip=? AND s.destination_port=?)))";args.extend([address,port,address,port])
+    elif address is not None:
+        sql+=" AND EXISTS(SELECT 1 FROM sessions s WHERE s.session=e.session AND (s.source_ip=? OR s.destination_ip=?))";args.extend([address,address])
+    elif port is not None:
         sql+=" AND EXISTS(SELECT 1 FROM sessions s WHERE s.session=e.session AND (s.source_port=? OR s.destination_port=?))";args.extend([port,port])
     for key,op in (("start_ns",">="),("end_ns","<=")):
         if f.get(key):

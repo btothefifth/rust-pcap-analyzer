@@ -16,13 +16,46 @@ fn event_session(event: &Json) -> Option<&str> {
     }
 }
 
-struct Projection<'a> {
+/// Include the original source event without selecting a winner or rewriting
+/// its label when the queried real session belongs to its affected inventory.
+fn event_affects_session(event: &Json, session: &str) -> bool {
+    if event_session(event) == Some(session) {
+        return true;
+    }
+    if !matches!(
+        event_text(event, "parse_status"),
+        Some("quarantined_ambiguous_session" | "quarantined_coverage_unknown")
+    ) {
+        return false;
+    }
+    let Some(Json::Array(scopes)) =
+        event_value(event, "detail").and_then(|detail| event_value(detail, "affected_scopes"))
+    else {
+        return false;
+    };
+    scopes
+        .iter()
+        .any(|scope| event_text(scope, "session") == Some(session))
+}
+
+pub(crate) struct Projection<'a> {
     writer: Option<&'a mut dyn Write>,
     used: usize,
     limit: usize,
 }
 
-impl Projection<'_> {
+impl<'a> Projection<'a> {
+    pub(crate) fn new(writer: Option<&'a mut dyn Write>, limit: usize) -> Self {
+        Self {
+            writer,
+            used: 0,
+            limit,
+        }
+    }
+
+    pub(crate) fn used(&self) -> usize {
+        self.used
+    }
     fn account(&mut self, length: usize) -> Result<()> {
         self.used = self
             .used
@@ -34,7 +67,7 @@ impl Projection<'_> {
 
     // Only punctuation and the already-validated, cached state encoding use
     // this private method. All labels/capture-derived strings use Json escaping.
-    fn raw(&mut self, value: &str) -> Result<()> {
+    pub(crate) fn raw(&mut self, value: &str) -> Result<()> {
         self.account(value.len())?;
         if let Some(writer) = &mut self.writer {
             writer.write_all(value.as_bytes())?;
@@ -42,30 +75,299 @@ impl Projection<'_> {
         Ok(())
     }
 
-    fn value(&mut self, value: Json) -> Result<()> {
+    pub(crate) fn value(&mut self, value: Json) -> Result<()> {
         self.value_ref(&value)
     }
 
-    fn value_ref(&mut self, value: &Json) -> Result<()> {
-        let size = value.encoded_len_bounded(self.limit.saturating_sub(self.used))?;
-        self.account(size)?;
-        if let Some(writer) = &mut self.writer {
-            let encoded = value.encode_bounded(size)?;
-            writer.write_all(encoded.as_bytes())?;
-        }
-        Ok(())
+    pub(crate) fn value_ref(&mut self, value: &Json) -> Result<()> {
+        value.encoded_len_bounded(self.limit.saturating_sub(self.used))?;
+        self.borrowed_value(value)
     }
 
-    fn field(&mut self, key: &'static str, first: bool) -> Result<()> {
+    // Walk admitted JSON by reference, without a second tree or encoded buffer.
+    fn borrowed_value(&mut self, value: &Json) -> Result<()> {
+        match value {
+            Json::Null => self.raw("null"),
+            Json::Bool(value) => self.raw(if *value { "true" } else { "false" }),
+            Json::Number(value) => self.raw(&value.to_string()),
+            Json::String(value) => self.text(value),
+            Json::Array(values) => {
+                self.raw("[")?;
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        self.raw(",")?;
+                    }
+                    self.borrowed_value(value)?;
+                }
+                self.raw("]")
+            }
+            Json::Object(values) => {
+                self.raw("{")?;
+                for (index, (key, value)) in values.iter().enumerate() {
+                    self.field(key, index == 0)?;
+                    self.borrowed_value(value)?;
+                }
+                self.raw("}")
+            }
+        }
+    }
+
+    pub(crate) fn text(&mut self, value: &str) -> Result<()> {
+        let size = value
+            .chars()
+            .try_fold(2usize, |size, c| {
+                size.checked_add(match c {
+                    '"' | '\\' | '\n' | '\r' | '\t' | '\x08' | '\x0c' => 2,
+                    c if (c as u32) < 32 => 6,
+                    c => c.len_utf8(),
+                })
+            })
+            .filter(|size| *size <= self.limit.saturating_sub(self.used))
+            .ok_or_else(|| Error::limit("report_bytes"))?;
+        if self.writer.is_none() {
+            return self.account(size);
+        }
+        self.raw("\"")?;
+        let mut start = 0;
+        for (index, c) in value.char_indices() {
+            if c != '"' && c != '\\' && (c as u32) >= 32 {
+                continue;
+            }
+            self.raw(&value[start..index])?;
+            match c {
+                '"' => self.raw("\\\"")?,
+                '\\' => self.raw("\\\\")?,
+                '\n' => self.raw("\\n")?,
+                '\r' => self.raw("\\r")?,
+                '\t' => self.raw("\\t")?,
+                '\x08' => self.raw("\\b")?,
+                '\x0c' => self.raw("\\f")?,
+                c if (c as u32) < 32 => self.raw(&format!("\\u{:04x}", c as u32))?,
+                _ => unreachable!("only escape characters enter this branch"),
+            }
+            start = index + c.len_utf8();
+        }
+        self.raw(&value[start..])?;
+        self.raw("\"")
+    }
+
+    pub(crate) fn field(&mut self, key: &'static str, first: bool) -> Result<()> {
         if !first {
             self.raw(",")?;
         }
-        self.value(key.into())?;
+        self.text(key)?;
         self.raw(":")
     }
 }
 
+// Stream the typed RIB directly. In particular, versions/attributes/witnesses
+// are borrowed rather than collected into a potentially amplified JSON tree.
+pub(crate) fn project_rib(
+    rib: &AdjRibIn,
+    session: Option<&str>,
+    out: &mut Projection<'_>,
+) -> Result<()> {
+    use crate::deep::bgp_rib::PathId;
+    macro_rules! text {
+        ($key:literal, $value:expr, $first:expr) => {{
+            out.field($key, $first)?;
+            out.text($value)?;
+        }};
+    }
+    macro_rules! value {
+        ($key:literal, $value:expr, $first:expr) => {{
+            out.field($key, $first)?;
+            out.value($value)?;
+        }};
+    }
+    let own = |scope: &crate::deep::bgp_rib::RibScope| {
+        session.is_none_or(|session| scope.session == session)
+    };
+    out.raw("{")?;
+    text!("schema", crate::deep::bgp_rib::SCHEMA, true);
+    value!("source_authenticated", false.into(), false);
+    value!("endpoint_state_claimed", false.into(), false);
+    value!("installed_routes_established", false.into(), false);
+    value!("reachability_established", false.into(), false);
+    out.field("end_of_rib", false)?;
+    out.raw("[")?;
+    for (index, marker) in rib
+        .eors()
+        .iter()
+        .filter(|marker| own(&marker.scope))
+        .enumerate()
+    {
+        if index != 0 {
+            out.raw(",")?;
+        }
+        out.raw("{")?;
+        text!("partition_id", &marker.scope.source.partition_id, true);
+        text!("session", &marker.scope.session, false);
+        text!("generation", &marker.scope.generation.to_string(), false);
+        value!(
+            "direction",
+            marker.scope.direction.map_or(Json::Null, Json::from),
+            false
+        );
+        value!("afi", marker.family.afi.into(), false);
+        value!("safi", marker.family.safi.into(), false);
+        text!("record_id", &marker.record_id, false);
+        out.raw("}")?;
+    }
+    out.raw("]")?;
+    out.field("entries", false)?;
+    out.raw("[")?;
+    for (index, entry) in rib
+        .entries()
+        .values()
+        .filter(|entry| own(&entry.key.scope))
+        .enumerate()
+    {
+        if index != 0 {
+            out.raw(",")?;
+        }
+        out.raw("{")?;
+        text!("source_id", &entry.key.scope.source.source_id, true);
+        text!("partition_id", &entry.key.scope.source.partition_id, false);
+        text!("session", &entry.key.scope.session, false);
+        text!("generation", &entry.key.scope.generation.to_string(), false);
+        value!(
+            "direction",
+            entry.key.scope.direction.map_or(Json::Null, Json::from),
+            false
+        );
+        out.field("peer", false)?;
+        if let Some(peer) = &entry.key.scope.peer {
+            out.text(peer)?;
+        } else {
+            out.raw("null")?;
+        }
+        out.field("prefix", false)?;
+        project_prefix(&entry.key.prefix, out)?;
+        value!(
+            "path_id",
+            match entry.key.path_id {
+                PathId::Absent => Json::Null,
+                PathId::Present(value) => value.into(),
+                PathId::Unknown => "unknown".into(),
+            },
+            false
+        );
+        text!("status", rib_support::route_status(entry.status), false);
+        text!("last_witness", &entry.last_witness, false);
+        out.field("versions", false)?;
+        out.raw("[")?;
+        for (index, version) in entry.versions.iter().enumerate() {
+            if index != 0 {
+                out.raw(",")?;
+            }
+            out.raw("{")?;
+            out.field("attributes", true)?;
+            out.value_ref(&version.attributes)?;
+            text!("attribute_identity", &version.attribute_identity, false);
+            text!(
+                "disposition",
+                rib_support::version_status(version.disposition),
+                false
+            );
+            out.field("witnesses", false)?;
+            out.raw("[")?;
+            for (index, witness) in version.witnesses.iter().enumerate() {
+                if index != 0 {
+                    out.raw(",")?;
+                }
+                out.text(witness)?;
+            }
+            out.raw("]}")?;
+        }
+        out.raw("]}")?;
+    }
+    out.raw("]")?;
+    out.field("gaps", false)?;
+    out.raw("[")?;
+    for (index, (scope, record)) in rib
+        .gaps()
+        .iter()
+        .filter(|(scope, _)| own(scope))
+        .enumerate()
+    {
+        if index != 0 {
+            out.raw(",")?;
+        }
+        out.raw("{")?;
+        text!("partition_id", &scope.source.partition_id, true);
+        text!("session", &scope.session, false);
+        text!("generation", &scope.generation.to_string(), false);
+        text!("record_id", record, false);
+        out.raw("}")?;
+    }
+    out.raw("]")?;
+    out.field("rejected_records", false)?;
+    out.raw("[")?;
+    for (index, item) in rib
+        .rejections()
+        .iter()
+        .filter(|item| own(&item.key.scope))
+        .enumerate()
+    {
+        if index != 0 {
+            out.raw(",")?;
+        }
+        out.raw("{")?;
+        text!("partition_id", &item.key.scope.source.partition_id, true);
+        text!("session", &item.key.scope.session, false);
+        text!("generation", &item.key.scope.generation.to_string(), false);
+        out.field("prefix", false)?;
+        project_prefix(&item.key.prefix, out)?;
+        text!("record_id", &item.record_id, false);
+        text!("reason", &item.reason, false);
+        out.raw("}")?;
+    }
+    out.raw("]}")
+}
+
+fn project_prefix(prefix: &PrefixIdentity, out: &mut Projection<'_>) -> Result<()> {
+    out.raw("{")?;
+    out.field("afi", true)?;
+    out.value(prefix.afi.into())?;
+    out.field("safi", false)?;
+    out.value(prefix.safi.into())?;
+    out.field("length", false)?;
+    out.value(prefix.length.into())?;
+    out.field("address", false)?;
+    out.text(&prefix.address)?;
+    out.raw("}")
+}
+
 impl MrtReplayArchive {
+    /// Exact typed RIB preflight followed by borrowed streaming. A size failure
+    /// writes no bytes and never constructs an aggregate RIB JSON tree.
+    pub fn write_bgp4mp_rib_bounded_line(
+        &self,
+        session: Option<&str>,
+        writer: &mut dyn Write,
+        limit: usize,
+    ) -> Result<usize> {
+        let mut measure = Projection {
+            writer: None,
+            used: 0,
+            limit,
+        };
+        project_rib(&self.bgp4mp_rib, session, &mut measure)?;
+        measure.raw("\n")?;
+        let expected = measure.used;
+        let mut out = Projection {
+            writer: Some(writer),
+            used: 0,
+            limit: expected,
+        };
+        project_rib(&self.bgp4mp_rib, session, &mut out)?;
+        out.raw("\n")?;
+        if out.used != expected {
+            return Err(bad("bgp_mrt_output", 0, "RIB projection size changed"));
+        }
+        Ok(out.used)
+    }
     fn project(&self, out: &mut Projection<'_>) -> Result<()> {
         out.raw("{")?;
         out.field("schema", true)?;
@@ -128,6 +430,8 @@ impl MrtReplayArchive {
         out.raw("]")?;
         out.field("candidate_state", false)?;
         out.raw(self.state.encode())?;
+        out.field("bgp4mp_adj_rib_in", false)?;
+        project_rib(&self.bgp4mp_rib, None, out)?;
         out.field("record_summaries", false)?;
         out.raw("[")?;
         for (index, record) in self.batch.records.iter().enumerate() {
@@ -169,7 +473,7 @@ impl MrtReplayArchive {
             && !self
                 .bgp4mp_events
                 .iter()
-                .any(|event| event_session(event) == Some(session))
+                .any(|event| event_affects_session(event, session))
         {
             return Err(Error::new(
                 ErrorCode::InvalidIndex,
@@ -180,7 +484,7 @@ impl MrtReplayArchive {
         }
         out.raw("{")?;
         out.field("schema", true)?;
-        out.value("pcap-evidence.bgp.imported-session-query.v3".into())?;
+        out.value("pcap-evidence.bgp.imported-session-query.v4".into())?;
         out.field("session", false)?;
         out.value(session.into())?;
         out.field("observations", false)?;
@@ -233,6 +537,28 @@ impl MrtReplayArchive {
                 ]))?;
             }
         }
+        // Route-free imported boundaries and EOR records are source evidence
+        // for native RIB history even though no candidate can reference them.
+        for (index, observation) in self.state.observations().iter().enumerate() {
+            if observation.source().session.as_deref() != Some(session)
+                || !observation.routes().is_empty()
+                || observation.import_context().is_none()
+            {
+                continue;
+            }
+            seen.try_reserve(1)
+                .map_err(|_| Error::limit("bgp_mrt_observations"))?;
+            if seen.insert(index) {
+                if !first_observation {
+                    out.raw(",")?;
+                }
+                first_observation = false;
+                out.value(Json::object([
+                    ("observation_index", index.to_string().into()),
+                    ("normalized_observation", observation.normalized().clone()),
+                ]))?;
+            }
+        }
         out.raw("]")?;
         out.field("candidates", false)?;
         out.raw("[")?;
@@ -272,7 +598,7 @@ impl MrtReplayArchive {
         for event in self
             .bgp4mp_events
             .iter()
-            .filter(|event| event_session(event) == Some(session))
+            .filter(|event| event_affects_session(event, session))
         {
             if !first {
                 out.raw(",")?;
@@ -283,10 +609,12 @@ impl MrtReplayArchive {
         out.raw("]")?;
         out.field("endpoint_state_claimed", false)?;
         out.value(false.into())?;
+        out.field("bgp4mp_adj_rib_in", false)?;
+        project_rib(&self.bgp4mp_rib, Some(session), out)?;
         out.raw("}")
     }
 
-    /// Exact current v3 JSON size. No whole-archive Json/String is constructed;
+    /// Exact current v4 JSON size. No whole-archive Json/String is constructed;
     /// each projected value is temporary, but session queries also retain a
     /// fallibly grown observation-index set for deduplication.
     pub fn encoded_len_bounded(&self, limit: usize) -> Result<usize> {
@@ -299,7 +627,7 @@ impl MrtReplayArchive {
         Ok(out.used)
     }
 
-    /// Preserve the current v3 JSON bytes for callers that need a String.
+    /// Preserve the current v4 JSON bytes for callers that need a String.
     /// Prefer `write_bounded_line` for files to avoid an aggregate output buffer.
     pub fn encode_bounded(&self, limit: usize) -> Result<String> {
         let size = self.encoded_len_bounded(limit)?;
@@ -371,5 +699,71 @@ impl MrtReplayArchive {
             return Err(bad("bgp_mrt_output", 0, "session projection size changed"));
         }
         Ok(out.used)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deep::{
+        bgp_rib::{PathId, RibAction, RibEvent, RibEventKind, RibScope},
+        bgp_session::{PartitionKind, SourcePartition},
+    };
+
+    #[test]
+    fn large_native_rib_payload_rejects_small_remaining_budget_during_preflight() {
+        let mut rib = AdjRibIn::new(Limits::default()).unwrap();
+        rib.apply(RibEvent {
+            scope: RibScope {
+                source: SourcePartition {
+                    kind: PartitionKind::Imported,
+                    source_id: "large-source".into(),
+                    partition_id: "large-partition".into(),
+                },
+                session: "large-session".into(),
+                generation: 0,
+                direction: Some(0),
+                peer: Some("large-peer".into()),
+            },
+            record_id: "large-record".into(),
+            kind: RibEventKind::Update(vec![RibAction::Announce {
+                prefix: PrefixIdentity {
+                    afi: 1,
+                    safi: 1,
+                    length: 24,
+                    address: "203.0.113.0".into(),
+                },
+                path_id: PathId::Absent,
+                attributes: Json::object([("source_payload", "a".repeat(128 * 1024).into())]),
+                attribute_identity: "large-attributes".into(),
+            }]),
+        })
+        .unwrap();
+        let mut measure = Projection::new(None, 768);
+        let error = project_rib(&rib, None, &mut measure).unwrap_err();
+        assert_eq!(error.field, "report_bytes");
+        assert!(
+            measure.used() < 768,
+            "borrowed attribute extent is checked before traversal/output"
+        );
+        let expected = rib_support::rib_json(&rib, None)
+            .encode_bounded_line(1024 * 1024)
+            .unwrap();
+        let mut bytes = Vec::new();
+        let mut out = Projection::new(Some(&mut bytes), expected.len());
+        project_rib(&rib, None, &mut out).unwrap();
+        out.raw("\n").unwrap();
+        assert_eq!(bytes, expected.as_bytes());
+    }
+
+    #[test]
+    fn borrowed_string_stream_matches_json_escaping_without_aggregate_buffer() {
+        let text = "quote\" slash\\ newline\n return\r tab\t back\x08 form\x0c nul\0 unicodeé中";
+        let expected = Json::from(text).encode();
+        let mut bytes = Vec::new();
+        let mut out = Projection::new(Some(&mut bytes), expected.len());
+        out.text(text).unwrap();
+        assert_eq!(out.used(), expected.len());
+        assert_eq!(bytes, expected.as_bytes());
     }
 }

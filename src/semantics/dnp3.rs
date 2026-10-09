@@ -83,15 +83,13 @@ fn shape(group: u8, variation: u8) -> Option<Shape> {
         (0, 0..=253 | 255) => Shape::Attribute,
         (1 | 10 | 80, 1) => Shape::Packed { bits: 1 },
         (3, 1) => Shape::Packed { bits: 2 },
-        (1 | 10 | 80, 2) | (2 | 11 | 13, 1) => Shape::Binary { bits: 1, time: 0 },
+        (1 | 10, 2) | (2 | 11 | 13, 1) => Shape::Binary { bits: 1, time: 0 },
         (4, 1) => Shape::Binary { bits: 2, time: 0 },
         (3, 2) => Shape::Binary { bits: 2, time: 0 },
         (2 | 11 | 13, 2) => Shape::Binary { bits: 1, time: 6 },
         (4, 2) => Shape::Binary { bits: 2, time: 6 },
-        (2 | 11 | 13, 3) => Shape::Binary { bits: 1, time: 2 },
+        (2, 3) => Shape::Binary { bits: 1, time: 2 },
         (4, 3) => Shape::Binary { bits: 2, time: 2 },
-        (3, 3) => Shape::Binary { bits: 2, time: 6 },
-        (3, 4) => Shape::Binary { bits: 2, time: 2 },
         (20..=23, 1) => Shape::Counter {
             width: 4,
             flags: true,
@@ -112,12 +110,12 @@ fn shape(group: u8, variation: u8) -> Option<Shape> {
             flags: true,
             time: 6,
         },
-        (20 | 21, 5 | 9) => Shape::Counter {
+        (20, 5) | (21, 9) => Shape::Counter {
             width: 4,
             flags: false,
             time: 0,
         },
-        (20 | 21, 6 | 10) => Shape::Counter {
+        (20, 6) | (21, 10) => Shape::Counter {
             width: 2,
             flags: false,
             time: 0,
@@ -1206,7 +1204,11 @@ pub fn decode(source: &EvidenceBytes, context: Context, limits: Limits) -> Resul
     if b.is_empty()
         && matches!(
             context,
-            Context::TimeWriteValues | Context::FileValues | Context::ClassHeaders
+            Context::ReadHeaders
+                | Context::ControlValues
+                | Context::TimeWriteValues
+                | Context::FileValues
+                | Context::ClassHeaders
         )
     {
         out.stop(

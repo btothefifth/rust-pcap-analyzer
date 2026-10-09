@@ -1,0 +1,2253 @@
+{
+  "assembled_coherence": {
+    "execution": {
+      "final_generation_tests_and_complete_gates": "Separate root-owned execution evidence; pending at this review.",
+      "full_product2_previous_generation": "Root reported FAIL after 24 gates with unchanged source, release timeout, six Clippy needless_borrow findings and interrupted product build. Retained as failed attempt; no release or full-generation pass inferred.",
+      "hosted_ci": "Not established by source review.",
+      "only_requested_write": ".local-build/followup-cleanup/coherence-final-review.json",
+      "tests_builds_downloads_run_by_reviewer": false,
+      "tracked_or_donor_writes_by_reviewer": false
+    },
+    "findings": [],
+    "historical_evidence": {
+      "all_bytes_unchanged": true,
+      "baseline": "8aa92ad963b00bbe05fa4374a2f6fb29d40b57b8",
+      "files_checked": 11
+    },
+    "historical_evidence_rechecked_unchanged": true,
+    "identity_algorithm": "SHA-256 of each relative UTF-8 path, NUL, and raw 32-byte file SHA-256; pathlib.Path component ordering, matching scripts/validate.py source_identity; excludes root evidence and target, .git, cache, .local-tooling, .local-build trees, symlinks, ZIP and PYC files",
+    "limits": [
+      "Acceptance applies only to this frozen 744-file source generation and reviewed seams. Generated evidence/pr-followup-validation.json is excluded from source identity and its final executed contents need separate evidence verification.",
+      "Component acceptance is preserved rather than repeated wholesale; final analysis component acceptance was coordinated by the root with the separate reviewer.",
+      "Source reading and test-oracle inspection do not establish successful execution, native compiler behavior, complete normative conformance, sustained fuzzing or untested platforms.",
+      "Temporary old/new diagnostic test generations and finite timings do not establish final-source representative performance, measured visit counts, throughput or whole-process CPU/peak-RSS bounds.",
+      "Public sample claims apply only to the exact admitted bytes and rows. A RIB prefix whose parent file was not retained does not establish parent-file identity; these finite samples do not establish representative multi-collector/date/corpus parity or broader supported-profile coverage.",
+      "Bundles check producer-declared raw ranges and recomputable provenance; they do not independently map parsed records, replay omitted NDJSON, authenticate source or establish semantic correctness.",
+      "Exact-key-set external changes-v1 consumers must explicitly admit the documented additive classification field; their compatibility is not established here."
+    ],
+    "package_inventory_closure": {
+      "closure_carried_forward": true,
+      "new_files_still_indexed": [
+        "product/src/deep/bgp_mrt_archive.rs",
+        "product/src/deep/bgp_persisted/replay.rs",
+        "tools/tests/test_bgp_bundle.py"
+      ],
+      "owner": "scripts/package.py inventory uses git ls-files --cached",
+      "source_or_package_code_change_in_this_revision": false
+    },
+    "prior_accepted_generation": {
+      "coherence_review_path": ".local-build/followup-cleanup/coherence-review.json",
+      "coherence_review_sha256": "3c297a14553ddcafdfe6a6a35024231ebfbd14852c323ce02df2a4f44b7d5dff",
+      "preserved_unchanged": true,
+      "scope_carried_forward": "All previously reviewed assembled seams and qualification limits, except the six changed calls independently checked below.",
+      "source_identity": "e93a3e0f85aea9fac574a420a9493db1456a73944a1aca77841e3e75473808d8",
+      "source_inventory_sha256": "5299d4a06dc639d371afdeeab39663ed9452d2bec295cc40d15b852e2505c900"
+    },
+    "recorded_utc": "2026-10-09T19:13:28.363302+00:00",
+    "review_role": "independent narrow final-generation assembled coherence carry-forward",
+    "revision": {
+      "added_or_removed_source_paths": false,
+      "candidate_sha256": "bb3f766ea3e6201d888600e2ed4f4ec663cdd16f6d996cc44f695d18d5e96cd7",
+      "changed_file": "product/src/deep/bgp_persisted/analysis.rs",
+      "changed_lines": [
+        1551,
+        1592,
+        1611,
+        1821,
+        1827,
+        1840
+      ],
+      "fix_manifest_sha256": "a94d6afda4afb56497c65925eb9d28a09f4948c3b41d696b806075d53165d1ef",
+      "fix_patch_sha256": "e9a4705ac05cb66b78bff058a5a669725d975f03877dbabd05cfa2f9f6c6926d",
+      "preimage_sha256": "17cf434ed792a8c079802fbec83079a3d4fdb56e8951f37c25793447d4d7efe3",
+      "six_reverse_replacements_reconstruct_accepted_preimage_sha256": true,
+      "source_review": "At all six calls scope or witness_scope already has type &NativeScope, and query_scope accepts &NativeScope. Removing the extra borrow retains the same referent and predicate, without changing control flow, scope ownership, projection, work/admission, native effects or source witnesses.",
+      "unchanged_source_files_count": 743
+    },
+    "schema": "local-source-coherence-review.v1",
+    "source_files_count": 744,
+    "source_identity": "1b47b69cdddebf2e20d50a925088b328265cd5d3a39d6c9fe02449eed084645f",
+    "source_inventory_path": ".local-build/followup-cleanup/final-assembled-source.json",
+    "source_inventory_sha256": "b6df783a1939901fdd3811ce29643669c475f674b198ca7d1fc1f546cc953e84",
+    "source_map_exact_before_and_after_review": true,
+    "status": "ACCEPTED_SOURCE_COHERENCE",
+    "wisdom_source_sha256": "eefd627cc71f4548dd682ece8a9fa3fa8f121d88fd9f593e6d191337522676ca"
+  },
+  "baseline_commit": "8aa92ad963b00bbe05fa4374a2f6fb29d40b57b8",
+  "component_manifest_sha256": {
+    "analysis": "11c4bf80fdc7efb2becc1c8863cea6b9b52ed0a23cd42f0e8f18467e8033a058",
+    "baseline_helpers": "16b088e17100b4f97d08f148ac4deaf3cc35f09465e30a4026ca1c3979d74832",
+    "docs_initial": "b54e9d09bfb3b5ad5fae4c64084673b023e97946c345a301db41a534beb553d6",
+    "docs_status_neutral": "e4122ca73e5096c2b0046647bacc48ba263c94186b37605a6f78b690e9960379",
+    "parser_persisted": "c92df7c8b6b2324939d9016cd34d334d5c0e428667cdebc17bd9011b80fda6d7",
+    "reproducibility": "c9d7ce54f42ce9babba4679b056ea97c042bd2b5c9e15ef98997b3b69d99cc17",
+    "stores": "3a9736ed9b92fe9cd495ef526df6b0bc579bbe2a0f8f0874c520957b4832dd9f"
+  },
+  "containment": {
+    "analysis-final-targeted": {
+      "disk_after": 4893301099,
+      "disk_before": 4893271852,
+      "environment": {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "<repo>/.local-build/target",
+        "RUST_TEST_THREADS": "1"
+      },
+      "exit_code": 0,
+      "limits": {
+        "memory.high": "1073741824",
+        "memory.max": "2147483648",
+        "memory.swap.max": "0"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak": "558682112",
+      "seconds": 48.53872640407644,
+      "source_unchanged": true
+    },
+    "current-samples": {
+      "disk_after": 4892566086,
+      "disk_before": 4880377135,
+      "environment": {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "<repo>/.local-build/target",
+        "RUST_TEST_THREADS": "1"
+      },
+      "exit_code": 1,
+      "limits": {
+        "memory.high": "1073741824",
+        "memory.max": "2147483648",
+        "memory.swap.max": "0"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak": "90238976",
+      "seconds": 8.576635734993033,
+      "source_unchanged": true
+    },
+    "current-samples2": {
+      "disk_after": 4893444631,
+      "disk_before": 4892583156,
+      "environment": {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "<repo>/.local-build/target",
+        "RUST_TEST_THREADS": "1"
+      },
+      "exit_code": 0,
+      "limits": {
+        "memory.high": "1073741824",
+        "memory.max": "2147483648",
+        "memory.swap.max": "0"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak": "44822528",
+      "seconds": 2.2733785070013255,
+      "source_unchanged": true
+    },
+    "final-release-precompile2": {
+      "disk_after": 4887394802,
+      "disk_before": 4910657876,
+      "environment": {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "<repo>/.local-build/target",
+        "RUST_TEST_THREADS": "1"
+      },
+      "exit_code": 0,
+      "limits": {
+        "memory.high": "1073741824",
+        "memory.max": "2147483648",
+        "memory.swap.max": "0"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak": "756097024",
+      "seconds": 1644.6479594759876,
+      "source_unchanged": true
+    },
+    "full-product3": {
+      "disk_after": 4880302738,
+      "disk_before": 4887395134,
+      "environment": {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "<repo>/.local-build/target",
+        "RUST_TEST_THREADS": "1"
+      },
+      "exit_code": 0,
+      "limits": {
+        "memory.high": "1073741824",
+        "memory.max": "2147483648",
+        "memory.swap.max": "0"
+      },
+      "memory_events": "low 0\nhigh 8137\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak": "1075777536",
+      "seconds": 1984.0036626870278,
+      "source_unchanged": true
+    },
+    "full-root": {
+      "disk_after": 4880376803,
+      "disk_before": 4880303074,
+      "environment": {
+        "CARGO_BUILD_JOBS": "1",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": "<repo>/.local-build/target",
+        "RUST_TEST_THREADS": "1"
+      },
+      "exit_code": 0,
+      "limits": {
+        "memory.high": "1073741824",
+        "memory.max": "2147483648",
+        "memory.swap.max": "0"
+      },
+      "memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+      "memory_peak": "446480384",
+      "seconds": 46.410780963953584,
+      "source_unchanged": true
+    }
+  },
+  "finite_analysis_comparison": {
+    "claim": "scope traversal and cached native matching improvement; inherited row/effect context copying remains outside the scaling claim",
+    "final_regression_rows": 256,
+    "final_regression_test_sha256": "83fa289e993f20f459620189278d09bb78672ac712b5e6afc62ef717dedc35cb",
+    "metrics": [
+      {
+        "elapsed_ns": 573485022,
+        "exit_code": 0,
+        "label": "old8admitted",
+        "log_sha256": "970743fd009b4e98f04bb6dea6c8367ca91517158040ab468e2c1047b8b77938",
+        "output_bytes": 14480,
+        "output_sha256": "43e327c73f2c8ba004f9555e06a135f994464ee4b3b20ac92cd9402df0484e0a",
+        "source_identity": "9705094ad6fb4dfd61361e7e3ba5968b5e202c712f7a9e48fed4227e19004267",
+        "static_old_observation_visit_model": 4096,
+        "temporary_test_sha256": "fd9749acb65576e93c5ce5c206b1aaff9b06eedf8313e57e917f6074c535e108"
+      },
+      {
+        "elapsed_ns": 26953499,
+        "exit_code": 0,
+        "label": "new8admitted",
+        "log_sha256": "1fbe0285745546d7341973dd115d70530d6fa404b4606193a509f4de4527b57b",
+        "output_bytes": 14480,
+        "output_sha256": "43e327c73f2c8ba004f9555e06a135f994464ee4b3b20ac92cd9402df0484e0a",
+        "source_identity": "23acf286065e5b4da9272475308ddddef6398744b0a36b9eaf266d3c48b33931",
+        "static_old_observation_visit_model": 4096,
+        "temporary_test_sha256": "fd9749acb65576e93c5ce5c206b1aaff9b06eedf8313e57e917f6074c535e108"
+      }
+    ],
+    "scope": "one API call per version; 8-peer, 16-row temporary diagnostic with identical custom limits: 64 MiB work/retention and 65,536 fields; setup excluded; single timing without threshold or distribution"
+  },
+  "historical_receipts": [
+    {
+      "path": "evidence/bgp-imported-analysis-feedback-validation.json",
+      "sha256": "f1fda88adf214ce8ed787d88705ec7fa115df48468ea3a12dbe05b0d6e943f41",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/bgp-profile-review-validation.json",
+      "sha256": "bbda0e6cfad3acc6d7c9aa067dd0d26dcd1f6819bfbaa6b869ae791fd7f727aa",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/bgp-stream-validation.json",
+      "sha256": "4cf3e5734c29788cd3b5fc0fa4edc055c44cd4b99bb36d7226711d73756b691e",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/delivery-check.json",
+      "sha256": "de3d66575fc71b1b2de86a9b6d80c33fa11b12921f6767e4390e04f32ab0d123",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/local-validation.json",
+      "sha256": "97880cc5e688174a3a07e5ca293574c40f64ed47f48f753058ac48c0e49bd212",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/objectives-1-4-validation.json",
+      "sha256": "0e8b96095799fca0757959642788c4b628c3cb1372a74bbea105996d20b1dd24",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/pr-feedback-round2-validation.json",
+      "sha256": "ce87148118550cb4f3a28ecb876d02ab471dadd7ad8b4ff20dfb45b3de82634b",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/pr-feedback-round3-validation.json",
+      "sha256": "27f02f086d5351d4e78cdfb75fb142ebffe0eedd6d974ba144c654adbfbbbc46",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/pr-feedback-round4-validation.json",
+      "sha256": "891b5486aea5f1bc489b9758f4921dea1fa8092e22e5085c75fb599df2130c0a",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/pr-feedback-validation.json",
+      "sha256": "60f52e25a466064557fed470f6d4f029a241c421f298ce98dde2d6caee4b423f",
+      "unchanged": true
+    },
+    {
+      "path": "evidence/source-manifest.json",
+      "sha256": "c368602eb21f3dce58887b97209dbda1115a481ea81ffb5b0e2fa7da4d6f705b",
+      "unchanged": true
+    }
+  ],
+  "hosted_ci": "NOT_CLAIMED_BY_LOCAL_RECEIPT; inspect exact published commit runs separately",
+  "independent_record_mapping_established": false,
+  "inventory_availability": "Complete map and raw execution logs retained in ignored local scratch; hashes and recipes are public, raw logs are not committed. Fresh source inventory can be recomputed from this tree.",
+  "inventory_recipe": "scripts/validate.py source_identity: exclude generated evidence and ignored build/tooling trees per that function; sort pathlib.Path instances by path components; concatenate relative UTF-8 path + NUL + raw SHA-256 bytes into SHA-256. The complete local map uses scripts/validation_frontier.py source_snapshot.",
+  "normative_protocol_qualification": "NOT_ESTABLISHED",
+  "product": {
+    "gate_count": 50,
+    "gates": [
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tools/tests",
+          "-v"
+        ],
+        "elapsed_seconds": 20.371,
+        "expected_returncode": 0,
+        "log_bytes": 43472,
+        "log_sha256": "e9dddb2c584c6076e49e266e00617977802fe6f98fc06b29478db553465d19f3",
+        "name": "python-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "product/tests",
+          "-p",
+          "*vectors.py",
+          "-v"
+        ],
+        "elapsed_seconds": 1.77,
+        "expected_returncode": 0,
+        "log_bytes": 10553,
+        "log_sha256": "d7cf902b77871c5c040174790960908d070868c70dfdb03da571b47334a24822",
+        "name": "bgp-vectors",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "scripts/test_semantic_tools.py",
+          "-v"
+        ],
+        "elapsed_seconds": 0.378,
+        "expected_returncode": 0,
+        "log_bytes": 1915,
+        "log_sha256": "dd769680373bf516c70d32d0084435188b7dbe21a092073d8d32ec234ed7b265",
+        "name": "semantic-tools",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "-m",
+          "unittest",
+          "tools.depth.test_opcua_crypto",
+          "-v"
+        ],
+        "elapsed_seconds": 0.164,
+        "expected_returncode": 0,
+        "log_bytes": 594,
+        "log_sha256": "bc3fe649b2c09b340f6b37d6f18257171dcc09d34cce393dcd38eaec6e50e314",
+        "name": "opcua-transforms",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "scripts/test_validation_frontier.py",
+          "-v"
+        ],
+        "elapsed_seconds": 1.265,
+        "expected_returncode": 0,
+        "log_bytes": 2144,
+        "log_sha256": "331bd6d2d5c0b2fdd2e9e7fbf8c265a1729a371e0591309c4654ff9eadf1ea63",
+        "name": "validation-frontier",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "scripts/test_package_contract.py",
+          "-v"
+        ],
+        "elapsed_seconds": 71.479,
+        "expected_returncode": 0,
+        "log_bytes": 1391,
+        "log_sha256": "ff5e3a2e233aacd76f8a1b6c8c8909b4f94c2d84ec2089cdb7d671b08a2974f6",
+        "name": "package-contract",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "portable_contracts",
+        "command": [
+          "python3",
+          "scripts/test_owned_process.py",
+          "-v"
+        ],
+        "elapsed_seconds": 5.513,
+        "expected_returncode": 0,
+        "log_bytes": 1887,
+        "log_sha256": "b84dc705dd6dd2acde4f18576f1ee69e61352c07129bf1b1be4c606b2534c1d3",
+        "name": "owned-process",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "case_maintenance",
+        "command": [
+          "python3",
+          "-m",
+          "tools.research",
+          "audit",
+          "--root",
+          "<repo>"
+        ],
+        "elapsed_seconds": 0.315,
+        "expected_returncode": 0,
+        "log_bytes": 27773,
+        "log_sha256": "1a76501948cda78785835be6774eff1dd78ff4ac8d5a993d1c8168c3b1269b59",
+        "name": "catalog-audit",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "javascript_models",
+        "command": [
+          "node",
+          "--test",
+          "desktop/web/model.test.mjs",
+          "desktop/web/app.test.mjs"
+        ],
+        "elapsed_seconds": 0.496,
+        "expected_returncode": 0,
+        "log_bytes": 2325,
+        "log_sha256": "79bb4385237d0c89725f2ed97125c377d0f7d6c5e26927b5918c5869d4899e24",
+        "name": "gui-model-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "elapsed_seconds": 0.605,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "root-format",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 2.827,
+        "expected_returncode": 0,
+        "log_bytes": 25065,
+        "log_sha256": "6f0dd1998189b096e5c0f6e8bfa4b8902499a0730989e674557a8c606bb33452",
+        "name": "root-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 1.092,
+        "expected_returncode": 0,
+        "log_bytes": 25096,
+        "log_sha256": "50adbee9cb40538ce9821192ef7d90f428b55c9a9d07c554996ae4e07793304d",
+        "name": "root-release-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 0.402,
+        "expected_returncode": 0,
+        "log_bytes": 72,
+        "log_sha256": "299f16a2c523be18fef769975d2df00e0505521db047540feea3a74b94666887",
+        "name": "root-clippy",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.29,
+        "expected_returncode": 0,
+        "log_bytes": 62,
+        "log_sha256": "2d5694fb348541fae3d68a033b004800c9c79f8f6edb468d5763b1d8f389597a",
+        "name": "root-build",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "streaming/Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "elapsed_seconds": 0.706,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "streaming-format",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "streaming/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.791,
+        "expected_returncode": 0,
+        "log_bytes": 5105,
+        "log_sha256": "b08eca496ccbda72f7fa26f90b80b96845ebaa54d80b37434a869202bf46b33c",
+        "name": "streaming-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "streaming/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.464,
+        "expected_returncode": 0,
+        "log_bytes": 5106,
+        "log_sha256": "f01677c6077e18bcc576a3c221769601d04bc530aa3726141e90c417f365bb04",
+        "name": "streaming-release-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "streaming/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 0.325,
+        "expected_returncode": 0,
+        "log_bytes": 72,
+        "log_sha256": "22e0df986057b9ba5be07526ac5fb348862a3dedef42108383cc3e088acbb889",
+        "name": "streaming-clippy",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "streaming/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.275,
+        "expected_returncode": 0,
+        "log_bytes": 62,
+        "log_sha256": "2d5694fb348541fae3d68a033b004800c9c79f8f6edb468d5763b1d8f389597a",
+        "name": "streaming-build",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "elapsed_seconds": 2.339,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "product-format",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 205.521,
+        "expected_returncode": 0,
+        "log_bytes": 72415,
+        "log_sha256": "278521e43ece8e9f0d4bfd09bfd2281f646c9b96596763ae7ea6c5b120f42e2a",
+        "name": "product-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 28.942,
+        "expected_returncode": 0,
+        "log_bytes": 72395,
+        "log_sha256": "25a2fff4adf7540a57cff63856bea19cc2cd28111b9fbbb53abaa1ca1e02a262",
+        "name": "product-release-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 1200
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 0.467,
+        "expected_returncode": 0,
+        "log_bytes": 72,
+        "log_sha256": "f591e097f22f91dd5c31fbbf7e587d80c0a4e0ed594f9c9012a544f38c52d926",
+        "name": "product-clippy",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 46.425,
+        "expected_returncode": 0,
+        "log_bytes": 152,
+        "log_sha256": "8faf1dfede4ed6f6026aaffed08dd7bdc4d75912d744b83a0054596764b23a90",
+        "name": "product-build",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 1200
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "product/ffi/Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "elapsed_seconds": 0.58,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "ffi-format",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/ffi/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.23,
+        "expected_returncode": 0,
+        "log_bytes": 383,
+        "log_sha256": "fa468feb357ac7a8da43b35a16a67fa8b8a9a5b0d76de0c645f70f6690088f62",
+        "name": "ffi-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/ffi/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.191,
+        "expected_returncode": 0,
+        "log_bytes": 374,
+        "log_sha256": "19749941333a993b479038baa112fe9a3ffef2f08a6fe3ebe256ae6d3025f4f2",
+        "name": "ffi-release-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "product/ffi/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 0.333,
+        "expected_returncode": 0,
+        "log_bytes": 72,
+        "log_sha256": "22e0df986057b9ba5be07526ac5fb348862a3dedef42108383cc3e088acbb889",
+        "name": "ffi-clippy",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "product/ffi/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.289,
+        "expected_returncode": 0,
+        "log_bytes": 62,
+        "log_sha256": "85c8dbac64ed6a362d668bf3988686e26e947620bb15cfdbe2e999a0ff8261b2",
+        "name": "ffi-build",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "history/Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "elapsed_seconds": 0.79,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "history-format",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "history/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.834,
+        "expected_returncode": 0,
+        "log_bytes": 3694,
+        "log_sha256": "f8bc64432ce9bfa102b1605a9fe3e9ee3ab315205e113578fac29addc9d91dc6",
+        "name": "history-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "history/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.465,
+        "expected_returncode": 0,
+        "log_bytes": 3695,
+        "log_sha256": "0248422bdcb25d2dda769335efda02df4ae1919628449ec4939223591946afe5",
+        "name": "history-release-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "history/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 0.35,
+        "expected_returncode": 0,
+        "log_bytes": 72,
+        "log_sha256": "fecede7c2157efe2f16c8c8b9dce94b0fb4dd384dca8207046c8bf7636eb0ffe",
+        "name": "history-clippy",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "history/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.26,
+        "expected_returncode": 0,
+        "log_bytes": 62,
+        "log_sha256": "0b5fe2277fd2b29cc111b76604c482f8ec516047dbc0954657203c5614f4e4db",
+        "name": "history-build",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "history-app/Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "elapsed_seconds": 2.373,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "history-app-format",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "history-app/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 26.481,
+        "expected_returncode": 0,
+        "log_bytes": 2007,
+        "log_sha256": "4874211c9bd1dbfa64bf3839d648bba67f1e16ad44172943a9ba8a3dd89e8f66",
+        "name": "history-app-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "history-app/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 145.821,
+        "expected_returncode": 0,
+        "log_bytes": 2004,
+        "log_sha256": "e72ac464a87924059a2cfda1e7718485ee408c09410665b0afde43a0370c8024",
+        "name": "history-app-release-tests",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "history-app/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 8.422,
+        "expected_returncode": 0,
+        "log_bytes": 258,
+        "log_sha256": "519999eec1c65ac5699ad3a57559fe5c62a7b7ff214ca6cc9a47ae76a0056a7f",
+        "name": "history-app-clippy",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "build",
+          "--manifest-path",
+          "history-app/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.27,
+        "expected_returncode": 0,
+        "log_bytes": 62,
+        "log_sha256": "85c8dbac64ed6a362d668bf3988686e26e947620bb15cfdbe2e999a0ff8261b2",
+        "name": "history-app-build",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--no-default-features"
+        ],
+        "elapsed_seconds": 231.365,
+        "expected_returncode": 0,
+        "log_bytes": 70136,
+        "log_sha256": "a0071492b8fc8e56663d15580b1930d9ce8c9149440618a4d62e1a00578e80c5",
+        "name": "features-none",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--no-default-features",
+          "--features",
+          "standard"
+        ],
+        "elapsed_seconds": 230.833,
+        "expected_returncode": 0,
+        "log_bytes": 70177,
+        "log_sha256": "b70ce0499a284c6aebe9b5446e49f67226e84adc8cf47c312115b92184aeb65a",
+        "name": "features-standard",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--no-default-features",
+          "--features",
+          "extensions"
+        ],
+        "elapsed_seconds": 235.737,
+        "expected_returncode": 0,
+        "log_bytes": 70577,
+        "log_sha256": "8553f4544961075759ef0a58ce7ebf7c93d70ba87823f29f719a81a50911613f",
+        "name": "features-extensions",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--no-default-features",
+          "--features",
+          "industrial"
+        ],
+        "elapsed_seconds": 237.03,
+        "expected_returncode": 0,
+        "log_bytes": 70844,
+        "log_sha256": "b8d45d5089ba1fcbe6e4a7b7c2dd8df4196e94f000896c81a28b5ff18c040bb9",
+        "name": "features-industrial",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--no-default-features",
+          "--features",
+          "industrial-full"
+        ],
+        "elapsed_seconds": 233.785,
+        "expected_returncode": 0,
+        "log_bytes": 71210,
+        "log_sha256": "05fa5466783b64c5537b1ad30ea354beae6786240965f2d1ce7bd71519d393a9",
+        "name": "features-industrial-full",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_rust",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "product/Cargo.toml",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--no-default-features",
+          "--features",
+          "binary"
+        ],
+        "elapsed_seconds": 229.214,
+        "expected_returncode": 0,
+        "log_bytes": 70173,
+        "log_sha256": "ebe6d7fc6ab1ad3a4b494977fc29fce50a9c0271d2df92513d594b2c390ee271",
+        "name": "features-binary",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_semantics",
+        "command": [
+          "python3",
+          "scripts/semantic_case_runner.py",
+          "--probe",
+          "<repo>/.local-build/target/release/examples/semantic_probe",
+          "--output",
+          "<repo>/.local-build/followup-cleanup/full-product3/native-semantic-cases.json"
+        ],
+        "elapsed_seconds": 0.346,
+        "expected_returncode": 0,
+        "log_bytes": 32,
+        "log_sha256": "cae6da0eb2d7f188484d7507357896aaf4cec215ab9f8324549ce6e7d33c86c9",
+        "name": "native-semantic-cases",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_projection",
+        "command": [
+          "python3",
+          "scripts/validate_semantic_product.py",
+          "--binary",
+          "<repo>/.local-build/target/release/pcap-product",
+          "--output-dir",
+          "<repo>/.local-build/followup-cleanup/full-product3/semantic-parity"
+        ],
+        "elapsed_seconds": 0.553,
+        "expected_returncode": 0,
+        "log_bytes": 627,
+        "log_sha256": "9d8903cafaa78c6318a53a461244a85fb4144e06f3856076baf95baf537d5740",
+        "name": "semantic-projection-parity",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "native_abi",
+        "command": [
+          "python3",
+          "scripts/check_linked_abi.py",
+          "--output",
+          "<repo>/.local-build/followup-cleanup/full-product3/linked-abi",
+          "--library",
+          "<repo>/.local-build/target/release/libpcap_evidence_ffi.so"
+        ],
+        "elapsed_seconds": 1.073,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "linked-abi",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "injected_live_failure",
+        "command": [
+          "/usr/bin/cc",
+          "-std=c11",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-DPCAP_TEST_DENY_SOCKET",
+          "product/live/capture_linux.c",
+          "-o",
+          "/tmp/pcap-c-denial-32towy1n/capture-denied"
+        ],
+        "elapsed_seconds": 0.537,
+        "expected_returncode": 0,
+        "log_bytes": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name": "live-denial-compile",
+        "returncode": 0,
+        "status": "PASS",
+        "timeout_seconds": 600
+      },
+      {
+        "category": "injected_live_failure",
+        "command": [
+          "/tmp/pcap-c-denial-32towy1n/capture-denied",
+          "--allow-live-capture",
+          "--interface",
+          "test0",
+          "--output",
+          "/tmp/pcap-c-denial-32towy1n/must-not-exist.pcap"
+        ],
+        "elapsed_seconds": 0.082,
+        "expected_returncode": 3,
+        "log_bytes": 62,
+        "log_sha256": "1d13287e6f890cd54b06d193e1bb6bc93758dcf47cf1198bf694adcb6c4a3cc5",
+        "name": "live-denial-run",
+        "returncode": 3,
+        "status": "PASS",
+        "timeout_seconds": 600
+      }
+    ],
+    "native_test_totals": {
+      "product-release-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 780
+      },
+      "product-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 780
+      },
+      "root-release-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 294
+      },
+      "root-tests": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 294
+      }
+    },
+    "new_native_selectors": {
+      "deep::bgp_import::source_event_construction_tests::contexts_and_cuts_cannot_cross_source_identity": {
+        "debug": "PASS",
+        "release": "PASS"
+      },
+      "deep::bgp_import::source_event_construction_tests::enclosing_labels_use_raw_source_cap_and_refuse_invalid_identities": {
+        "debug": "PASS",
+        "release": "PASS"
+      },
+      "deep::bgp_import::source_event_construction_tests::explicit_inert_occurrence_preserves_refined_context_and_reference": {
+        "debug": "PASS",
+        "release": "PASS"
+      },
+      "deep::bgp_import::source_event_construction_tests::native_effects_preserve_reducer_decision_and_refuse_foreign_source": {
+        "debug": "PASS",
+        "release": "PASS"
+      },
+      "imported_change_classification_preserves_difference_and_exact_effect_witnesses": {
+        "debug": "PASS",
+        "release": "PASS"
+      },
+      "imported_scope_inventory_bounds_many_irrelevant_scope_scans_at_public_consumers": {
+        "debug": "PASS",
+        "release": "PASS"
+      }
+    },
+    "raw_summary_sha256": "61b4da37bfc89541c5021499660de0d89a4e5292b755b5dbcfa184bb1e55ab6a",
+    "status": "PASS"
+  },
+  "public_samples": {
+    "comparisons": [
+      {
+        "bundle_bytes": 156868,
+        "bundle_sha256": "47baa3b15bb8b24666f1fe31934f97cdc054e0b6cf321eeb8a703ec496b10ab3",
+        "bundle_verification": "PASS",
+        "compared_observations": 512,
+        "comparison_counts": {
+          "agreement": 2048,
+          "disagreement": 0,
+          "not_comparable": 3584
+        },
+        "comparison_sha256": "fe5d0fc93f3bb0e7f51ef7eaa2fdd2365857517e995a7cd0cbca75a76b773247",
+        "coverage": {
+          "count_unit": "rows_except_records_unknown_mrt_record_time_and_timestamp_regressions",
+          "observations": "0",
+          "opaque": "0",
+          "quarantined": "510",
+          "records": "512",
+          "rejected": "0",
+          "route_free": "512",
+          "rows": "512",
+          "selected": "512",
+          "timestamp_regressions": "0",
+          "unknown_asn": "0",
+          "unknown_mrt_record_time": "0",
+          "unknown_time": "0",
+          "unsupported": "0",
+          "witnesses_truncated": "446"
+        },
+        "first_observed_disagreement": null,
+        "independent_header_witness_sha256": "ce48b60049ce04f4bcc5cee009aa414dd07759823bb0a4188a4f5c340014ce25",
+        "independent_scope": "MRT common headers, BGP4MP message type (UPDATE sample) or IPv4-unicast RIB entry boundaries (RIB sample) only; no attribute/NLRI/reducer or normative oracle",
+        "interpretation_sha256": "b3bc06e627f1a5dcfd7ea127d618cdf0c43618d4dbc757c013173a597cdccca5",
+        "label": "current",
+        "native_partition": null,
+        "normalization": {
+          "config_sha256": "57111d29f74129fdbbb23f42361a78e65060e4f7231da641d44ad157eea98833",
+          "profile": "bgp-source-fields-v1"
+        },
+        "producer": {
+          "adapter_version": "3",
+          "command": [],
+          "id": "pcap-evidence-native",
+          "origin": "native_evidence",
+          "version": "evidence-row.v1"
+        },
+        "source": {
+          "bytes": "78761",
+          "sha256": "bb9fea975c43fa47d6b3197bd5a8e5da66a4adc9e49a449a3d2759e9361ff0d6"
+        }
+      },
+      {
+        "bundle_bytes": 37754,
+        "bundle_sha256": "42d11455fec90cdf07faf40a1ac889f7c20fb408938e974c04a69cf64b2d1eb0",
+        "bundle_verification": "PASS",
+        "compared_observations": 64,
+        "comparison_counts": {
+          "agreement": 256,
+          "disagreement": 0,
+          "not_comparable": 696
+        },
+        "comparison_sha256": "a9e494671599941aded68a87cb9cb336409769bf8246c72db9f75c1eb975c9d0",
+        "coverage": {
+          "count_unit": "rows_except_records_unknown_mrt_record_time_and_timestamp_regressions",
+          "observations": "828",
+          "opaque": "0",
+          "quarantined": "0",
+          "records": "128",
+          "rejected": "0",
+          "route_free": "97",
+          "rows": "925",
+          "selected": "925",
+          "timestamp_regressions": "0",
+          "unknown_asn": "0",
+          "unknown_mrt_record_time": "0",
+          "unknown_time": "0",
+          "unsupported": "96",
+          "witnesses_truncated": "32"
+        },
+        "first_observed_disagreement": null,
+        "independent_header_witness_sha256": "756c53ab1715764611ec8081611fb8e04abb033e5bd532d35c0c9cce54d864b3",
+        "independent_scope": "MRT common headers, BGP4MP message type (UPDATE sample) or IPv4-unicast RIB entry boundaries (RIB sample) only; no attribute/NLRI/reducer or normative oracle",
+        "interpretation_sha256": "4bfcf8b106a9e67ceea6b5c0c3d37b4c82bf0407e55aa2570c772494ce1695d0",
+        "label": "rib-current-partition64",
+        "native_partition": {
+          "row_end": "64",
+          "row_start": "0",
+          "schema": "pcap-evidence.bgp.interpretation-partition.v1",
+          "source_ordinal": "0",
+          "source_rows": "925",
+          "whole_export_verified": true
+        },
+        "normalization": {
+          "config_sha256": "57111d29f74129fdbbb23f42361a78e65060e4f7231da641d44ad157eea98833",
+          "profile": "bgp-source-fields-v1"
+        },
+        "producer": {
+          "adapter_version": "3",
+          "command": [],
+          "id": "pcap-evidence-native",
+          "origin": "native_evidence",
+          "version": "evidence-row.v1"
+        },
+        "source": {
+          "bytes": "56360",
+          "sha256": "c61883d7293a9bd6c734f7d1c2da6dcccda570b72df58b713f10922052d1d993"
+        }
+      }
+    ],
+    "executions": {
+      "binary_sha256": "f2aa926eac00698d7dc30aa28b3d7f41428d4135d1bfcc7722612fc6da404a8e",
+      "byte_parity": [
+        {
+          "baseline": "import-baseline/bgp.mrt-stream",
+          "baseline_sha256": "cd565cf6a8bd9e0e63db7e96241f8c98c6dfaea6d19c95e267ff69c93c10261d",
+          "byte_identical": true,
+          "current": "import-current/bgp.mrt-stream",
+          "current_sha256": "cd565cf6a8bd9e0e63db7e96241f8c98c6dfaea6d19c95e267ff69c93c10261d"
+        },
+        {
+          "baseline": "prefix-import-baseline/bgp.mrt-stream",
+          "baseline_sha256": "7737b465c8c671ec38bbf678504f8bd50e6e223bdffdcfbafc38aaf101829986",
+          "byte_identical": true,
+          "current": "prefix-import-current/bgp.mrt-stream",
+          "current_sha256": "7737b465c8c671ec38bbf678504f8bd50e6e223bdffdcfbafc38aaf101829986"
+        },
+        {
+          "baseline": "prefix-chronology-baseline2/evidence.ndjson",
+          "baseline_sha256": "5efcf3f36830883df92460b743accfc030d42b7743132abfc736289f0a6884d7",
+          "byte_identical": true,
+          "current": "prefix-chronology-current/evidence.ndjson",
+          "current_sha256": "5efcf3f36830883df92460b743accfc030d42b7743132abfc736289f0a6884d7"
+        },
+        {
+          "baseline": "prefix-chronology-baseline2/manifest.json",
+          "baseline_sha256": "8d62c8506a367ddd4ebc45f188e13c3a04d14d9516f6502a028ff6d47f914947",
+          "byte_identical": true,
+          "current": "prefix-chronology-current/manifest.json",
+          "current_sha256": "8d62c8506a367ddd4ebc45f188e13c3a04d14d9516f6502a028ff6d47f914947"
+        },
+        {
+          "baseline": "rib-import-baseline/bgp.mrt",
+          "baseline_sha256": "e9bc54c59ab4586b7501bf33d1ec5f063d825c56899360274bcd0d95119a0345",
+          "byte_identical": true,
+          "current": "rib-import-current/bgp.mrt",
+          "current_sha256": "e9bc54c59ab4586b7501bf33d1ec5f063d825c56899360274bcd0d95119a0345"
+        }
+      ],
+      "continuation": "Only RIB comparison rerun using existing explicit 64-row partition; first seven successful executions retained; full chronology verification remains required",
+      "initial_failed_attempt_sha256": "09636b935b8abeca07b4435c9e4b551e6c6e48d6a7a834f8c6f3128754e97a03",
+      "runner_sha256": "7747ac6920d945daa5eb7007ddb6d620e30006c93a3347738d8bd043a1bc4431",
+      "runs": [
+        {
+          "command": [
+            ".local-build/target/release/pcap-depth",
+            "bgp",
+            "import-mrt-stream",
+            ".local-build/followup-cleanup/public-sample/updates.mrt",
+            "--workspace",
+            ".local-build/followup-cleanup/public-sample/import-current",
+            "--source-id",
+            "ripe-ris-rrc04",
+            "--checkpoint",
+            "updates-20251001-0000",
+            "--max-source-bytes",
+            "4194304",
+            "--max-store-bytes",
+            "8388608",
+            "--max-record-bytes",
+            "1048576",
+            "--max-records",
+            "20000",
+            "--max-work",
+            "67108864"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "name": "import-current",
+          "outer_elapsed_seconds": 0.37964209308847785,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 3272,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "cc1b9811940ddb014b858e1faac243f18df52364caf13e67cfd7da6678221fc0",
+          "time_wall_clock": "0:00.28",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            ".local-build/target/release/pcap-depth",
+            "bgp",
+            "import-mrt-stream",
+            ".local-build/followup-cleanup/public-sample/prefix-512.mrt",
+            "--workspace",
+            ".local-build/followup-cleanup/public-sample/prefix-import-current",
+            "--source-id",
+            "ripe-ris-rrc04-prefix512",
+            "--checkpoint",
+            "updates-20251001-0000",
+            "--max-source-bytes",
+            "1048576",
+            "--max-store-bytes",
+            "2097152",
+            "--max-record-bytes",
+            "65536",
+            "--max-records",
+            "512",
+            "--max-work",
+            "67108864"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "name": "prefix-import-current",
+          "outer_elapsed_seconds": 0.12119530700147152,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 3244,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "e1ad34a320e837d11cf28b3411d707e858d516ef95045aa70b3d869dd44da448",
+          "time_wall_clock": "0:00.04",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            ".local-build/target/release/pcap-depth",
+            "bgp",
+            "chronology",
+            ".local-build/followup-cleanup/public-sample/prefix-import-current/bgp.mrt-stream",
+            "--workspace",
+            ".local-build/followup-cleanup/public-sample/prefix-chronology-current",
+            "--max-source-bytes",
+            "1048576",
+            "--max-store-bytes",
+            "2097152",
+            "--max-record-bytes",
+            "65536",
+            "--max-records",
+            "512",
+            "--max-work",
+            "1073741824",
+            "--max-output-bytes",
+            "8388608"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "name": "prefix-chronology-current",
+          "outer_elapsed_seconds": 0.21747814398258924,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 4924,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "949ae28c1cfb2c85466217c9d47d596ba939caf2afbca806f2bb07d90f6e57ad",
+          "time_wall_clock": "0:00.13",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            "python3",
+            "<repo>/.local-build/followup-cleanup/compare-public-prefix.py",
+            "prefix-chronology-current",
+            "current",
+            "bundle"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 24112,
+          "log_sha256": "94a19c057e9e8b17147565439cca93edc70d2a25abad9729e9d0ba9b9312173c",
+          "name": "compare-current",
+          "outer_elapsed_seconds": 2.6324587480630726,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 53104,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "f77b6d7d68c4859a57f18d8efda72fd6d31d725b8217e77b5323c080e3263b59",
+          "time_wall_clock": "0:02.55",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            ".local-build/target/release/pcap-depth",
+            "bgp",
+            "import-mrt",
+            ".local-build/followup-cleanup/public-sample/rib-prefix-128.mrt",
+            "--workspace",
+            ".local-build/followup-cleanup/public-sample/rib-import-current",
+            "--source-id",
+            "ripe-ris-rrc04-ribprefix128",
+            "--checkpoint",
+            "bview-20251001-0000",
+            "--max-mrt-bytes",
+            "1048576",
+            "--max-journal-bytes",
+            "2097152"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "name": "rib-import-current",
+          "outer_elapsed_seconds": 0.6110423010541126,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 31004,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "e505647f2cf3ffc9e6ddf984f89c6e084806cdfad3d8216b9e53916f845cd11e",
+          "time_wall_clock": "0:00.52",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            "<repo>/.local-build/target/release/pcap-depth",
+            "bgp",
+            "import-mrt-stream",
+            ".local-build/followup-cleanup/public-sample/rib-prefix-128.mrt",
+            "--workspace",
+            ".local-build/followup-cleanup/public-sample/rib-stream-import-current",
+            "--source-id",
+            "ripe-ris-rrc04-ribprefix128",
+            "--checkpoint",
+            "bview-20251001-0000",
+            "--max-source-bytes",
+            "1048576",
+            "--max-store-bytes",
+            "2097152",
+            "--max-record-bytes",
+            "65536",
+            "--max-records",
+            "128",
+            "--max-work",
+            "1073741824"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "name": "rib-stream-import-current",
+          "outer_elapsed_seconds": 0.13012492994312197,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 3484,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "ca4433712dd0d5fa4125345cdab9aafedf00eb238a15c8814b8b60d99cd9361d",
+          "time_wall_clock": "0:00.04",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            "<repo>/.local-build/target/release/pcap-depth",
+            "bgp",
+            "chronology",
+            ".local-build/followup-cleanup/public-sample/rib-stream-import-current/bgp.mrt-stream",
+            "--workspace",
+            ".local-build/followup-cleanup/public-sample/rib-chronology-current",
+            "--max-source-bytes",
+            "1048576",
+            "--max-store-bytes",
+            "2097152",
+            "--max-record-bytes",
+            "65536",
+            "--max-records",
+            "128",
+            "--max-work",
+            "1073741824",
+            "--max-output-bytes",
+            "8388608"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "name": "rib-chronology-current",
+          "outer_elapsed_seconds": 0.4905549370450899,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 4924,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "6c0a5209edca49da78e2dce6960b255c4180c07831eb4ebc773888ef23ef4399",
+          "time_wall_clock": "0:00.40",
+          "timeout_seconds": 180
+        },
+        {
+          "command": [
+            "python3",
+            "<repo>/.local-build/followup-cleanup/compare-public-rib.py",
+            "rib-chronology-current",
+            "rib-current-partition64",
+            "bundle"
+          ],
+          "exit_code": 0,
+          "expected_exit_code": 0,
+          "log_bytes": 1137,
+          "log_sha256": "167ca05ed6bcaf5dc8d68ef3fad9120e3855959522d3f324f949973b7b4e384b",
+          "name": "rib-compare-current-partition64",
+          "outer_elapsed_seconds": 1.3986751429038122,
+          "output_limit_bytes": 8388608,
+          "process_max_rss_kib": 32184,
+          "rss_method": "GNU time -v maximum resident set size for invoked command; not cgroup aggregate or representative bound",
+          "status": "PASS",
+          "terminal_reason": null,
+          "time_sha256": "f6b4797b205ae33bd9fe1f91677c6f9c17d51f5278636f5b7c661838618ad86c",
+          "time_wall_clock": "0:01.32",
+          "timeout_seconds": 180
+        }
+      ],
+      "source_identity": "1b47b69cdddebf2e20d50a925088b328265cd5d3a39d6c9fe02449eed084645f",
+      "source_unchanged": true,
+      "status": "PASS"
+    },
+    "rib_source_prefix": {
+      "compressed_fragment_bytes": 524288,
+      "compressed_fragment_sha256": "a6bd90ce27e6657471bbf9d1bfba716c709ba632322d7fa52c4e05a90f3c0b35",
+      "compressed_read_limit": 524288,
+      "content_range": "bytes 0-524287/64658799",
+      "decompression_limit": 2097152,
+      "derivation": "first128 complete MRT records in bounded decompression of retained compressed prefix",
+      "derived_source_bytes": 56360,
+      "derived_source_sha256": "c61883d7293a9bd6c734f7d1c2da6dcccda570b72df58b713f10922052d1d993",
+      "etag": "\"68dc6f9d-3da9d6f\"",
+      "full_archive_acquired": false,
+      "gzip_trailer_verified": false,
+      "http_status": 206,
+      "original_full_compressed_digest": null,
+      "record_count": 128,
+      "record_types": {
+        "(13, 1)": 1,
+        "(13, 2)": 127
+      },
+      "response_declared_bytes": "524288",
+      "scope": "one partial public BVIEW source, one collector/date; full parent identity unavailable; not representative corpus qualification",
+      "source_authenticated": false,
+      "source_url": "https://data.ris.ripe.net/rrc04/2025.10/bview.20251001.0000.gz"
+    },
+    "update_prefix": {
+      "derivation": {
+        "kind": "record_prefix",
+        "original_record_end": 512,
+        "original_record_start": 0,
+        "selection_claim": "first512 complete record bytes, no representative coverage claim",
+        "source_changed": true,
+        "source_end": 78761,
+        "source_start": 0
+      },
+      "derived": {
+        "record_count": 512,
+        "sha256": "bb9fea975c43fa47d6b3197bd5a8e5da66a4adc9e49a449a3d2759e9361ff0d6",
+        "source_bytes": 78761
+      },
+      "original": {
+        "compressed_bytes": 448369,
+        "compressed_sha256": "0e203b7107f849b2848b459f4e51c79e3743fa4f13c1115089c20f25bfcb0a60",
+        "download_byte_limit": 2097152,
+        "expanded_byte_limit": 16777216,
+        "record_count": 16799,
+        "record_types": {
+          "(16, 0)": 25,
+          "(16, 4)": 16774
+        },
+        "scope": "one public UPDATE file, one collector/date; not representative corpus qualification",
+        "source_bytes": 2543259,
+        "source_sha256": "95e3e3d8ca15724bbcd808b342eea03da58f7542dc341c6cd0bf1e545d8c3095",
+        "source_url": "https://data.ris.ripe.net/rrc04/2025.10/updates.20251001.0000.gz"
+      }
+    },
+    "update_source": {
+      "compressed_bytes": 448369,
+      "compressed_sha256": "0e203b7107f849b2848b459f4e51c79e3743fa4f13c1115089c20f25bfcb0a60",
+      "download_byte_limit": 2097152,
+      "expanded_byte_limit": 16777216,
+      "record_count": 16799,
+      "record_types": {
+        "(16, 0)": 25,
+        "(16, 4)": 16774
+      },
+      "scope": "one public UPDATE file, one collector/date; not representative corpus qualification",
+      "source_bytes": 2543259,
+      "source_sha256": "95e3e3d8ca15724bbcd808b342eea03da58f7542dc341c6cd0bf1e545d8c3095",
+      "source_url": "https://data.ris.ripe.net/rrc04/2025.10/updates.20251001.0000.gz"
+    }
+  },
+  "remaining_qualification": [
+    "representative multi-collector/date/AFI corpus and route-semantic external parity",
+    "sustained fuzzing and full normative conformance",
+    "aggregate byte-copy/CPU/RSS and stable throughput distributions",
+    "external strict-keyset compatibility for additive change field",
+    "caller-clocked GR/LLGR timer assessment"
+  ],
+  "retained_adverse_attempts": [
+    {
+      "label": "old-scale",
+      "launch_sha256": "504c30834a7f52d50096602e40bc650ef4e13439e7f83719a1e0caea10b7fefb",
+      "log_sha256": "7d10c8a315c10ce208355f0c80bd48fa6170781adc2ef3d0c15db8006fd77f2a",
+      "scope": "diagnostic fixture/compiler/preflight attempt before intended analysis comparison; not analysis go-red proof"
+    },
+    {
+      "label": "old-scale2",
+      "launch_sha256": "709ef21687bd094dd55e97e470dced67ec12c65a33903644a2ffb35392621893",
+      "log_sha256": "6dedab4819ae20454e1ab3bbf545a247295d137ea57655e0f6491660724850df",
+      "scope": "diagnostic fixture/compiler/preflight attempt before intended analysis comparison; not analysis go-red proof"
+    },
+    {
+      "label": "old-scale3",
+      "launch_sha256": "79c75f1ed7ecfea64fe0865262971c3dd1d961704736704f6a15c5f9cc6368fd",
+      "log_sha256": "3352c98ea26175c5592910888898d4392b87bef9857f856e6ab80c3c262a48e7",
+      "scope": "diagnostic fixture/compiler/preflight attempt before intended analysis comparison; not analysis go-red proof"
+    },
+    {
+      "label": "old-scale4",
+      "launch_sha256": "8d3b0f488cba5c9d44214be6c524a83c98bca3d2cc135e68d770604bef2c4ecd",
+      "log_sha256": "980186567ecd43acbcb79d65d109576a1a68312dad4da5865205a964b411eaaf",
+      "scope": "diagnostic fixture/compiler/preflight attempt before intended analysis comparison; not analysis go-red proof"
+    },
+    {
+      "label": "old16",
+      "launch_sha256": "d85e522cfc826845b2d42cce5be521ad032c021b00a3ae0ca21e31e001a05967",
+      "log_sha256": "5f25bf406b0c2300339c9701c99e63810853fa2a5124d3e186f921e3f9251c2e",
+      "scope": "diagnostic fixture/compiler/preflight attempt before intended analysis comparison; not analysis go-red proof"
+    },
+    {
+      "label": "old8peers",
+      "launch_sha256": "ed8c47abd223a808d60850adba540327138e13540659696c54785b4fd46dcbb7",
+      "log_sha256": "b75099dcc2ee28db17a247d92f2d80a26a4ba4c0b58f9318a5c18b5f3e9203e7",
+      "scope": "diagnostic fixture/compiler/preflight attempt before intended analysis comparison; not analysis go-red proof"
+    },
+    {
+      "label": "final-release-precompile-first-attempt",
+      "launch_sha256": "ab811563d17680c8aed17e8fcaee6067d2f6bf4f2b4af18fd6e93d0ccc98bda0",
+      "scope": "local disk monitor aborted compilation after Cargo temporary-object ENOENT race; fixed bounded retry only for that owned target-tree race; other measurement errors remain fail-closed",
+      "source_identity": "1b47b69cdddebf2e20d50a925088b328265cd5d3a39d6c9fe02449eed084645f"
+    },
+    {
+      "label": "current-samples-initial-attempt",
+      "launch_sha256": "35b5d05e84eb2ab02c33697bc3feab6f536fec02d4a13466c88d50caff613c2a",
+      "log_sha256": "7ec816218e81ffbd249dd2866ee15bb6f8d544778c8a1b32cd6037dbd0e09c72",
+      "receipt_sha256": "09636b935b8abeca07b4435c9e4b551e6c6e48d6a7a834f8c6f3128754e97a03",
+      "scope": "Seven sample executions passed; unpartitioned RIB normalized export refused JSON-tree budget before comparison. Retained failure; same-source continuation uses existing 64-row partition with complete chronology verification. No budget was raised."
+    },
+    {
+      "actual_gate_count": 24,
+      "failed_gates": [
+        {
+          "elapsed_seconds": 1200.008,
+          "name": "product-release-tests",
+          "reason": "timeout",
+          "returncode": -9,
+          "status": "FAIL"
+        },
+        {
+          "elapsed_seconds": 12.992,
+          "name": "product-clippy",
+          "returncode": 101,
+          "status": "FAIL"
+        },
+        {
+          "elapsed_seconds": 18.088,
+          "name": "product-build",
+          "reason": "interrupted",
+          "returncode": -9,
+          "status": "FAIL"
+        }
+      ],
+      "label": "full-product2",
+      "raw_receipt_sha256": "5c467c2dc01b3bcec971df8b60d2a3c618e28e980bc2824b34684020bdf24a1d",
+      "scope": "cold release timeout; six redundant scope borrows refused by Clippy; subsequent build intentionally interrupted for source repair; no release-test success inferred",
+      "source_identity": "e93a3e0f85aea9fac574a420a9493db1456a73944a1aca77841e3e75473808d8",
+      "source_unchanged": true,
+      "status": "FAIL"
+    },
+    {
+      "label": "full-product-first-attempt",
+      "receipt_sha256": "f2bd1fe39aca524e717e1a2e992d8f93774e3630c3c7b1804e8aaee863232b1a",
+      "scope": "package closure refused unindexed new source module; native gates not reached; fixed by indexing files without source change",
+      "status": "FAIL"
+    },
+    {
+      "label": "public-chronology-baseline",
+      "launch_sha256": "c647e32d044a33398debcd89b8b88914fd74694952077f56f41f1117dc0b80c1",
+      "scope": "baseline chronology with configured 64 MiB work limit refused admission; retained workspace not completed manifest"
+    },
+    {
+      "label": "public-prefix-chronology-baseline",
+      "launch_sha256": "13b27aa5389b91cc34a3a1cc01c7ea78341d65939022a94fcab863e688f918af",
+      "scope": "baseline chronology with configured 64 MiB work limit refused admission; retained workspace not completed manifest"
+    }
+  ],
+  "root": {
+    "gate_count": 14,
+    "gates": [
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/static_check.py"
+        ],
+        "elapsed_seconds": 1.387,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 272,
+        "log_sha256": "48b52fe7c53e2e8ddff3e96d70c9c637b6e38a39094215afbe63307c6d32b258",
+        "name": "root-01",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/make_fixtures.py",
+          "--check"
+        ],
+        "elapsed_seconds": 0.181,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 46,
+        "log_sha256": "b406118c8379f376397c8152346e922305c7aaaf16d9b0ef56d362e44849bfac",
+        "name": "root-02",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/reference_verify.py"
+        ],
+        "elapsed_seconds": 0.139,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 421,
+        "log_sha256": "d5fe748d5d57b1798b54c55f2e5d994fdc840dd5eeb5ab49b14eef4092fef452",
+        "name": "root-03",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/test_oracle.py"
+        ],
+        "elapsed_seconds": 0.184,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 1278,
+        "log_sha256": "0c2f002a84d0057f1cf7cfe4246e6fc917db855f4a6cacca64d4ee1f93d39567",
+        "name": "root-04",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "rustc",
+          "--version"
+        ],
+        "elapsed_seconds": 0.163,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 37,
+        "log_sha256": "00f2a9b9ddefa2f0da080f97eec124278edd13db5e150855e9d2f8bfddbeab21",
+        "name": "root-05",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "cargo",
+          "check",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.274,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 73,
+        "log_sha256": "f2daad1867e5c945b60423a3bd45483cd3424d48e8b4b75249d4b61d12faf87c",
+        "name": "root-06",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 2.869,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 25066,
+        "log_sha256": "8e36695f2dbe8d8a80a1cf6b4f0a18a4c17b566b2e813a476fcbc0faaaa46d18",
+        "name": "root-07",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--offline",
+          "--release",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 1.048,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 25097,
+        "log_sha256": "0d1e8bb15f464d6e788a37cba82f03ff34aeec0ef02b64ea88df2043579323f0",
+        "name": "root-08",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "cargo",
+          "clippy",
+          "--locked",
+          "--offline",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "elapsed_seconds": 0.438,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 73,
+        "log_sha256": "c38f61a07bd650cc6618ad68e7719ee252ad03f8e9c18ada77b5f846db67101f",
+        "name": "root-09",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--offline",
+          "--all-targets"
+        ],
+        "elapsed_seconds": 0.273,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 73,
+        "log_sha256": "8062cd0f24693e9c5d9a6416dafaeef99413fe3a0abdf3a21c89e42ecf12d10c",
+        "name": "root-10",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/semantic_case_runner.py",
+          "--probe",
+          "<repo>/.local-build/target/debug/examples/semantic_probe",
+          "--output",
+          ".local-build/followup-cleanup/native-semantic-cases.json"
+        ],
+        "elapsed_seconds": 0.397,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 33,
+        "log_sha256": "3841001a20a23049ebb804dd861330bc492173e96b4d2355fd36f7e2988b9894",
+        "name": "root-11",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/check_cli.py",
+          "--binary",
+          "<repo>/.local-build/target/debug/pcap-evidence"
+        ],
+        "elapsed_seconds": 0.372,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 192,
+        "log_sha256": "ef5da8568b933fd553a11f4b6d869573e8447c5370274ce1a48f2d2a119be645",
+        "name": "root-12",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/check_hardening_cli.py",
+          "--binary",
+          "<repo>/.local-build/target/debug/pcap-evidence"
+        ],
+        "elapsed_seconds": 0.671,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 158,
+        "log_sha256": "0487537851cd1c59155db976e7c33f434a612c70a75184758f20c06403ed621c",
+        "name": "root-13",
+        "status": "PASS",
+        "timeout_seconds": 300
+      },
+      {
+        "captured_log_encoding": "UTF-8 stdout + NUL + stderr after validator path sanitization",
+        "command": [
+          "python",
+          "scripts/mutation_check.py"
+        ],
+        "elapsed_seconds": 37.062,
+        "exit_code": 0,
+        "expected_exit_code": 0,
+        "log_bytes": 2566,
+        "log_sha256": "84c9d8398c6207cc0fc66356d06a88505490dbe6aa25ed5ede1ccb1f76573afd",
+        "name": "root-14",
+        "status": "PASS",
+        "timeout_seconds": 300
+      }
+    ],
+    "native_test_totals": {
+      "debug": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 294
+      },
+      "release": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 294
+      }
+    },
+    "raw_receipt_sha256": "f92918929e58157ade491aeb767fd2d02c61bfd05eff89c0453f5f5d5ce70f85",
+    "status": "PASS"
+  },
+  "schema": "pcap-evidence.pr-followup-validation.v1",
+  "scope": "offline Linux assembled source review, all configured local product/root gates, and finite source-bound public samples",
+  "source": {
+    "file_count": 744,
+    "inventory_path": ".local-build/followup-cleanup/final-assembled-source.json",
+    "inventory_sha256": "b6df783a1939901fdd3811ce29643669c475f674b198ca7d1fc1f546cc953e84",
+    "source_identity": "1b47b69cdddebf2e20d50a925088b328265cd5d3a39d6c9fe02449eed084645f"
+  },
+  "source_authenticated": false,
+  "status": "PASS_LOCAL_SOURCE_BOUND",
+  "utc": "2026-10-09T20:21:10.402577+00:00",
+  "wisdom": {
+    "current_remote_default_branch_blob": "e127c28d59fc3880adc28f38f18d99e15e853702",
+    "current_remote_matches_local": true,
+    "local_git_blob": "e127c28d59fc3880adc28f38f18d99e15e853702",
+    "source_sha256": "eefd627cc71f4548dd682ece8a9fa3fa8f121d88fd9f593e6d191337522676ca",
+    "verified_utc": "2026-10-09T20:08:48.765204+00:00",
+    "version": "1.15.0"
+  }
+}

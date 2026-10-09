@@ -26,3 +26,5 @@ __pycache__/
 /evidence/product-validation-dnp3-file-reconciliation-main/
 /evidence/product-validation-bgp-main/
 /evidence/product-validation-bgp-metadata-main/
+/.local-tooling/
+/.local-build/

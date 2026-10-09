@@ -10,11 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import sqlite3
 import tempfile
 from .comparison import canonical
-from tools.evidence.common import digest_file
 
 SCHEMA="pcap-evidence.history.v1"
 
@@ -77,6 +77,9 @@ def _chunks(root):
             if c["file"]!=f"{i:016x}.chunk" or type(c["bytes"])is not int or not 1<=c["bytes"]<=16*1024*1024:raise ValueError("invalid ordered chunk")
             yield c,line
 
+def _check_archive_identity(m,h,ih,total,count,index_bytes):
+    if str(total)!=m["source_bytes"]or h.hexdigest()!=m["source_sha256"]or str(count)!=m["chunks_count"]or ih.hexdigest()!=m["index_sha256"]or str(index_bytes)!=m["index_bytes"]:raise ValueError("source/index identity mismatch")
+
 def verify_archive(directory):
     root=Path(directory).resolve(strict=True);m=_manifest(root)
     h=hashlib.sha256();ih=hashlib.sha256();total=count=index_bytes=0
@@ -86,18 +89,31 @@ def verify_archive(directory):
         with p.open("rb")as f:raw=f.read(16*1024*1024+1)
         if len(raw)!=c["bytes"]or hashlib.sha256(raw).hexdigest()!=c["sha256"]:raise ValueError("chunk identity mismatch")
         total+=len(raw);h.update(raw);ih.update(line);count+=1;index_bytes+=len(line)
-    if str(total)!=m["source_bytes"]or h.hexdigest()!=m["source_sha256"]or str(count)!=m["chunks_count"]or ih.hexdigest()!=m["index_sha256"]or str(index_bytes)!=m["index_bytes"]:raise ValueError("source/index identity mismatch")
+    _check_archive_identity(m,h,ih,total,count,index_bytes)
     return {"status":"PASS","source_bytes":str(total),"source_sha256":h.hexdigest(),"endpoint_semantics_verified":False}
 
 def replay_archive(directory, output):
-    proof=verify_archive(directory);root=Path(directory)
-    for c,_ in _chunks(root):
+    root=Path(directory).resolve(strict=True);m=_manifest(root)
+    verify_archive(root)
+    # The preflight is diagnostic. Only the bytes actually emitted can seal
+    # this replay; a self-consistently replaced chunk/index is still a change.
+    h=hashlib.sha256();ih=hashlib.sha256();total=count=index_bytes=0
+    for c,line in _chunks(root):
         p=root/c["file"]
+        if p.is_symlink():raise ValueError("symlink chunk")
         with p.open("rb")as f:raw=f.read(c["bytes"]+1)
         if len(raw)!=c["bytes"]or hashlib.sha256(raw).hexdigest()!=c["sha256"]:raise ValueError("archive changed after verification")
         from .tlv import write_all
         write_all(output,raw)
-    return proof
+        h.update(raw);ih.update(line);total+=len(raw);count+=1;index_bytes+=len(line)
+    _check_archive_identity(m,h,ih,total,count,index_bytes)
+    if _manifest(root)!=m:raise ValueError("archive manifest changed during replay")
+    return {"status":"PASS","source_bytes":str(total),"source_sha256":h.hexdigest(),"endpoint_semantics_verified":False}
+
+def _source_stamp(file):
+    s=os.fstat(file.fileno())
+    if not stat.S_ISREG(s.st_mode):raise ValueError("regular input required")
+    return (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
 
 class StreamStore:
     """Disk-backed unwrapped intervals, keyed by explicit analysis hypotheses.
@@ -114,39 +130,63 @@ class StreamStore:
         elif not self.path.is_file():raise FileNotFoundError(self.path)
         self.db=sqlite3.connect(self.path);self.db.execute("PRAGMA trusted_schema=OFF");self.db.execute("PRAGMA temp_store=FILE");self.db.execute("PRAGMA cache_size=-8192")
         self.db.execute("PRAGMA max_page_count="+str(disk_budget//4096))
-        identity=digest_file(self.source)
-        if create:
-            self.db.executescript("CREATE TABLE meta(k TEXT PRIMARY KEY,v TEXT); CREATE TABLE segments(id INTEGER PRIMARY KEY,scope TEXT NOT NULL,direction INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,source_offset INTEGER NOT NULL,bytes INTEGER NOT NULL,sha256 TEXT NOT NULL); CREATE INDEX intervals ON segments(scope,direction,start,end);")
-            self.db.executemany("INSERT INTO meta VALUES (?,?)",[("schema","stream-hypotheses-v1"),("source_sha256",identity),("source_bytes",str(self.source.stat().st_size))]);self.db.commit()
-        m=dict(self.db.execute("SELECT k,v FROM meta"))
-        if m.get("schema")!="stream-hypotheses-v1"or m.get("source_sha256")!=identity or m.get("source_bytes")!=str(self.source.stat().st_size):self.db.close();raise ValueError("stream store source mismatch")
+        self._source=None
+        try:
+            self._source=self.source.open("rb")
+            self._stamp=_source_stamp(self._source)
+            h=hashlib.sha256()
+            while raw:=self._source.read(4*1024*1024):h.update(raw)
+            self._check_source()
+            identity=h.hexdigest()
+            if create:
+                self.db.executescript("CREATE TABLE meta(k TEXT PRIMARY KEY,v TEXT); CREATE TABLE segments(id INTEGER PRIMARY KEY,scope TEXT NOT NULL,direction INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,source_offset INTEGER NOT NULL,bytes INTEGER NOT NULL,sha256 TEXT NOT NULL); CREATE INDEX intervals ON segments(scope,direction,start,end);")
+                self.db.executemany("INSERT INTO meta VALUES (?,?)",[("schema","stream-hypotheses-v1"),("source_sha256",identity),("source_bytes",str(self._stamp[2]))]);self.db.commit()
+            m=dict(self.db.execute("SELECT k,v FROM meta"))
+            if m.get("schema")!="stream-hypotheses-v1"or m.get("source_sha256")!=identity or m.get("source_bytes")!=str(self._stamp[2]):raise ValueError("stream store source mismatch")
+            self._check_source()
+        except BaseException:
+            if self._source is not None:self._source.close()
+            self.db.close();raise
         self.identity=identity
-    def close(self):self.db.close()
+    def _check_source(self):
+        # Supported local filesystems expose writes through mtime/ctime and
+        # stable inode identity. Hold the descriptor for the full store lifetime.
+        s=self.source.stat()
+        if _source_stamp(self._source)!=self._stamp or (s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns,s.st_ctime_ns)!=self._stamp:raise ValueError("stream store source changed")
+    def close(self):
+        try:self.db.close()
+        finally:self._source.close()
     def append(self,scope,direction,start,source_offset,length):
+        self._check_source()
         if not isinstance(scope,str)or not 1<=len(scope)<=256 or direction not in (0,1):raise ValueError("explicit bounded scope required")
-        if any(type(n)is not int for n in (start,source_offset,length))or not -(1<<62)<=start<1<<62 or not 0<length<=65536 or source_offset<0 or source_offset+length>self.source.stat().st_size:raise ValueError("segment bounds")
-        with self.source.open("rb")as f:f.seek(source_offset);raw=f.read(length)
+        if any(type(n)is not int for n in (start,source_offset,length))or not -(1<<62)<=start<1<<62 or not 0<length<=65536 or source_offset<0 or source_offset+length>self._stamp[2]:raise ValueError("segment bounds")
+        self._source.seek(source_offset);raw=self._source.read(length)
         if len(raw)!=length:raise ValueError("source truncated")
-        with self.db:self.db.execute("INSERT INTO segments(scope,direction,start,end,source_offset,bytes,sha256) VALUES (?,?,?,?,?,?,?)",(scope,direction,start,start+length,source_offset,length,hashlib.sha256(raw).hexdigest()))
+        with self.db:
+            self.db.execute("INSERT INTO segments(scope,direction,start,end,source_offset,bytes,sha256) VALUES (?,?,?,?,?,?,?)",(scope,direction,start,start+length,source_offset,length,hashlib.sha256(raw).hexdigest()))
+            self._check_source()
     def reconstruct(self,scope,direction, *, policy="reject",piece_bytes=4096,max_work=64*1024*1024):
+        self._check_source()
         if policy not in {"reject","first","last"}or not 1<=piece_bytes<=65536:raise ValueError("reconstruction policy/budget")
         row=self.db.execute("SELECT MIN(start),MAX(end) FROM segments WHERE scope=? AND direction=?",(scope,direction)).fetchone()
         if row[0]is None:return
         pos,end=row;work=0
-        with self.source.open("rb")as source:
-            while pos<end:
-                next_boundary=self.db.execute("SELECT MIN(x) FROM (SELECT start AS x FROM segments WHERE scope=? AND direction=? AND start>? UNION ALL SELECT end FROM segments WHERE scope=? AND direction=? AND end>?)",(scope,direction,pos,scope,direction,pos)).fetchone()[0]
-                bound=min(end,pos+piece_bytes,next_boundary or end)
-                values=[]
-                for sid,a,b,offset,length,digest in self.db.execute("SELECT id,start,end,source_offset,bytes,sha256 FROM segments WHERE scope=? AND direction=? AND start<=? AND end>? ORDER BY id",(scope,direction,pos,pos)):
-                    work+=length
-                    if work>max_work or len(values)>=4096:raise ValueError("reconstruction work/overlap budget")
-                    source.seek(offset);raw=source.read(length)
-                    if len(raw)!=length or hashlib.sha256(raw).hexdigest()!=digest:raise ValueError("source segment changed")
-                    selected=raw[pos-a:bound-a]
-                    values.append({"segment":sid,"source_start":str(offset+pos-a),"source_end":str(offset+bound-a),"hex":selected.hex(),"sha256":hashlib.sha256(selected).hexdigest()})
-                distinct={v["hex"]for v in values};conflict=len(distinct)>1
-                result={"scope":scope,"direction":direction,"start":str(pos),"end":str(bound),"status":"gap"if not values else "conflict"if conflict else "candidate",
-                        "policy":policy,"alternatives":values,"bytes_hex":None,"automatic_connection_identity":False}
-                if values and not(conflict and policy=="reject"):result["bytes_hex"]=values[-1 if policy=="last"else 0]["hex"]
-                yield result;pos=bound
+        source=self._source
+        while pos<end:
+            self._check_source()
+            next_boundary=self.db.execute("SELECT MIN(x) FROM (SELECT start AS x FROM segments WHERE scope=? AND direction=? AND start>? UNION ALL SELECT end FROM segments WHERE scope=? AND direction=? AND end>?)",(scope,direction,pos,scope,direction,pos)).fetchone()[0]
+            bound=min(end,pos+piece_bytes,next_boundary or end)
+            values=[]
+            for sid,a,b,offset,length,digest in self.db.execute("SELECT id,start,end,source_offset,bytes,sha256 FROM segments WHERE scope=? AND direction=? AND start<=? AND end>? ORDER BY id",(scope,direction,pos,pos)):
+                work+=length
+                if work>max_work or len(values)>=4096:raise ValueError("reconstruction work/overlap budget")
+                source.seek(offset);raw=source.read(length)
+                if len(raw)!=length or hashlib.sha256(raw).hexdigest()!=digest:raise ValueError("source segment changed")
+                selected=raw[pos-a:bound-a]
+                values.append({"segment":sid,"source_start":str(offset+pos-a),"source_end":str(offset+bound-a),"hex":selected.hex(),"sha256":hashlib.sha256(selected).hexdigest()})
+            distinct={v["hex"]for v in values};conflict=len(distinct)>1
+            result={"scope":scope,"direction":direction,"start":str(pos),"end":str(bound),"status":"gap"if not values else "conflict"if conflict else "candidate",
+                    "policy":policy,"alternatives":values,"bytes_hex":None,"automatic_connection_identity":False}
+            if values and not(conflict and policy=="reject"):result["bytes_hex"]=values[-1 if policy=="last"else 0]["hex"]
+            self._check_source()
+            yield result;pos=bound

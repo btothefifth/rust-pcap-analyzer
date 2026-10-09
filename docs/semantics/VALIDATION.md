@@ -54,6 +54,11 @@ spans. Capture-driven tests exercise snapshot and streaming paths, segmentation,
 reordering, retransmission, conflicting overlaps, gaps, and window boundaries.
 The independent case runner verifies raw field witnesses and expected values for
 18 explicit payloads. Its own Python process tests are not native semantic runs.
+The root, product and follow-up validators now select this native gate directly
+after the root all-target build; the two expanded drivers use the release probe
+and the ordered root validator uses the debug probe. They honor Cargo's configured
+target directory and retain `native-semantic-cases.json` alongside their receipt.
+No missing probe is replaced with Python interpretation.
 
 ## JSON / TLV / workbench consumers
 
@@ -77,6 +82,19 @@ cargo fuzz run semantics -- -max_total_time=3600 -rss_limit_mb=1024 -timeout=10
 
 Record source/seed/toolchain identity, duration, coverage, crash artifacts and
 minimized regressions. This is an example command, not a campaign receipt.
+
+`scripts/fuzz_campaign.py --targets semantics` now selects the checked-in
+semantic target on an already prepared POSIX nightly worker. The selector census
+must exactly match the eligible fuzz manifest. The current hardening generator
+has no dedicated semantic seed population; that target starts with an empty
+corpus directory. Registration and selectability establish no fuzz execution,
+seed coverage or qualification. The campaign binds recursive source membership,
+both lock files, harness bytes, applicable Cargo configuration, environment
+identity and local path dependencies before execution and compares the final
+closure before PASS. Source drift is adverse. Ctrl+C stops/reaps the owned group
+and records an INTERRUPTED terminal receipt with the attempted step and bounded
+log. Outputs must be outside source or under the ignored `.local-build`/`target`
+trees, and external memory/CPU/storage controls remain required.
 
 ## Remaining scope
 

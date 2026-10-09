@@ -9,11 +9,13 @@ use pcap_evidence::{json::Json, provenance::EvidenceBytes, sha256, Error, Result
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+pub(crate) mod bmp;
 pub(crate) mod mrt;
 mod producer;
 
 pub const SCHEMA: &str = "pcap-evidence.bgp.route-evidence.v1";
-pub const SEMANTIC_IDENTITY_SCHEMA: &str = "pcap-evidence.bgp.semantic-route-identity.v1";
+pub const LEGACY_SEMANTIC_IDENTITY_SCHEMA: &str = "pcap-evidence.bgp.semantic-route-identity.v1";
+pub const SEMANTIC_IDENTITY_SCHEMA: &str = "pcap-evidence.bgp.semantic-route-identity.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceKind {
@@ -167,6 +169,7 @@ pub struct PathAttributes {
 /// This fingerprint is never route authority.
 pub(crate) struct SemanticIdentityEvidence<'a> {
     pub attributes_present: &'a BTreeSet<u8>,
+    pub atomic_aggregate: bool,
     pub large_communities: &'a [[u32; 3]],
     pub incompleteness_reasons: &'a BTreeSet<&'static str>,
     pub opaque_occurrences: &'a [Json],
@@ -238,6 +241,7 @@ pub(crate) fn semantic_route_identity(
                 "attributes",
                 Json::object([
                     ("origin", attributes.origin.map_or(Json::Null, Json::from)),
+                    ("atomic_aggregate", evidence.atomic_aggregate.into()),
                     (
                         "as_path",
                         Json::array(attributes.as_path.iter().map(|segment| {
@@ -296,7 +300,7 @@ pub(crate) fn semantic_route_identity(
         let encoded = payload.encode_bounded(limits.output_bytes)?;
         let payload_len =
             u64::try_from(encoded.len()).map_err(|_| Error::limit("bgp_semantic_identity"))?;
-        let domain = b"pcap-evidence.bgp.semantic-route-identity.v1\0";
+        let domain = b"pcap-evidence.bgp.semantic-route-identity.v2\0";
         let total = domain
             .len()
             .checked_add(8)
@@ -359,7 +363,7 @@ pub struct SessionState {
     peer_relationship: PeerRelationship,
     peer_relationship_configured: bool,
 }
-/// A grammar hypothesis supported by one unambiguous OPEN from each direction.
+/// A grammar hypothesis supported by one unambiguous OPEN content per direction.
 /// It is not a claim that an endpoint accepted or used the capabilities.
 #[derive(Clone, Debug, Default)]
 pub(super) struct LayoutContext {
@@ -369,14 +373,20 @@ pub(super) struct LayoutContext {
     pub add_path: BTreeSet<(u8, u16, u8)>,
     pub unresolved_add_path: BTreeSet<(u8, u16, u8)>,
     pub mp: BTreeSet<(u16, u8)>,
+    /// An unsupported advertisement can change IPv6 next-hop layout.
+    pub unsupported_ipv6_next_hop_layout: bool,
     /// Directions whose opposite-side receiver advertised capability 6.
     pub extended_message_senders: BTreeSet<u8>,
     /// Convenience bilateral summary for existing output consumers.
     pub extended_messages: bool,
     pub enhanced_refresh: bool,
+    /// Directions whose opposite-side receiver advertised capability 70.
+    pub enhanced_refresh_senders: BTreeSet<u8>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct OpenState {
+    /// Identity of the complete bounded OPEN bytes, independent of source evidence.
+    message_sha256: [u8; 32],
     pub(super) autonomous_system: u16,
     four_octet_asn: Option<u32>,
     capabilities: producer::CapabilitySet,
@@ -414,11 +424,20 @@ impl SessionState {
     /// Compatibility helper for the advertised width, NOT negotiated width.
     /// Production parsing uses producer::width_evidence instead.
     fn asn_width(&self, direction: u8) -> usize {
-        self.opens
-            .get(&direction)
-            .filter(|opens| opens.len() == 1)
-            .and_then(|opens| opens[0].four_octet_asn)
+        self.unambiguous_open(direction)
+            .and_then(|open| open.four_octet_asn)
             .map_or(2, |_| 4)
+    }
+
+    /// Distinct source witnesses may repeat identical accepted wire content.
+    /// Different complete OPEN bytes remain alternatives within this generation.
+    fn unambiguous_open(&self, direction: u8) -> Option<&OpenState> {
+        let opens = self.opens.get(&direction)?;
+        let first = opens.first()?;
+        opens
+            .iter()
+            .all(|open| !open.ambiguous && open.message_sha256 == first.message_sha256)
+            .then_some(first)
     }
 }
 
@@ -438,6 +457,7 @@ struct AttributeRange {
     end: usize,
     sha256: String,
     value_start: usize,
+    value_hex: Option<String>,
     value: Json,
     interpretation: &'static str,
     repetition: &'static str,
@@ -628,7 +648,7 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
     let mut seen = BTreeSet::new();
     let mut large_communities = Vec::new();
     let mut opaque = Vec::new();
-    let supported = [1, 2, 3, 4, 5, 7, 8, 9, 10, 14, 15, 32];
+    let supported = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 17, 18, 32];
 
     for range in &record.attribute_ranges {
         let is_supported = supported.contains(&range.code);
@@ -640,6 +660,10 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
             discarded_by_duplicate_rule
         } else {
             range.disposition == "accept_evidence_only"
+                || (range.disposition == "attribute_discard"
+                    && (matches!(range.code, 17 | 18)
+                        || (matches!(range.code, 5 | 9 | 10)
+                            && range.interpretation == "decoded_but_discarded_for_external_peer")))
         };
         let multiplicity_valid = if is_later_occurrence {
             validation_bool(&range.validation, "multiplicity_valid") == Some(false)
@@ -661,7 +685,11 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
                 && range.flags & 0x20 == 0
                 && !matches!(
                     range.interpretation,
-                    "unresolved_asn_width" | "unresolved_next_hop_context"
+                    "unresolved_asn_width"
+                        | "wire_shape_only_not_negotiated"
+                        | "unresolved_capability_context"
+                        | "unresolved_next_hop_context"
+                        | "opaque_family_capability_or_add_path_layout"
                 ));
 
         if !is_supported {
@@ -675,7 +703,12 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
                 "peer_relationship_unresolved"
             } else if range.flags & 0x20 != 0 {
                 "partial_attribute_value"
-            } else if range.interpretation == "unresolved_asn_width" {
+            } else if matches!(
+                range.interpretation,
+                "unresolved_asn_width"
+                    | "wire_shape_only_not_negotiated"
+                    | "unresolved_capability_context"
+            ) {
                 "asn_width_unresolved"
             } else if range.interpretation == "unresolved_next_hop_context" {
                 "next_hop_context_unresolved"
@@ -739,6 +772,7 @@ fn capture_semantic_identity(record: &RouteRecord, limits: &Limits) -> Result<Js
         &record.attributes,
         SemanticIdentityEvidence {
             attributes_present: &seen,
+            atomic_aggregate: seen.contains(&6),
             large_communities: &large_communities,
             incompleteness_reasons: &reasons,
             opaque_occurrences: &opaque,
@@ -778,7 +812,7 @@ fn canonical_semantic_json(value: &Json) -> Json {
 }
 
 fn attribute_range_json(a: &AttributeRange) -> Json {
-    Json::object([
+    let Json::Object(mut fields) = Json::object([
         ("type", a.code.into()),
         ("flags", a.flags.into()),
         ("start", a.start.into()),
@@ -805,7 +839,13 @@ fn attribute_range_json(a: &AttributeRange) -> Json {
             a.peer_relationship_basis
                 .map_or(Json::Null, |basis| basis.into()),
         ),
-    ])
+    ]) else {
+        unreachable!()
+    };
+    if let Some(value) = &a.value_hex {
+        fields.push(("value_hex", value.clone().into()));
+    }
+    Json::Object(fields)
 }
 
 fn attributes_json(a: &PathAttributes) -> Json {
@@ -979,6 +1019,8 @@ struct ParsedUpdate {
     as4_reconstruction: Json,
     opaque_nlri: Vec<Json>,
     missing_mandatory: Vec<u8>,
+    malformed_attribute_envelope: Option<Json>,
+    internal_local_pref_missing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1025,9 +1067,10 @@ type AttributeParse = (
     Vec<PrefixSpan>,
     Vec<PrefixSpan>,
     Vec<&'static str>,
+    Option<Json>,
 );
 
-fn attribute_flags(code: u8) -> Option<u8> {
+pub(crate) fn attribute_flags(code: u8) -> Option<u8> {
     match code {
         1 | 2 | 3 | 5 | 6 => Some(0x40),
         4 | 9 | 10 | 14 | 15 | 26 => Some(0x80),
@@ -1107,6 +1150,33 @@ fn leading_path(path: &[AsPathSegment], mut count: usize) -> Vec<AsPathSegment> 
     leading
 }
 
+/// RFC 6793 transition normalization. The input inventories remain unchanged.
+/// AS_SET counts as one hop; confederation segments do not contribute hops.
+pub(crate) fn reconstruct_as4_suffix(
+    base: &[AsPathSegment],
+    as4: &[AsPathSegment],
+) -> (Vec<AsPathSegment>, &'static str) {
+    let discarded_confederation = as4.iter().any(|segment| matches!(segment.kind, 3 | 4));
+    let suffix: Vec<_> = as4
+        .iter()
+        .filter(|segment| !matches!(segment.kind, 3 | 4))
+        .cloned()
+        .collect();
+    if path_count(&suffix) > path_count(base) {
+        (base.to_vec(), "longer_as4_path_ignored")
+    } else {
+        let prefix = leading_path(base, path_count(base) - path_count(&suffix));
+        (
+            prefix.into_iter().chain(suffix).collect(),
+            if discarded_confederation {
+                "old_new_reconstructed_confederation_discarded"
+            } else {
+                "old_new_reconstructed"
+            },
+        )
+    }
+}
+
 fn as4_reconstruction(
     b: &[u8],
     ranges: &[AttributeRange],
@@ -1130,9 +1200,7 @@ fn as4_reconstruction(
         if any_as4 {
             status = "new_new_discard_as4_attributes";
         }
-    } else if let Some(base_range) = base {
-        let base_path = parse_as_path(&b[base_range.value_start..base_range.end], 2, limits)?;
-        effective = base_path.clone();
+    } else {
         let base_agg_asn = agg
             .map(|r| be16(b, r.value_start))
             .transpose()?
@@ -1145,6 +1213,7 @@ fn as4_reconstruction(
         if status != "non_as_trans_aggregator_discard_as4" {
             if let (Some(number), Some(r)) = (base_agg_asn, as4_agg) {
                 if number == 23456 {
+                    status = "old_new_aggregator_reconstructed";
                     effective_aggregator = Some(format!(
                         "{}:{}",
                         be32(b, r.value_start)?,
@@ -1152,27 +1221,19 @@ fn as4_reconstruction(
                     ));
                 }
             }
-            if let Some(as4_range) = as4 {
-                let mut four_path =
-                    parse_as_path(&b[as4_range.value_start..as4_range.end], 4, limits)?;
-                let discarded_confederation = four_path.iter().any(|s| matches!(s.kind, 3 | 4));
-                four_path.retain(|s| !matches!(s.kind, 3 | 4));
-                if path_count(&four_path) > path_count(&base_path) {
-                    status = "longer_as4_path_ignored";
-                } else {
-                    let lead =
-                        leading_path(&base_path, path_count(&base_path) - path_count(&four_path));
-                    effective = lead.into_iter().chain(four_path).collect();
-                    status = if discarded_confederation {
-                        "old_new_reconstructed_confederation_discarded"
-                    } else {
-                        "old_new_reconstructed"
-                    };
-                }
+            if let (Some(base_range), Some(as4_range)) = (base, as4) {
+                let base_path =
+                    parse_as_path(&b[base_range.value_start..base_range.end], 2, limits)?;
+                let four_path = parse_as_path(&b[as4_range.value_start..as4_range.end], 4, limits)?;
+                let (reconstructed, reconstruction_status) =
+                    reconstruct_as4_suffix(&base_path, &four_path);
+                effective = reconstructed;
+                status = reconstruction_status;
             }
         }
-    } else if as4.is_some() {
-        status = "as4_without_base_path";
+        if base.is_none() && as4.is_some() {
+            status = "as4_without_base_path";
+        }
     }
     if width != 0 {
         attrs.as_path = effective.clone();
@@ -1229,7 +1290,14 @@ fn parse_update(
         .checked_add(attribute_len)
         .ok_or_else(|| Error::limit("bgp_attributes"))?;
     need(b, attributes_end, "bgp_attributes")?;
-    let (mut attributes, mut ranges, mp_withdrawn, mp_announced, mut issues) = parse_attributes(
+    let (
+        mut attributes,
+        mut ranges,
+        mp_withdrawn,
+        mp_announced,
+        mut issues,
+        malformed_attribute_envelope,
+    ) = parse_attributes(
         b,
         attributes_start,
         attributes_end,
@@ -1242,9 +1310,10 @@ fn parse_update(
     if let Json::Object(fields) = &as4_reconstruction {
         if let Some((_, Json::String(status))) = fields.iter().find(|(key, _)| *key == "status") {
             for range in &mut ranges {
-                if (status == "longer_as4_path_ignored" && range.code == 17)
-                    || (status == "non_as_trans_aggregator_discard_as4"
-                        && matches!(range.code, 17 | 18))
+                if range.disposition == "accept_evidence_only"
+                    && ((status == "longer_as4_path_ignored" && range.code == 17)
+                        || (status == "non_as_trans_aggregator_discard_as4"
+                            && matches!(range.code, 17 | 18)))
                 {
                     range.disposition = "attribute_discard";
                     range.action = Some(UpdateAction::AttributeDiscard);
@@ -1255,7 +1324,20 @@ fn parse_update(
     let peer_relationship_unresolved = ranges
         .iter()
         .any(|range| range.peer_relationship_unresolved);
-    let mut known_action = UpdateAction::AcceptEvidenceOnly;
+    let incomplete_mp = malformed_attribute_envelope
+        .as_ref()
+        .is_some_and(|fragment| {
+            matches!(fragment, Json::Object(fields) if fields.iter().any(|(key, value)|
+            *key == "type" && (value == &Json::from(14u8) || value == &Json::from(15u8))))
+        });
+    let mut known_action = if incomplete_mp {
+        // A conventional NLRI boundary cannot certify an unparsed MP payload.
+        UpdateAction::SessionReset
+    } else if malformed_attribute_envelope.is_some() {
+        UpdateAction::TreatAsWithdraw
+    } else {
+        UpdateAction::AcceptEvidenceOnly
+    };
     for range in &ranges {
         if let Some(action) = range.action {
             known_action = strongest(known_action, action);
@@ -1282,12 +1364,20 @@ fn parse_update(
         }
     }
     let mut missing_mandatory = Vec::new();
+    let mut internal_local_pref_missing = false;
     if !announced.is_empty() || !mp_announced.is_empty() {
         let present: BTreeSet<_> = ranges
             .iter()
             .filter(|r| r.action == Some(UpdateAction::AcceptEvidenceOnly))
             .map(|r| r.code)
             .collect();
+        // RFC 4271 requires LOCAL_PREF on internal announcements, but it is
+        // discretionary, so absence is not RFC 7606's mandatory-attribute TAW.
+        internal_local_pref_missing = context.peer_relationship == PeerRelationship::Internal
+            && !ranges.iter().any(|range| range.code == 5);
+        if internal_local_pref_missing {
+            issues.push("internal_announcement_missing_local_pref_quarantined");
+        }
         let mandatory = if announced.is_empty() {
             &[1u8, 2][..]
         } else {
@@ -1307,6 +1397,18 @@ fn parse_update(
         }
     }
     let mut opaque_nlri = Vec::new();
+    for range in &ranges {
+        if matches!(range.code, 14 | 15)
+            && range.interpretation == "opaque_family_capability_or_add_path_layout"
+        {
+            opaque_nlri.push(Json::object([
+                ("kind", "multiprotocol_layout_unresolved".into()),
+                ("start", range.value_start.into()),
+                ("end", range.end.into()),
+                ("sha256", range.sha256.clone().into()),
+            ]));
+        }
+    }
     if base_unknown {
         issues.push("add_path_layout_unresolved_opaque_nlri");
         for (start, end, kind) in [
@@ -1415,10 +1517,20 @@ fn parse_update(
         }
         UpdateAction::AcceptEvidenceOnly | UpdateAction::AttributeDiscard => {}
     }
-    if peer_relationship_unresolved {
+    let quarantine_local_pref =
+        internal_local_pref_missing && known_action.rank() < UpdateAction::TreatAsWithdraw.rank();
+    if peer_relationship_unresolved || quarantine_local_pref {
         for record in &records {
             let mut fields = vec![
-                ("kind", "peer_relationship_unresolved_route".into()),
+                (
+                    "kind",
+                    if internal_local_pref_missing {
+                        "internal_local_pref_missing_route"
+                    } else {
+                        "peer_relationship_unresolved_route"
+                    }
+                    .into(),
+                ),
                 ("action", record.action.as_str().into()),
                 ("start", record.start.into()),
                 ("end", record.end.into()),
@@ -1434,7 +1546,12 @@ fn parse_update(
             opaque_nlri.push(Json::Object(fields));
         }
         records.clear();
-        issues.push("peer_relationship_context_unresolved_route_actions_quarantined");
+        if peer_relationship_unresolved {
+            issues.push("peer_relationship_context_unresolved_route_actions_quarantined");
+        }
+    }
+    if quarantine_local_pref {
+        disposition = "internal_local_pref_missing";
     }
     if asn_width == 2 {
         issues.push("asn_width_derived_from_two_octet_default_or_open");
@@ -1452,6 +1569,8 @@ fn parse_update(
         as4_reconstruction,
         opaque_nlri,
         missing_mandatory,
+        malformed_attribute_envelope,
+        internal_local_pref_missing,
     })
 }
 
@@ -1471,43 +1590,27 @@ fn parse_attributes(
     let mut mp_announced = Vec::new();
     let mut issues = Vec::new();
     let mut seen_codes = BTreeSet::new();
+    let mut malformed_attribute_envelope = None;
     while p < end {
         if ranges.len() >= limits.elements {
             return Err(Error::limit("bgp_attributes"));
         }
-        let start = p;
-        if p.checked_add(3).is_none_or(|n| n > end) {
-            return Err(bad(
-                "bgp_attribute_header",
-                p,
-                "header exceeds attribute block",
-            ));
-        }
-        need(b, p + 3, "bgp_attribute_header")?;
-        let flags = b[p];
-        let code = b[p + 1];
-        let extended = flags & 0x10 != 0;
-        let header = if extended { 4 } else { 3 };
-        if p.checked_add(header).is_none_or(|n| n > end) {
-            return Err(bad(
-                "bgp_attribute_header",
-                p,
-                "extended header exceeds attribute block",
-            ));
-        }
-        need(b, p + header, "bgp_attribute_header")?;
-        let length = if extended {
-            usize::from(be16(b, p + 2)?)
-        } else {
-            usize::from(b[p + 2])
+        let envelope = match AttributeEnvelope::read(b, p, end)? {
+            AttributeEnvelopeRead::Complete(envelope) => envelope,
+            AttributeEnvelopeRead::Malformed(reason) => {
+                malformed_attribute_envelope =
+                    Some(attribute_envelope_fragment(b, p, end, reason, budget)?);
+                break;
+            }
         };
-        let value_start = p + header;
-        let value_end = value_start
-            .checked_add(length)
-            .ok_or_else(|| Error::limit("bgp_attribute"))?;
-        if value_end > end {
-            return Err(bad("bgp_attribute", start, "attribute exceeds UPDATE"));
-        }
+        let AttributeEnvelope {
+            start,
+            flags,
+            code,
+            value_start,
+            value_end,
+        } = envelope;
+        let length = value_end - value_start;
         budget.charge(
             ranges
                 .len()
@@ -1524,400 +1627,42 @@ fn parse_attributes(
         if repetition == "conflicting" {
             issues.push("conflicting_path_attribute_values");
         }
-        let mut item = PathAttributes::default();
-        let mut special = None;
-        let mut interpretation = if matches!(code, 1..=10 | 14 | 15 | 16 | 17 | 18 | 26 | 32 | 35) {
-            "decoded_subset"
-        } else {
-            "unsupported"
-        };
-        let parsed: Result<()> = (|| {
-            match code {
-                1 => {
-                    if length != 1 || b[value_start] > 2 {
-                        return Err(bad("bgp_origin", value_start, "invalid ORIGIN value"));
-                    }
-                    item.origin = Some(b[value_start]);
+        let decoded =
+            decode_attribute_value(b, &envelope, &digest, context, sender, limits, &mut issues);
+        let (item, special, mut interpretation, value_valid) = match decoded {
+            Ok(decoded) => {
+                match decoded.multiprotocol {
+                    MultiprotocolValue::None => {}
+                    MultiprotocolValue::Withdrawn(prefixes) => mp_withdrawn.extend(prefixes),
+                    MultiprotocolValue::Announced(prefixes) => mp_announced.extend(prefixes),
                 }
-                2 => {
-                    if asn_width == 0 {
-                        let (path, alternatives, ambiguous) =
-                            producer::path_alternatives(&b[value_start..value_end], limits)?;
-                        item.as_path = path;
-                        special = Some(alternatives);
-                        interpretation = if ambiguous {
-                            "unresolved_asn_width"
-                        } else {
-                            "wire_shape_only_not_negotiated"
-                        };
-                        if ambiguous {
-                            issues.push("asn_width_unresolved_no_negotiated_authority");
-                        } else {
-                            issues.push("asn_width_derived_from_two_octet_default_or_open");
-                        }
-                    } else {
-                        item.as_path =
-                            parse_as_path(&b[value_start..value_end], asn_width, limits)?;
-                    }
-                    if item
-                        .as_path
-                        .iter()
-                        .any(|segment| segment.values.contains(&0))
-                    {
-                        return Err(bad("bgp_as_zero", value_start, "AS_PATH contains AS 0"));
-                    }
-                }
-                3 => {
-                    if length != 4 {
-                        return Err(bad("bgp_next_hop", value_start, "NEXT_HOP must be IPv4"));
-                    }
-                    item.next_hop = Some(
-                        Ipv4Addr::new(
-                            b[value_start],
-                            b[value_start + 1],
-                            b[value_start + 2],
-                            b[value_start + 3],
-                        )
-                        .to_string(),
-                    );
-                }
-                4 => {
-                    if length != 4 {
-                        return Err(bad("bgp_med", value_start, "MED must be four octets"));
-                    }
-                    item.med = Some(be32(b, value_start)?);
-                }
-                5 => {
-                    if length != 4 {
-                        return Err(bad(
-                            "bgp_local_preference",
-                            value_start,
-                            "LOCAL_PREF must be four octets",
-                        ));
-                    }
-                    item.local_preference = Some(be32(b, value_start)?);
-                }
-                6 => {
-                    if length != 0 {
-                        return Err(bad(
-                            "bgp_atomic_aggregate",
-                            value_start,
-                            "ATOMIC_AGGREGATE has no value",
-                        ));
-                    }
-                }
-                7 => {
-                    let width = if asn_width == 0 {
-                        interpretation = "wire_shape_only_not_negotiated";
-                        match length {
-                            6 => 2,
-                            8 => 4,
-                            _ => 0,
-                        }
-                    } else {
-                        asn_width
-                    };
-                    if width == 0 || length != width + 4 {
-                        return Err(bad(
-                            "bgp_aggregator",
-                            value_start,
-                            "AGGREGATOR width disagrees with bounded context",
-                        ));
-                    }
-                    let number = if width == 2 {
-                        u32::from(be16(b, value_start)?)
-                    } else {
-                        be32(b, value_start)?
-                    };
-                    if number == 0 {
-                        return Err(bad("bgp_as_zero", value_start, "AGGREGATOR contains AS 0"));
-                    }
-                    let value = format!(
-                        "{}:{}",
-                        number,
-                        Ipv4Addr::from(be32(b, value_start + width)?)
-                    );
-                    item.aggregator = Some(value);
-                }
-                8 => {
-                    if length == 0 || length % 4 != 0 {
-                        return Err(bad(
-                            "bgp_communities",
-                            value_start,
-                            "COMMUNITIES width must be a nonzero multiple of four",
-                        ));
-                    }
-                    if length / 4 > limits.elements {
-                        return Err(Error::limit("bgp_attribute_values"));
-                    }
-                    for q in (value_start..value_end).step_by(4) {
-                        item.communities.push(be32(b, q)?);
-                    }
-                }
-                9 => {
-                    if length != 4 {
-                        return Err(bad(
-                            "bgp_originator_id",
-                            value_start,
-                            "ORIGINATOR_ID must be four octets",
-                        ));
-                    }
-                    item.originator_id = Some(Ipv4Addr::from(be32(b, value_start)?).to_string());
-                }
-                10 => {
-                    if length == 0 || length % 4 != 0 {
-                        return Err(bad(
-                            "bgp_cluster_list",
-                            value_start,
-                            "CLUSTER_LIST width must be a nonzero multiple of four",
-                        ));
-                    }
-                    if length / 4 > limits.elements {
-                        return Err(Error::limit("bgp_attribute_values"));
-                    }
-                    for q in (value_start..value_end).step_by(4) {
-                        item.cluster_list
-                            .push(Ipv4Addr::from(be32(b, q)?).to_string());
-                    }
-                }
-                14 => {
-                    if length < 3 {
-                        return Err(bad("bgp_mp_reach", value_start, "family header truncated"));
-                    }
-                    let family = (be16(b, value_start)?, b[value_start + 2]);
-                    if !matches!(family, (1 | 2, 1 | 2))
-                        || !context.mp.contains(&family)
-                        || context
-                            .unresolved_add_path
-                            .contains(&(sender, family.0, family.1))
-                    {
-                        interpretation = "opaque_family_capability_or_add_path_layout";
-                        special = Some(Json::object([
-                            ("afi", family.0.into()),
-                            ("safi", family.1.into()),
-                            ("sha256", digest.clone().into()),
-                        ]));
-                        issues.push(if !context.mp.contains(&family) {
-                            "mp_reach_capability_unresolved"
-                        } else {
-                            "mp_reach_opaque_nlri"
-                        });
-                    } else {
-                        if length >= 4 {
-                            let reserved_at = value_start + 4 + usize::from(b[value_start + 3]);
-                            if reserved_at < value_end && b[reserved_at] != 0 {
-                                issues.push("mp_reach_reserved_nonzero_ignored");
-                            }
-                        }
-                        let (next_hop, prefixes) = parse_mp_reach(
-                            b,
-                            value_start,
-                            value_end,
-                            context.add_path.contains(&(sender, family.0, family.1)),
-                            limits,
-                        )?;
-                        item.next_hop = Some(next_hop);
-                        item.mp_reach
-                            .extend(prefixes.iter().map(|p| p.prefix.clone()));
-                        mp_announced.extend(prefixes);
-                    }
-                }
-                15 => {
-                    if length < 3 {
-                        return Err(bad(
-                            "bgp_mp_unreach",
-                            value_start,
-                            "family header truncated",
-                        ));
-                    }
-                    let family = (be16(b, value_start)?, b[value_start + 2]);
-                    if !matches!(family, (1 | 2, 1 | 2))
-                        || !context.mp.contains(&family)
-                        || context
-                            .unresolved_add_path
-                            .contains(&(sender, family.0, family.1))
-                    {
-                        interpretation = "opaque_family_capability_or_add_path_layout";
-                        special = Some(Json::object([
-                            ("afi", family.0.into()),
-                            ("safi", family.1.into()),
-                            ("sha256", digest.clone().into()),
-                        ]));
-                        issues.push(if !context.mp.contains(&family) {
-                            "mp_unreach_capability_unresolved"
-                        } else {
-                            "mp_unreach_opaque_nlri"
-                        });
-                    } else {
-                        let prefixes = parse_mp_unreach(
-                            b,
-                            value_start,
-                            value_end,
-                            context.add_path.contains(&(sender, family.0, family.1)),
-                            limits,
-                        )?;
-                        item.mp_unreach
-                            .extend(prefixes.iter().map(|p| p.prefix.clone()));
-                        mp_withdrawn.extend(prefixes);
-                    }
-                }
-                17 => {
-                    if length < 6 {
-                        return Err(bad(
-                            "bgp_as4_path",
-                            value_start,
-                            "AS4_PATH must contain a complete nonempty segment",
-                        ));
-                    }
-                    item.as_path = parse_as_path(&b[value_start..value_end], 4, limits)?;
-                    if item
-                        .as_path
-                        .iter()
-                        .any(|segment| segment.values.contains(&0))
-                    {
-                        return Err(bad("bgp_as_zero", value_start, "AS4_PATH contains AS 0"));
-                    }
-                    let raw_segments = item.as_path.clone();
-                    if item
-                        .as_path
-                        .iter()
-                        .any(|segment| matches!(segment.kind, 3 | 4))
-                    {
-                        item.as_path
-                            .retain(|segment| !matches!(segment.kind, 3 | 4));
-                        issues.push("as4_confederation_segments_discarded");
-                    }
-                    special = Some(Json::object([
-                        ("raw_segments", as_path_segments_json(&raw_segments)),
-                        ("usable_segments", as_path_segments_json(&item.as_path)),
-                    ]));
-                }
-                18 => {
-                    if length != 8 {
-                        return Err(bad(
-                            "bgp_as4_aggregator",
-                            value_start,
-                            "AS4_AGGREGATOR must be eight octets",
-                        ));
-                    }
-                    if be32(b, value_start)? == 0 {
-                        return Err(bad(
-                            "bgp_as_zero",
-                            value_start,
-                            "AS4_AGGREGATOR contains AS 0",
-                        ));
-                    }
-                    item.aggregator = Some(format!(
-                        "{}:{}",
-                        be32(b, value_start)?,
-                        Ipv4Addr::from(be32(b, value_start + 4)?)
-                    ));
-                }
-                16 => {
-                    if length == 0 || length % 8 != 0 {
-                        return Err(bad(
-                            "bgp_extended_communities",
-                            value_start,
-                            "value length must be a nonzero multiple of eight",
-                        ));
-                    }
-                    special = Some(Json::array(
-                        b[value_start..value_end].chunks_exact(8).enumerate().map(
-                            |(index, chunk)| {
-                                Json::object([
-                                    ("type", chunk[0].into()),
-                                    ("subtype", chunk[1].into()),
-                                    ("value_sha256", payload_sha256(&chunk[2..]).into()),
-                                    ("start", (value_start + index * 8).into()),
-                                    ("end", (value_start + (index + 1) * 8).into()),
-                                ])
-                            },
-                        ),
-                    ));
-                }
-                26 => {
-                    if length == 0 {
-                        return Err(bad(
-                            "bgp_aigp",
-                            value_start,
-                            "AIGP must contain at least one TLV",
-                        ));
-                    }
-                    let mut q = value_start;
-                    let mut tuples = Vec::new();
-                    while q < value_end {
-                        if q + 3 > value_end {
-                            return Err(bad("bgp_aigp", q, "TLV header truncated"));
-                        }
-                        let tlv_len = usize::from(be16(b, q + 1)?);
-                        if tlv_len < 3 || q + tlv_len > value_end {
-                            return Err(bad("bgp_aigp", q, "TLV length invalid"));
-                        }
-                        if b[q] == 1 && tlv_len != 11 {
-                            return Err(bad("bgp_aigp", q, "AIGP metric length invalid"));
-                        }
-                        tuples.push(Json::object([
-                            ("type", b[q].into()),
-                            ("length", tlv_len.into()),
-                            (
-                                "metric",
-                                if b[q] == 1 {
-                                    u64::from_be_bytes(
-                                        b[q + 3..q + 11]
-                                            .try_into()
-                                            .map_err(|_| bad("bgp_aigp", q, "metric truncated"))?,
-                                    )
-                                    .into()
-                                } else {
-                                    Json::Null
-                                },
-                            ),
-                            ("sha256", payload_sha256(&b[q..q + tlv_len]).into()),
-                        ]));
-                        q += tlv_len;
-                    }
-                    special = Some(Json::Array(tuples));
-                }
-                32 => {
-                    if length == 0 || length % 12 != 0 {
-                        return Err(bad(
-                            "bgp_large_community",
-                            value_start,
-                            "value length must be a nonzero multiple of twelve",
-                        ));
-                    }
-                    special = Some(Json::array((value_start..value_end).step_by(12).map(|q| {
-                        Json::array([
-                            be32(b, q).unwrap_or(0).into(),
-                            be32(b, q + 4).unwrap_or(0).into(),
-                            be32(b, q + 8).unwrap_or(0).into(),
-                        ])
-                    })));
-                }
-                35 => {
-                    if length != 4 {
-                        return Err(bad("bgp_otc", value_start, "OTC must contain four octets"));
-                    }
-                    special = Some(be32(b, value_start)?.into());
-                }
-                _ => issues.push("unknown_or_invalid_path_attribute_retained_by_hash"),
+                (
+                    decoded.attributes,
+                    decoded.special,
+                    decoded.interpretation,
+                    true,
+                )
             }
-            Ok(())
-        })();
-        let value_valid = match parsed {
-            Ok(()) => true,
             Err(error) if error.code == pcap_evidence::ErrorCode::LimitExceeded => {
                 return Err(error)
             }
             Err(_) => {
                 issues.push("malformed_path_attribute_retained");
-                item = PathAttributes::default();
-                special = None;
-                interpretation = "invalid_retained_by_hash";
-                false
+                (
+                    PathAttributes::default(),
+                    None,
+                    "invalid_retained_by_hash",
+                    false,
+                )
             }
         };
-        if matches!(code, 3 | 14) && seen_codes.contains(&3) && seen_codes.contains(&14) {
+        if matches!(code, 3 | 14)
+            && seen_codes.contains(&3)
+            && seen_codes.contains(&14)
+            && interpretation != "opaque_family_capability_or_add_path_layout"
+        {
+            // Mixed next-hop diagnostics must not erase the unresolved MP
+            // route layout consumed by UPDATE continuity admission.
             interpretation = "unresolved_next_hop_context";
         }
         let expected_flags = attribute_flags(code);
@@ -1945,6 +1690,8 @@ fn parse_attributes(
             }
         } else if asn_width == 4 && matches!(code, 17 | 18) {
             "attribute_discard"
+        } else if matches!(code, 14 | 15) && !flags_valid {
+            "session_reset"
         } else if peer_dependent && !flags_valid {
             "treat_as_withdraw"
         } else if peer_dependent {
@@ -1995,6 +1742,24 @@ fn parse_attributes(
         } else {
             Json::Null
         };
+        // Raw type-16 values are occurrence evidence, never interpreted policy.
+        // Admit aggregate retained hex and scan work before allocating a copy.
+        let value_hex = if code == 16 {
+            let retained = ranges
+                .iter()
+                .try_fold(0usize, |n, range: &AttributeRange| {
+                    n.checked_add(range.value_hex.as_ref().map_or(0, String::len))
+                })
+                .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?;
+            Some(retained_raw_value_hex(
+                &b[value_start..value_end],
+                retained,
+                limits,
+                budget,
+            )?)
+        } else {
+            None
+        };
         ranges.push(AttributeRange {
             code,
             flags,
@@ -2002,6 +1767,7 @@ fn parse_attributes(
             end: value_end,
             sha256: digest,
             value_start,
+            value_hex,
             value,
             interpretation,
             repetition,
@@ -2020,10 +1786,571 @@ fn parse_attributes(
         }
         p = value_end;
     }
-    Ok((attrs, ranges, mp_withdrawn, mp_announced, issues))
+    if malformed_attribute_envelope.is_some() {
+        issues.push("malformed_final_attribute_envelope_retained");
+    }
+    Ok((
+        attrs,
+        ranges,
+        mp_withdrawn,
+        mp_announced,
+        issues,
+        malformed_attribute_envelope,
+    ))
 }
 
-fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<Vec<AsPathSegment>> {
+// A complete wire envelope fixes the absolute occurrence and value ranges.
+// Incomplete envelopes are retained by the caller under its existing budget.
+#[derive(Clone, Copy)]
+struct AttributeEnvelope {
+    start: usize,
+    flags: u8,
+    code: u8,
+    value_start: usize,
+    value_end: usize,
+}
+enum AttributeEnvelopeRead {
+    Complete(AttributeEnvelope),
+    Malformed(&'static str),
+}
+impl AttributeEnvelope {
+    fn read(b: &[u8], p: usize, end: usize) -> Result<AttributeEnvelopeRead> {
+        if p.checked_add(3).is_none_or(|n| n > end) {
+            return Ok(AttributeEnvelopeRead::Malformed("short_header"));
+        }
+        need(b, p + 3, "bgp_attribute_header")?;
+        let flags = b[p];
+        let code = b[p + 1];
+        let extended = flags & 0x10 != 0;
+        let header = if extended { 4 } else { 3 };
+        if p.checked_add(header).is_none_or(|n| n > end) {
+            return Ok(AttributeEnvelopeRead::Malformed("short_extended_header"));
+        }
+        need(b, p + header, "bgp_attribute_header")?;
+        let length = if extended {
+            usize::from(be16(b, p + 2)?)
+        } else {
+            usize::from(b[p + 2])
+        };
+        let value_start = p + header;
+        let value_end = value_start
+            .checked_add(length)
+            .ok_or_else(|| Error::limit("bgp_attribute"))?;
+        if value_end > end {
+            return Ok(AttributeEnvelopeRead::Malformed("value_overrun"));
+        }
+        Ok(AttributeEnvelopeRead::Complete(Self {
+            start: p,
+            flags,
+            code,
+            value_start,
+            value_end,
+        }))
+    }
+}
+
+// Value decoding has no authority to merge an occurrence or choose a route
+// action. A failed value drops its local semantic fields; occurrence diagnostics
+// survive and the caller retains the exact bytes and chooses disposition.
+struct DecodedAttributeValue {
+    attributes: PathAttributes,
+    special: Option<Json>,
+    interpretation: &'static str,
+    multiprotocol: MultiprotocolValue,
+}
+enum MultiprotocolValue {
+    None,
+    Withdrawn(Vec<PrefixSpan>),
+    Announced(Vec<PrefixSpan>),
+}
+fn decode_attribute_value(
+    b: &[u8],
+    envelope: &AttributeEnvelope,
+    digest: &str,
+    context: &LayoutContext,
+    sender: u8,
+    limits: &Limits,
+    issues: &mut Vec<&'static str>,
+) -> Result<DecodedAttributeValue> {
+    let code = envelope.code;
+    let value_start = envelope.value_start;
+    let value_end = envelope.value_end;
+    let length = value_end - value_start;
+    let asn_width = context.asn_width;
+    let mut item = PathAttributes::default();
+    let mut special = None;
+    let mut multiprotocol = MultiprotocolValue::None;
+    let mut interpretation = if matches!(code, 1..=10 | 14 | 15 | 16 | 17 | 18 | 26 | 32 | 35) {
+        "decoded_subset"
+    } else {
+        "unsupported"
+    };
+    match code {
+        1 => {
+            if length != 1 || b[value_start] > 2 {
+                return Err(bad("bgp_origin", value_start, "invalid ORIGIN value"));
+            }
+            item.origin = Some(b[value_start]);
+        }
+        2 => {
+            if asn_width == 0 {
+                let (path, alternatives, ambiguous) =
+                    producer::path_alternatives(&b[value_start..value_end], limits)?;
+                item.as_path = path;
+                special = Some(alternatives);
+                interpretation = if ambiguous {
+                    "unresolved_asn_width"
+                } else {
+                    "wire_shape_only_not_negotiated"
+                };
+                if ambiguous {
+                    issues.push("asn_width_unresolved_no_negotiated_authority");
+                } else {
+                    issues.push("asn_width_derived_from_two_octet_default_or_open");
+                }
+            } else {
+                item.as_path = parse_as_path(&b[value_start..value_end], asn_width, limits)?;
+            }
+            if item
+                .as_path
+                .iter()
+                .any(|segment| segment.values.contains(&0))
+            {
+                return Err(bad("bgp_as_zero", value_start, "AS_PATH contains AS 0"));
+            }
+        }
+        3 => {
+            if length != 4 {
+                return Err(bad("bgp_next_hop", value_start, "NEXT_HOP must be IPv4"));
+            }
+            let address = Ipv4Addr::new(
+                b[value_start],
+                b[value_start + 1],
+                b[value_start + 2],
+                b[value_start + 3],
+            );
+            validate_ipv4_next_hop(address, value_start)?;
+            item.next_hop = Some(address.to_string());
+        }
+        4 => {
+            if length != 4 {
+                return Err(bad("bgp_med", value_start, "MED must be four octets"));
+            }
+            item.med = Some(be32(b, value_start)?);
+        }
+        5 => {
+            if length != 4 {
+                return Err(bad(
+                    "bgp_local_preference",
+                    value_start,
+                    "LOCAL_PREF must be four octets",
+                ));
+            }
+            item.local_preference = Some(be32(b, value_start)?);
+        }
+        6 => {
+            if length != 0 {
+                return Err(bad(
+                    "bgp_atomic_aggregate",
+                    value_start,
+                    "ATOMIC_AGGREGATE has no value",
+                ));
+            }
+        }
+        7 => {
+            let width = if asn_width == 0 {
+                interpretation = "wire_shape_only_not_negotiated";
+                match length {
+                    6 => 2,
+                    8 => 4,
+                    _ => 0,
+                }
+            } else {
+                asn_width
+            };
+            if width == 0 || length != width + 4 {
+                return Err(bad(
+                    "bgp_aggregator",
+                    value_start,
+                    "AGGREGATOR width disagrees with bounded context",
+                ));
+            }
+            let number = if width == 2 {
+                u32::from(be16(b, value_start)?)
+            } else {
+                be32(b, value_start)?
+            };
+            if number == 0 {
+                return Err(bad("bgp_as_zero", value_start, "AGGREGATOR contains AS 0"));
+            }
+            let value = format!(
+                "{}:{}",
+                number,
+                Ipv4Addr::from(be32(b, value_start + width)?)
+            );
+            item.aggregator = Some(value);
+        }
+        8 => {
+            if length == 0 || length % 4 != 0 {
+                return Err(bad(
+                    "bgp_communities",
+                    value_start,
+                    "COMMUNITIES width must be a nonzero multiple of four",
+                ));
+            }
+            if length / 4 > limits.elements {
+                return Err(Error::limit("bgp_attribute_values"));
+            }
+            for q in (value_start..value_end).step_by(4) {
+                item.communities.push(be32(b, q)?);
+            }
+        }
+        9 => {
+            if length != 4 {
+                return Err(bad(
+                    "bgp_originator_id",
+                    value_start,
+                    "ORIGINATOR_ID must be four octets",
+                ));
+            }
+            item.originator_id = Some(Ipv4Addr::from(be32(b, value_start)?).to_string());
+        }
+        10 => {
+            if length == 0 || length % 4 != 0 {
+                return Err(bad(
+                    "bgp_cluster_list",
+                    value_start,
+                    "CLUSTER_LIST width must be a nonzero multiple of four",
+                ));
+            }
+            if length / 4 > limits.elements {
+                return Err(Error::limit("bgp_attribute_values"));
+            }
+            for q in (value_start..value_end).step_by(4) {
+                item.cluster_list
+                    .push(Ipv4Addr::from(be32(b, q)?).to_string());
+            }
+        }
+        14 | 15 => {
+            let reach = code == 14;
+            if length < 3 {
+                return Err(bad(
+                    if reach {
+                        "bgp_mp_reach"
+                    } else {
+                        "bgp_mp_unreach"
+                    },
+                    value_start,
+                    "family header truncated",
+                ));
+            }
+            let family = (be16(b, value_start)?, b[value_start + 2]);
+            let next_hop_layout_unresolved =
+                reach && family.0 == 2 && context.unsupported_ipv6_next_hop_layout;
+            if !matches!(family, (1 | 2, 1 | 2))
+                || !context.mp.contains(&family)
+                || next_hop_layout_unresolved
+                || context
+                    .unresolved_add_path
+                    .contains(&(sender, family.0, family.1))
+            {
+                interpretation = "opaque_family_capability_or_add_path_layout";
+                special = Some(Json::object([
+                    ("afi", family.0.into()),
+                    ("safi", family.1.into()),
+                    ("sha256", digest.into()),
+                ]));
+                issues.push(if next_hop_layout_unresolved {
+                    "mp_reach_next_hop_layout_unresolved"
+                } else if !context.mp.contains(&family) {
+                    if reach {
+                        "mp_reach_capability_unresolved"
+                    } else {
+                        "mp_unreach_capability_unresolved"
+                    }
+                } else if reach {
+                    "mp_reach_opaque_nlri"
+                } else {
+                    "mp_unreach_opaque_nlri"
+                });
+            } else {
+                let add_path = context.add_path.contains(&(sender, family.0, family.1));
+                if reach {
+                    if length >= 4 {
+                        let reserved_at = value_start + 4 + usize::from(b[value_start + 3]);
+                        if reserved_at < value_end && b[reserved_at] != 0 {
+                            issues.push("mp_reach_reserved_nonzero_ignored");
+                        }
+                    }
+                    let (next_hop, prefixes) =
+                        parse_mp_reach(b, value_start, value_end, add_path, limits)?;
+                    item.next_hop = Some(next_hop);
+                    item.mp_reach
+                        .extend(prefixes.iter().map(|p| p.prefix.clone()));
+                    multiprotocol = MultiprotocolValue::Announced(prefixes);
+                } else {
+                    let prefixes = parse_mp_unreach(b, value_start, value_end, add_path, limits)?;
+                    item.mp_unreach
+                        .extend(prefixes.iter().map(|p| p.prefix.clone()));
+                    multiprotocol = MultiprotocolValue::Withdrawn(prefixes);
+                }
+            }
+        }
+        17 => {
+            if length < 6 {
+                return Err(bad(
+                    "bgp_as4_path",
+                    value_start,
+                    "AS4_PATH must contain a complete nonempty segment",
+                ));
+            }
+            item.as_path = parse_as_path(&b[value_start..value_end], 4, limits)?;
+            if item
+                .as_path
+                .iter()
+                .any(|segment| segment.values.contains(&0))
+            {
+                return Err(bad("bgp_as_zero", value_start, "AS4_PATH contains AS 0"));
+            }
+            let raw_segments = item.as_path.clone();
+            if item
+                .as_path
+                .iter()
+                .any(|segment| matches!(segment.kind, 3 | 4))
+            {
+                item.as_path
+                    .retain(|segment| !matches!(segment.kind, 3 | 4));
+                issues.push("as4_confederation_segments_discarded");
+            }
+            special = Some(Json::object([
+                ("raw_segments", as_path_segments_json(&raw_segments)),
+                ("usable_segments", as_path_segments_json(&item.as_path)),
+            ]));
+        }
+        18 => {
+            if length != 8 {
+                return Err(bad(
+                    "bgp_as4_aggregator",
+                    value_start,
+                    "AS4_AGGREGATOR must be eight octets",
+                ));
+            }
+            if be32(b, value_start)? == 0 {
+                return Err(bad(
+                    "bgp_as_zero",
+                    value_start,
+                    "AS4_AGGREGATOR contains AS 0",
+                ));
+            }
+            item.aggregator = Some(format!(
+                "{}:{}",
+                be32(b, value_start)?,
+                Ipv4Addr::from(be32(b, value_start + 4)?)
+            ));
+        }
+        16 => {
+            if length == 0 || length % 8 != 0 {
+                return Err(bad(
+                    "bgp_extended_communities",
+                    value_start,
+                    "value length must be a nonzero multiple of eight",
+                ));
+            }
+            special = Some(Json::array(
+                b[value_start..value_end]
+                    .chunks_exact(8)
+                    .enumerate()
+                    .map(|(index, chunk)| {
+                        Json::object([
+                            ("type", chunk[0].into()),
+                            ("subtype", chunk[1].into()),
+                            ("value_sha256", payload_sha256(&chunk[2..]).into()),
+                            ("start", (value_start + index * 8).into()),
+                            ("end", (value_start + (index + 1) * 8).into()),
+                        ])
+                    }),
+            ));
+        }
+        26 => {
+            if length == 0 {
+                return Err(bad(
+                    "bgp_aigp",
+                    value_start,
+                    "AIGP must contain at least one TLV",
+                ));
+            }
+            let mut q = value_start;
+            let mut tuples = Vec::new();
+            while q < value_end {
+                if q + 3 > value_end {
+                    return Err(bad("bgp_aigp", q, "TLV header truncated"));
+                }
+                let tlv_len = usize::from(be16(b, q + 1)?);
+                if tlv_len < 3 || q + tlv_len > value_end {
+                    return Err(bad("bgp_aigp", q, "TLV length invalid"));
+                }
+                if b[q] == 1 && tlv_len != 11 {
+                    return Err(bad("bgp_aigp", q, "AIGP metric length invalid"));
+                }
+                tuples.push(Json::object([
+                    ("type", b[q].into()),
+                    ("length", tlv_len.into()),
+                    (
+                        "metric",
+                        if b[q] == 1 {
+                            u64::from_be_bytes(
+                                b[q + 3..q + 11]
+                                    .try_into()
+                                    .map_err(|_| bad("bgp_aigp", q, "metric truncated"))?,
+                            )
+                            .into()
+                        } else {
+                            Json::Null
+                        },
+                    ),
+                    ("sha256", payload_sha256(&b[q..q + tlv_len]).into()),
+                ]));
+                q += tlv_len;
+            }
+            special = Some(Json::Array(tuples));
+        }
+        32 => {
+            if length == 0 || length % 12 != 0 {
+                return Err(bad(
+                    "bgp_large_community",
+                    value_start,
+                    "value length must be a nonzero multiple of twelve",
+                ));
+            }
+            special = Some(Json::array((value_start..value_end).step_by(12).map(|q| {
+                Json::array([
+                    be32(b, q).unwrap_or(0).into(),
+                    be32(b, q + 4).unwrap_or(0).into(),
+                    be32(b, q + 8).unwrap_or(0).into(),
+                ])
+            })));
+        }
+        35 => {
+            if length != 4 {
+                return Err(bad("bgp_otc", value_start, "OTC must contain four octets"));
+            }
+            special = Some(be32(b, value_start)?.into());
+        }
+        _ => issues.push("unknown_or_invalid_path_attribute_retained_by_hash"),
+    }
+    Ok(DecodedAttributeValue {
+        attributes: item,
+        special,
+        interpretation,
+        multiprotocol,
+    })
+}
+
+// Type-16 occurrence bytes remain uninterpreted. This owner admits the exact
+// hexadecimal allocation plus accumulated raw carriers before copying bytes.
+fn retained_raw_value_hex(
+    value: &[u8],
+    previous: usize,
+    limits: &Limits,
+    budget: &mut producer::Budget<'_>,
+) -> Result<String> {
+    let hex_bytes = value
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?;
+    let retained = previous
+        .checked_add(hex_bytes)
+        .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?;
+    if hex_bytes > limits.input_bytes || retained > limits.retained_bytes {
+        return Err(Error::limit("bgp_extended_community_raw"));
+    }
+    budget.charge(
+        retained
+            .checked_add(
+                hex_bytes
+                    .checked_mul(4)
+                    .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?,
+            )
+            .ok_or_else(|| Error::limit("bgp_extended_community_raw"))?,
+    )?;
+    Ok(sha256::hex(value))
+}
+
+#[cfg(test)]
+mod raw_extended_admission_tests {
+    use super::*;
+    #[test]
+    fn raw_carrier_admits_exact_prospective_work_and_retention() {
+        let value = [0x80, 0x99, 0, 1, 2, 3, 4, 5];
+        let limits = Limits {
+            work: 80,
+            retained_bytes: 16,
+            ..Limits::default()
+        };
+        assert_eq!(
+            retained_raw_value_hex(&value, 0, &limits, &mut producer::Budget::new(&limits))
+                .unwrap(),
+            "8099000102030405"
+        );
+        for low in [
+            Limits { work: 79, ..limits },
+            Limits {
+                retained_bytes: 15,
+                ..limits
+            },
+            Limits {
+                input_bytes: 15,
+                ..limits
+            },
+        ] {
+            assert!(
+                retained_raw_value_hex(&value, 0, &low, &mut producer::Budget::new(&low)).is_err()
+            );
+        }
+        // Two retained values need 32 hexadecimal bytes; the second copy is
+        // refused against a 31-byte aggregate even though each value is small.
+        let low = Limits {
+            work: 1000,
+            retained_bytes: 31,
+            ..Limits::default()
+        };
+        assert!(
+            retained_raw_value_hex(&value, 16, &low, &mut producer::Budget::new(&low)).is_err()
+        );
+    }
+}
+
+// A truncated final attribute is not a complete AttributeRange. Retain its
+// exact bounded bytes separately and locate conventional NLRI by outer lengths.
+fn attribute_envelope_fragment(
+    b: &[u8],
+    start: usize,
+    end: usize,
+    reason: &'static str,
+    budget: &mut producer::Budget<'_>,
+) -> Result<Json> {
+    budget.charge(
+        end.saturating_sub(start)
+            .saturating_mul(16)
+            .saturating_add(256),
+    )?;
+    Ok(Json::object([
+        ("reason", reason.into()),
+        (
+            "type",
+            if end - start >= 2 {
+                b[start + 1].into()
+            } else {
+                Json::Null
+            },
+        ),
+        ("start", start.into()),
+        ("end", end.into()),
+        ("sha256", payload_sha256(&b[start..end]).into()),
+    ]))
+}
+
+pub(crate) fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<Vec<AsPathSegment>> {
     if !matches!(width, 2 | 4) {
         return Err(Error::limit("bgp_asn_width"));
     }
@@ -2082,6 +2409,39 @@ fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<Vec<AsPathSe
     Ok(out)
 }
 
+// RFC 4271 requires valid host-address syntax. These classes are invalid
+// without knowing the receiver's interfaces or subnet; those local semantic
+// checks cannot be inferred from offline evidence. RFC 7606 retains TAW for
+// ordinary NEXT_HOP syntax errors through the owning attribute disposition.
+fn validate_ipv4_next_hop(address: Ipv4Addr, offset: usize) -> Result<()> {
+    if address.is_unspecified() || address.is_multicast() || address.is_broadcast() {
+        return Err(bad(
+            "bgp_next_hop",
+            offset,
+            "invalid IPv4 next-hop host address",
+        ));
+    }
+    Ok(())
+}
+
+// The declared RFC 2545 layout starts with a non-link-local unicast
+// address, optionally followed by a link-local address. Do not use is_global:
+// that would reject address scopes RFC 2545 deliberately treats together.
+fn validate_ipv6_global_next_hop(address: Ipv6Addr, offset: usize) -> Result<()> {
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+        || address.is_unicast_link_local()
+    {
+        return Err(bad(
+            "bgp_mp_reach",
+            offset,
+            "invalid non-link-local IPv6 next hop",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_mp_reach(
     b: &[u8],
     start: usize,
@@ -2126,17 +2486,31 @@ fn parse_mp_reach(
         return Err(bad("bgp_mp_reach", start + 3, "invalid next-hop length"));
     }
     let next_hop = if afi == 1 && next_hop_len >= 4 {
-        Ipv4Addr::new(b[start + 4], b[start + 5], b[start + 6], b[start + 7]).to_string()
+        let address = Ipv4Addr::new(b[start + 4], b[start + 5], b[start + 6], b[start + 7]);
+        validate_ipv4_next_hop(address, start + 4)?;
+        address.to_string()
     } else if afi == 2 && next_hop_len == 16 {
         let mut octets = [0u8; 16];
         octets.copy_from_slice(&b[start + 4..start + 20]);
-        Ipv6Addr::from(octets).to_string()
+        let global = Ipv6Addr::from(octets);
+        validate_ipv6_global_next_hop(global, start + 4)?;
+        global.to_string()
     } else if afi == 2 && next_hop_len == 32 {
         let mut global = [0u8; 16];
         let mut link_local = [0u8; 16];
         global.copy_from_slice(&b[start + 4..start + 20]);
         link_local.copy_from_slice(&b[start + 20..start + 36]);
-        format!("{},{}", Ipv6Addr::from(global), Ipv6Addr::from(link_local))
+        let global = Ipv6Addr::from(global);
+        let link_local = Ipv6Addr::from(link_local);
+        validate_ipv6_global_next_hop(global, start + 4)?;
+        if !link_local.is_unicast_link_local() {
+            return Err(bad(
+                "bgp_mp_reach",
+                start + 20,
+                "second IPv6 next hop must be link-local",
+            ));
+        }
+        format!("{global},{link_local}")
     } else {
         payload_sha256(&b[start + 4..next_hop_end])
     };
@@ -2165,6 +2539,32 @@ fn parse_mp_unreach(
         add_path,
         limits,
     )
+}
+
+/// Re-decode a retained known MP value for projection consistency. This does
+/// not grant capability or ADD-PATH context; the caller validates that context
+/// separately and never promotes a successful byte shape into negotiation.
+pub(crate) fn source_mp_value(
+    value: &[u8],
+    code: u8,
+    add_path: bool,
+    limits: &Limits,
+) -> Result<Json> {
+    if code == 14 {
+        let (next_hop, prefixes) = parse_mp_reach(value, 0, value.len(), add_path, limits)?;
+        Ok(Json::object([
+            ("next_hop", next_hop.into()),
+            (
+                "prefixes",
+                Json::array(prefixes.iter().map(|prefix| prefix.prefix.json())),
+            ),
+        ]))
+    } else {
+        let prefixes = parse_mp_unreach(value, 0, value.len(), add_path, limits)?;
+        Ok(Json::array(
+            prefixes.iter().map(|prefix| prefix.prefix.json()),
+        ))
+    }
 }
 
 fn payload_sha256(data: &[u8]) -> String {
@@ -2222,6 +2622,7 @@ mod tests {
             end: 3,
             sha256: "00".repeat(32),
             value_start: 2,
+            value_hex: None,
             value: Json::Null,
             interpretation: "decoded",
             repetition: "first",
@@ -2303,14 +2704,44 @@ mod tests {
     #[test]
     fn open_capability_selects_four_octet_asn_width_for_the_direction() {
         let mut b = vec![0xff; 16];
-        b.extend_from_slice(&[0, 37, 1, 4, 0xfd, 0xe8, 0, 90]);
+        // RFC 6793: non-mappable ASN65636 uses AS_TRANS23456 in My AS.
+        b.extend_from_slice(&[0, 37, 1, 4, 0x5b, 0xa0, 0, 90]);
         b.extend_from_slice(&[192, 0, 2, 2, 8, 2, 6, 65, 4, 0, 1, 0, 100]);
         let mut state = SessionState::default();
         let output = decode_pcap(&evidence(&b), meta(), &mut state, &Limits::default())
             .unwrap()
             .encode();
         assert_eq!(state.asn_width(0), 4);
+        let open = state.unambiguous_open(0).unwrap();
+        assert_eq!(open.autonomous_system, 23456);
+        assert_eq!(open.four_octet_asn, Some(65636));
+        assert!(!open.ambiguous);
+        assert!(!output.contains("open_asn_fields_inconsistent"));
         assert_eq!(state.generation, 0);
+        assert!(output.contains("\"four_octet_asn\":65636"));
+    }
+
+    #[test]
+    fn inconsistent_open_asn_fields_retain_advertisement_without_selecting_grammar() {
+        // Preserve the original adverse fixture as a bounded ambiguity control.
+        let mut b = vec![0xff; 16];
+        b.extend_from_slice(&[0, 37, 1, 4, 0xfd, 0xe8, 0, 90]);
+        b.extend_from_slice(&[192, 0, 2, 2, 8, 2, 6, 65, 4, 0, 1, 0, 100]);
+        let mut state = SessionState::default();
+        let output = decode_pcap(&evidence(&b), meta(), &mut state, &Limits::default())
+            .unwrap()
+            .encode();
+        let open = &state.opens[&0][0];
+        assert_eq!(open.autonomous_system, 65000);
+        assert_eq!(open.four_octet_asn, Some(65636));
+        assert_eq!(open.message_sha256, sha256::digest(&b));
+        assert!(open.ambiguous);
+        assert!(state.unambiguous_open(0).is_none());
+        let (layout, basis) = producer::layout_evidence(&state, true);
+        assert_eq!(layout.asn_width, 0);
+        assert_eq!(basis, "ambiguous_open_evidence");
+        assert_eq!(state.generation, 0);
+        assert!(output.contains("open_asn_fields_inconsistent"));
         assert!(output.contains("\"four_octet_asn\":65636"));
     }
 

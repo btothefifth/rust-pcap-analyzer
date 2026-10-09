@@ -33,7 +33,7 @@ pub struct Parser {
     ua: BTreeMap<(u32, u32), UaAssembly>,
     ua_last: BTreeMap<u32, u32>,
     last_frame: u64,
-    dnp_poisoned: bool,
+    requires_cut: bool,
 }
 impl Parser {
     pub fn new(protocol: &str, limits: Limits, context: Context) -> Result<Self> {
@@ -54,7 +54,7 @@ impl Parser {
             ua: BTreeMap::new(),
             ua_last: BTreeMap::new(),
             last_frame: 0,
-            dnp_poisoned: false,
+            requires_cut: false,
         })
     }
     fn length(&self) -> Result<Option<usize>> {
@@ -138,8 +138,13 @@ impl Parser {
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
         let result = self.feed_inner(offset, bytes, emit);
-        if self.protocol == "dnp3" && result.is_err() {
-            self.dnp_poisoned = true;
+        if result.is_err() {
+            self.requires_cut = true;
+            // Rejected continuation cannot retain an assembly for a later feed.
+            // DNP keeps its rejected witnesses for its existing cut report.
+            self.cotp = EvidenceBytes::default();
+            self.ua.clear();
+            self.ua_last.clear();
         }
         result
     }
@@ -149,9 +154,13 @@ impl Parser {
         bytes: &EvidenceBytes,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
-        if self.dnp_poisoned {
+        if self.requires_cut {
             return Err(bad(
-                "dnp_continuation_requires_cut",
+                if self.protocol == "dnp3" {
+                    "dnp_continuation_requires_cut"
+                } else {
+                    "continuation_requires_cut"
+                },
                 0,
                 "explicit cut required after rejected evidence",
             ));
@@ -181,7 +190,7 @@ impl Parser {
             while let Some(n) = match self.length() {
                 Ok(n) => n,
                 Err(e) => {
-                    self.dnp_poisoned = self.protocol == "dnp3";
+                    self.requires_cut = true;
                     return Err(e);
                 }
             } {
@@ -198,7 +207,7 @@ impl Parser {
                     Ok(report) => report,
                     Err(e) => {
                         if self.protocol == "dnp3" {
-                            self.dnp_poisoned = true;
+                            self.requires_cut = true;
                             let mut rejected = Report::new("dnp3.rejected", &raw, &self.limits)?;
                             rejected.note(
                                 match e.code {
@@ -483,6 +492,7 @@ impl Parser {
                 if self.cotp.spans().len().saturating_add(part.spans().len()) > self.limits.spans {
                     return Err(Error::limit("cotp_spans"));
                 }
+                self.check_retained(part.len(), "cotp_retained_bytes")?;
                 self.cotp.append(&part, self.limits.input_bytes)?;
                 if !c.eot {
                     return Ok(None);
@@ -499,33 +509,23 @@ impl Parser {
                 let b = raw.data();
                 need(b, 24, "ua_message")?;
                 let key = (le32(b, 8)?, le32(b, 20)?);
+                if !matches!(b[3], b'A' | b'C' | b'F') {
+                    return Err(bad("ua_chunk", 3, "unknown chunk flag"));
+                }
+                let token = le32(b, 12)?;
+                self.advance_ua_sequence(key.0, b, 16)?;
                 if b[3] == b'A' {
+                    if self.ua.get(&key).is_some_and(|s| s.token != token) {
+                        return Err(bad("ua_token", 12, "token changed inside chunked message"));
+                    }
                     self.ua.remove(&key);
                     return Ok(Some(super::opcua::decode(raw, true, &self.limits)?));
                 }
-                if !matches!(b[3], b'C' | b'F') {
-                    return Err(bad("ua_chunk", 3, "unknown chunk flag"));
-                }
-                let sequence = le32(b, 16)?;
-                let token = le32(b, 12)?;
-                if self.ua_last.len() >= self.limits.active && !self.ua_last.contains_key(&key.0) {
-                    return Err(Error::limit("ua_channels"));
-                }
-                if self.ua_last.get(&key.0).is_some_and(|previous| {
-                    sequence != previous.wrapping_add(1)
-                        && !(*previous > u32::MAX - 1024 && sequence < 1024)
-                }) {
-                    self.ua.remove(&key);
-                    return Err(bad(
-                        "ua_sequence",
-                        16,
-                        "gap/reorder/reuse in secure-channel sequence",
-                    ));
-                }
-                self.ua_last.insert(key.0, sequence);
                 if !self.ua.contains_key(&key) && self.ua.len() >= self.limits.active {
                     return Err(Error::limit("ua_messages"));
                 }
+                let part = raw.slice(24..raw.len())?;
+                self.check_retained(part.len(), "ua_retained_bytes")?;
                 let assembly = self.ua.entry(key).or_insert_with(|| UaAssembly {
                     token,
                     pending: EvidenceBytes::default(),
@@ -534,7 +534,6 @@ impl Parser {
                     return Err(bad("ua_token", 12, "token changed inside chunked message"));
                 }
                 let pending = &mut assembly.pending;
-                let part = raw.slice(24..raw.len())?;
                 if pending.spans().len().saturating_add(part.spans().len()) > self.limits.spans {
                     return Err(Error::limit("ua_spans"));
                 }
@@ -548,6 +547,35 @@ impl Parser {
                     .ok_or_else(|| bad("ua_chunks", 0, "missing body"))?;
                 Ok(Some(super::opcua::service(&body.pending, &self.limits)?))
             }
+            "opcua_tcp"
+                if self.context.ua_security_none
+                    && matches!(raw.data().get(..3), Some(b"OPN" | b"CLO")) =>
+            {
+                let b = raw.data();
+                // OPN has three variable-length asymmetric header fields. Use
+                // the same bounded Binary reader as the stateless decoder and
+                // never interpret a non-None policy's payload as a sequence.
+                need(b, 12, "ua_channel")?;
+                let sequence_at = if b.starts_with(b"OPN") {
+                    let mut header = super::opcua::Binary::new(&b[12..], &self.limits)?;
+                    let policy = header.string(true)?;
+                    header.string(false)?; // SenderCertificate
+                    header.string(false)?; // ReceiverCertificateThumbprint
+                    if policy
+                        != Json::String("http://opcfoundation.org/UA/SecurityPolicy#None".into())
+                    {
+                        return Ok(Some(super::opcua::decode(raw, true, &self.limits)?));
+                    }
+                    12 + header.at
+                } else {
+                    16 // CLO uses the symmetric TokenId header, like MSG.
+                };
+                let report = super::opcua::decode(raw, true, &self.limits)?;
+                self.advance_ua_sequence(le32(b, 8)?, b, sequence_at)?;
+                // Channel chronology is shared; MSG body assembly remains
+                // keyed separately by channel/request and is not changed here.
+                Ok(Some(report))
+            }
             protocol => Ok(Some(super::decode(
                 protocol,
                 raw,
@@ -555,6 +583,41 @@ impl Parser {
                 &self.limits,
             )?)),
         }
+    }
+    /// Part 6 section 6.7.2.4 assigns one sequence to every MessageChunk,
+    /// including OPN renewal and CLO; a new TokenId does not reset it.
+    fn advance_ua_sequence(&mut self, channel: u32, bytes: &[u8], at: usize) -> Result<()> {
+        let sequence = le32(bytes, at)?;
+        if self.ua_last.len() >= self.limits.active && !self.ua_last.contains_key(&channel) {
+            return Err(Error::limit("ua_channels"));
+        }
+        if self.ua_last.get(&channel).is_some_and(|previous| {
+            sequence != previous.wrapping_add(1)
+                && !(*previous > u32::MAX - 1024 && sequence < 1024)
+        }) {
+            return Err(bad(
+                "ua_sequence",
+                at,
+                "gap/reorder/reuse in secure-channel sequence",
+            ));
+        }
+        self.ua_last.insert(channel, sequence);
+        Ok(())
+    }
+    /// Logical retained payload across all concurrently open assemblies. Final
+    /// removal, abort, cut and rejected-feed cleanup release this budget.
+    fn check_retained(&self, additional: usize, field: &'static str) -> Result<()> {
+        let retained = self.ua.values().try_fold(self.cotp.len(), |n, assembly| {
+            n.checked_add(assembly.pending.len())
+                .ok_or_else(|| Error::limit(field))
+        })?;
+        if retained
+            .checked_add(additional)
+            .is_none_or(|n| n > self.limits.retained_bytes)
+        {
+            return Err(Error::limit(field));
+        }
+        Ok(())
     }
     fn dnp_semantic_limits(&self) -> pcap_evidence::semantics::Limits {
         let d = pcap_evidence::semantics::Limits::default();
@@ -589,14 +652,14 @@ impl Parser {
         )?;
         self.cotp = EvidenceBytes::default();
         self.dnp.clear();
-        self.dnp_poisoned = false;
+        self.requires_cut = false;
         self.ua.clear();
         self.ua_last.clear();
         r.note(Status::Incomplete, reason, 0, pending.len())?;
         Ok(r)
     }
     pub fn finish(&mut self) -> Result<Option<Report>> {
-        if self.dnp_poisoned
+        if self.requires_cut
             || !self.buffer.bytes().is_empty()
             || !self.cotp.is_empty()
             || !self.dnp.is_empty()

@@ -1,0 +1,8 @@
+# Test-only schema oracle runtime; provision explicitly before offline selectors.
+# This is separate from the dependency-free application and Rust workspaces.
+jsonschema==4.19.2
+attrs==25.4.0
+jsonschema-specifications==2023.12.1
+referencing==0.36.2
+rpds-py==0.27.1
+typing_extensions==4.15.0 ; python_version < "3.13"

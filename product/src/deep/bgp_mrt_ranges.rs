@@ -63,15 +63,8 @@ impl MrtBatch {
                 ))
             }
         };
-        if bytes.len() < 19
-            || bytes[..16] != [0xff; 16]
-            || usize::from(u16::from_be_bytes([bytes[16], bytes[17]])) != bytes.len()
-        {
-            return Err(bad(
-                "mrt_message_range",
-                0,
-                "embedded frame boundary disagrees",
-            ));
+        if bytes.is_empty() {
+            return Err(bad("mrt_message_range", 0, "embedded byte range is empty"));
         }
         let extended_time = if record.record_type == 17 { 4u64 } else { 0 };
         let preamble = extended_time + u64::from(width) * 2 + 4 + address_bytes * 2;
