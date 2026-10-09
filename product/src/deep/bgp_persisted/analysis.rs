@@ -1548,7 +1548,7 @@ impl VerifiedStore {
                     let o = &self.observations[oi];
                     let scope = inventory.scope(oi);
                     let gi = inventory.observation_groups[oi];
-                    if o.routes().is_empty() && query_scope(query, &scope) {
+                    if o.routes().is_empty() && query_scope(query, scope) {
                         changes.push(Change {
                             item: item.item,
                             route_index: None,
@@ -1589,7 +1589,7 @@ impl VerifiedStore {
                         };
                         let selector =
                             query_route(query, r, o, ri, &observation_clock(o, &self.namespace));
-                        if query_scope(query, &scope) {
+                        if query_scope(query, scope) {
                             let mut causes =
                                 query.route_attribute_uncertainties(r, o.normalized(), ri);
                             causes.extend(selector_metadata_uncertainties(
@@ -1608,7 +1608,7 @@ impl VerifiedStore {
                                 });
                             }
                         }
-                        if query_scope(query, &scope) && selector != "not_matched" {
+                        if query_scope(query, scope) && selector != "not_matched" {
                             changes.push(Change {
                                 item: item.item,
                                 route_index: Some(ri),
@@ -1818,13 +1818,13 @@ fn capture_event_matches(
     if let Some(bound) = &e.continuity {
         // Preserve even inert source occurrences in their exact reporting scope.
         let witness_scope = inventory.scope(bound.observation_index);
-        if query_scope(q, &witness_scope) {
+        if query_scope(q, witness_scope) {
             return Ok(true);
         }
         for group in &inventory.groups {
             let oi = group.ordinals[0];
             let scope = &group.scope;
-            if query_scope(q, &scope)
+            if query_scope(q, scope)
                 && captured_continuity_matches(store, event_index, oi, work, limits)?
             {
                 return Ok(true);
@@ -1837,7 +1837,7 @@ fn capture_event_matches(
         if e.scopes.iter().any(|s| {
             scope.lifecycle == Some(s.lifecycle)
                 && scope.session.as_deref() == Some(s.session.to_string().as_str())
-        }) && query_scope(q, &scope)
+        }) && query_scope(q, scope)
         {
             return Ok(true);
         }
