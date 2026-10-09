@@ -144,6 +144,15 @@ fn fixture(format: &str, bytes: &[u8], checkpoint: &str) -> Fixture {
     fixture_labeled(format, bytes, "source-a", checkpoint)
 }
 fn fixture_labeled(format: &str, bytes: &[u8], source: &str, checkpoint: &str) -> Fixture {
+    fixture_labeled_with_limits(format, bytes, source, checkpoint, Limits::default())
+}
+fn fixture_labeled_with_limits(
+    format: &str,
+    bytes: &[u8],
+    source: &str,
+    checkpoint: &str,
+    limits: Limits,
+) -> Fixture {
     let root = std::env::temp_dir().join(format!(
         "bgp-imported-analysis-{}-{}",
         std::process::id(),
@@ -164,7 +173,7 @@ fn fixture_labeled(format: &str, bytes: &[u8], source: &str, checkpoint: &str) -
             },
             1_048_576,
             BmpLimits::default(),
-            Limits::default(),
+            limits.clone(),
             bgp_bmp_store::BmpReplayOptions {
                 peer_relationship: options.peer_relationship,
             },
@@ -180,19 +189,13 @@ fn fixture_labeled(format: &str, bytes: &[u8], source: &str, checkpoint: &str) -
             },
             1_048_576,
             MrtLimits::default(),
-            Limits::default(),
+            limits.clone(),
             options,
         )
         .unwrap();
     }
-    let store = VerifiedStore::load(
-        &path,
-        1_048_576,
-        MrtLimits::default(),
-        Limits::default(),
-        options,
-    )
-    .unwrap();
+    let store =
+        VerifiedStore::load(&path, 1_048_576, MrtLimits::default(), limits, options).unwrap();
     Fixture { root, path, store }
 }
 fn profile(store: &VerifiedStore, session: &str, prefix: &str, presence: &str) -> String {
@@ -211,18 +214,36 @@ fn changes(f: &Fixture, q: &Query) -> String {
 fn assert_json(output: &str, predicate: &str, arguments: &[&str]) {
     // Reuse the owner suite's independent Python stdlib JSON traversal.
     let python = std::env::var("PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) { "python".into() } else { "python3".into() }
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
     });
     let program = format!("import json,sys\nd=json.load(sys.stdin)\n{predicate}");
-    let mut child = Command::new(python).args(["-c", &program, "stdin"]).args(arguments)
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut child = Command::new(python)
+        .args(["-c", &program, "stdin"])
+        .args(arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
     {
         use std::io::Write;
-        child.stdin.take().unwrap().write_all(output.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(output.as_bytes())
+            .unwrap();
     }
     let run = child.wait_with_output().unwrap();
-    assert!(run.status.success(), "{}\n{output}", String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "{}\n{output}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 fn expect(f: &Fixture, session: &str, prefix: &str, presence: &str, status: &str) {
     let text = profile(&f.store, session, prefix, presence);
@@ -1185,4 +1206,185 @@ fn multi_effect_bmp_mrt_producer_limits_reject_without_publishing_destination() 
             );
         }
     }
+}
+
+#[test]
+fn imported_change_classification_preserves_difference_and_exact_effect_witnesses() {
+    let (bytes, _, _) = bmp_bytes(true, true, false, false);
+    for (format, bytes, expected) in [
+        ("bmp", bytes, "applied_native_gap"),
+        ("mrt", mrt_bytes(false, true), "applied_native_reset"),
+    ] {
+        let f = fixture(format, &bytes, "checkpoint-a");
+        for output in [changes(&f, &Query::default()), cli(&f, "changes", &[])] {
+            assert_json(
+                &output,
+                r#"
+rows=[e for e in d['events'] if 'native_effect_classification' in e]
+assert rows
+expected=sys.argv[2]
+assert any(e['native_effect_classification']==expected for e in rows)
+for e in rows:
+ assert e['difference']=='source_metadata_or_boundary_no_route_action'
+ assert e['source_id']=='source-a' and e['checkpoint_id']=='checkpoint-a'
+ effects=e['native_continuity']
+ kinds={x['kind'] for x in effects}
+ classification='applied_native_reset_and_gap' if kinds=={'reset','gap'} else ('applied_native_reset' if kinds=={'reset'} else ('applied_native_gap' if kinds=={'gap'} else 'no_applied_native_effect'))
+ assert e['native_effect_classification']==classification
+ assert all(x['source_id']==e['source_id'] and x['partition_id'].startswith('import-context-v1:') and x['record_id'] and x['native_status'] in ('Applied','IdentityConflict','MissingScope') for x in effects)
+"#,
+                &[expected],
+            );
+        }
+    }
+}
+
+#[test]
+fn imported_scope_inventory_bounds_many_irrelevant_scope_scans_at_public_consumers() {
+    // Eight independently identified peers, both directional native scopes admitted,
+    // then one source-built malformed RM per peer. Each native gap is unrelated
+    // to the caller's exact peer. The old nested loops visit at least
+    // 256 expectation rows * 16 effects * 16 observations = 65,536
+    // observation members, before any event/route work. This is an independent
+    // static model, not a measured visit count or a consumer-refusal claim.
+    let mut bytes = Vec::new();
+    for id in 1..=8 {
+        bytes.extend(up(id));
+        bytes.extend(rm(id, 0));
+        bytes.extend(rm(id, 0x40));
+    }
+    for id in 1..=8 {
+        bytes.extend(bmp(0, &peer(id, 0)));
+    }
+    // This finite source uses explicit 64 MiB logical work and retention grants
+    // plus 65,536 fields for both setup and analysis.
+    // All other caps and production defaults remain unchanged; setup is
+    // excluded from the terminal operation measurement.
+    assert!(bytes.len() < 65_536);
+    let f = fixture_labeled_with_limits(
+        "bmp",
+        &bytes,
+        "source-a",
+        "checkpoint-a",
+        Limits {
+            work: 64 * 1024 * 1024,
+            retained_bytes: 64 * 1024 * 1024,
+            fields: 65_536,
+            ..Limits::default()
+        },
+    );
+    assert_eq!(f.store.observations().len(), 16);
+    assert_eq!(
+        f.store
+            .imported_source_events()
+            .iter()
+            .map(|e| e.native_continuity.len())
+            .sum::<usize>(),
+        16
+    );
+    let base = profile(&f.store, "bmp:0:pre", "198.51.100.0/24", "absent");
+    let make_profile = |base: &str, count: usize| {
+        let header = base
+            .lines()
+            .filter(|line| !line.starts_with("expectation="))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let fields = base
+            .lines()
+            .find(|line| line.starts_with("expectation="))
+            .unwrap()
+            .strip_prefix("expectation=")
+            .unwrap()
+            .split('|')
+            .collect::<Vec<_>>();
+        let mut text = header.clone();
+        for i in 0..count {
+            let mut row = fields.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            row[0] = format!("scope-{i}");
+            row[7] = "unrelated-peer".into();
+            text.push_str(&format!("expectation={}\n", row.join("|")));
+        }
+        text
+    };
+    let high = Limits {
+        fields: 65_536,
+        work: 64 * 1024 * 1024,
+        retained_bytes: 64 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let expectation_rows = 256usize;
+    let text = make_profile(&base, expectation_rows);
+    let analytic_profile = ExpectationProfile::parse(text.as_bytes(), &high).unwrap();
+    let started = std::time::Instant::now();
+    let expected = f.store.expectations(&analytic_profile, &high).unwrap();
+    let elapsed = started.elapsed();
+    eprintln!("scale_terminal_elapsed_ns={} output_sha256={} output_bytes={} modeled_old_observation_visits={}",
+        elapsed.as_nanos(), pcap_evidence::sha256::hex(&pcap_evidence::sha256::digest(expected.as_bytes())), expected.len(), expectation_rows * 16 * 16);
+    assert_json(&expected, "assert len(d['results'])==int(sys.argv[2]); assert all(r['status']=='unresolved' and r['reason']=='no_observed_exact_scope' and r['scoped_observations']==0 and r['witnesses']==[] and r['imported_boundary_witnesses']==[] for r in d['results'])", &[&expectation_rows.to_string()]);
+    let mut low = 1usize;
+    let mut upper = high.work;
+    while low < upper {
+        let middle = low + (upper - low) / 2;
+        let limits = Limits {
+            work: middle,
+            ..high.clone()
+        };
+        if f.store.expectations(&analytic_profile, &limits).is_ok() {
+            upper = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    assert_eq!(
+        f.store
+            .expectations(
+                &analytic_profile,
+                &Limits {
+                    work: low,
+                    ..high.clone()
+                }
+            )
+            .unwrap(),
+        expected
+    );
+    let below = f
+        .store
+        .expectations(
+            &analytic_profile,
+            &Limits {
+                work: low - 1,
+                ..high.clone()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(below.code, pcap_evidence::ErrorCode::LimitExceeded);
+    eprintln!(
+        "scale_work_frontier={} below_error_field={}",
+        low, below.field
+    );
+    // The rejection owner identifies whether store preflight, output admission,
+    // or analysis work controls this fixture's threshold; no scan-specific
+    // frontier is inferred from a source/output refusal.
+    // The CLI owns default producer/load and field caps. Its sibling fixture
+    // uses the same independently built wire/scope semantics at small scale,
+    // preserving an ordinary public CLI join without changing those defaults.
+    let (small_bytes, _, _) = bmp_bytes(true, true, false, false);
+    let small = fixture("bmp", &small_bytes, "checkpoint-a");
+    let base = profile(&small.store, "bmp:0:pre", "198.51.100.0/24", "absent");
+    let text = make_profile(&base, 8);
+    let path = small.root.join("scoped-profile.txt");
+    fs::write(&path, &text).unwrap();
+    let profile = ExpectationProfile::parse(text.as_bytes(), &Limits::default()).unwrap();
+    let api = small
+        .store
+        .expectations(&profile, &Limits::default())
+        .unwrap();
+    let cli = cli(
+        &small,
+        "expectations",
+        &["--profile", path.to_str().unwrap()],
+    );
+    assert_json(&cli, "assert len(d['results'])==8; assert all(r['status']=='unresolved' and r['scoped_observations']==0 and r['imported_boundary_witnesses']==[] for r in d['results'])", &[]);
+    assert_eq!(api.trim(), cli.trim());
 }

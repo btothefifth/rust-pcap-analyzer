@@ -22,7 +22,19 @@ remain unchanged. Imported change events expose this inventory in
 `native_continuity`, alongside typed `source_id` and `checkpoint_id`; the original
 `reference`, `import_context` and `continuity_cuts` remain evidence of the source
 occurrence. The inventory contains newly admitted effects only; its generation
-fields are independent of the occurrence's original reporting generation. An empty native-effect inventory does not clear predecessor
+fields are independent of the occurrence's original reporting generation.
+Imported change events also expose `native_effect_classification`:
+`applied_native_gap`, `applied_native_reset`, `applied_native_reset_and_gap`, or
+`no_applied_native_effect`. The value summarizes the kinds in that occurrence's
+newly admitted `native_continuity` inventory. It does not reinterpret the
+reporting generation or replace the exact native scope and record witnesses.
+This field is additive: `difference` retains
+`source_metadata_or_boundary_no_route_action` for these imported source events,
+and the changes result remains `pcap-evidence.bgp.changes.v1`. Consumers that
+read individual fields retain their existing meanings; consumers that require
+an exact event key set must explicitly accept this additional field. An applied
+native boundary is an observed continuity effect, not a synthetic per-prefix
+withdrawal or a claim of endpoint route installation. An empty native-effect inventory does not clear predecessor
 state or become an all-scope boundary. Metadata with unavailable session context
 still has its exact verified source and checkpoint identity; an explicit known
 source or checkpoint mismatch excludes it. Immutable replay remains a distinct source occurrence and does

@@ -527,6 +527,199 @@ fn native_scope(store: &VerifiedStore, index: usize, limits: &Limits) -> Result<
             .map(|c| c.lifecycle),
     })
 }
+/// An operation-local access path over immutable verified observation ordinals.
+/// It carries no continuity state: the native producer remains the effect owner.
+struct ScopeGroup {
+    scope: NativeScope,
+    // Created once from scope during admitted construction, then immutable.
+    // This matching projection never owns or reduces continuity state.
+    rib_scope: Option<crate::deep::bgp_rib::RibScope>,
+    ordinals: Vec<usize>,
+}
+struct ScopeInventory {
+    groups: Vec<ScopeGroup>,
+    observation_groups: Vec<usize>,
+    allocation: usize,
+}
+impl ScopeInventory {
+    fn new(
+        store: &VerifiedStore,
+        held_allocation: usize,
+        work: &mut usize,
+        limits: &Limits,
+    ) -> Result<Self> {
+        // Admit the worst case (one group per observation), its ordinals/map,
+        // and temporary scope construction before any inventory allocation.
+        let mut allocation = 0usize;
+        for observation in &store.observations {
+            let source = observation.source();
+            let mut labels = source
+                .source_id
+                .len()
+                .checked_add(store.namespace.len())
+                .and_then(|n| n.checked_add(source.session.as_ref().map_or(0, String::len)))
+                .and_then(|n| n.checked_add(source.peer.as_ref().map_or(0, String::len)))
+                .ok_or_else(|| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+            if let Some(context) = observation.import_context() {
+                for size in [
+                    context.source_id.len(),
+                    context.session.len(),
+                    context.source_schema.len(),
+                    context.source_version.as_ref().map_or(0, String::len),
+                    context.checkpoint_id.len(),
+                    context.peer.as_ref().map_or(0, String::len),
+                    context.local.as_ref().map_or(0, String::len),
+                    context.batch.batch_id.as_ref().map_or(0, String::len),
+                    context.batch.sha256.as_ref().map_or(0, String::len),
+                ] {
+                    labels = labels
+                        .checked_add(size)
+                        .ok_or_else(|| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+                }
+            }
+            // String escaping is at most six bytes per input byte; twelve
+            // covers partition serialization scratch and retained scope copies.
+            // Fixed charge includes map/vector/group slots and numeric JSON keys.
+            let bytes = labels
+                .checked_mul(12)
+                .and_then(|n| n.checked_add(2048))
+                .ok_or_else(|| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+            admit_allocation(bytes, &mut allocation, limits)?;
+        }
+        if held_allocation
+            .checked_add(allocation)
+            .is_none_or(|n| n > limits.retained_bytes)
+        {
+            return Err(Error::limit("bgp_analysis_scope_inventory_allocation"));
+        }
+        let comparisons = store
+            .observations
+            .len()
+            .checked_mul(
+                (usize::BITS - store.observations.len().max(1).leading_zeros()) as usize + 1,
+            )
+            .ok_or_else(|| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+        charge_work(
+            work,
+            allocation
+                .checked_add(comparisons)
+                .ok_or_else(|| Error::limit("bgp_analysis_scope_inventory_allocation"))?,
+            limits,
+        )?;
+        let mut grouped: BTreeMap<NativeScope, Vec<usize>> = BTreeMap::new();
+        for oi in 0..store.observations.len() {
+            let ordinals = grouped.entry(native_scope(store, oi, limits)?).or_default();
+            ordinals
+                .try_reserve(1)
+                .map_err(|_| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+            ordinals.push(oi);
+        }
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(grouped.len())
+            .map_err(|_| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+        let mut observation_groups = Vec::new();
+        observation_groups
+            .try_reserve_exact(store.observations.len())
+            .map_err(|_| Error::limit("bgp_analysis_scope_inventory_allocation"))?;
+        observation_groups.resize(store.observations.len(), 0);
+        for (scope, ordinals) in grouped {
+            let gi = groups.len();
+            for &oi in &ordinals {
+                observation_groups[oi] = gi;
+            }
+            let rib_scope =
+                scope
+                    .session
+                    .as_ref()
+                    .zip(scope.generation)
+                    .map(|(session, generation)| crate::deep::bgp_rib::RibScope {
+                        source: scope.source.clone(),
+                        session: session.clone(),
+                        generation,
+                        direction: scope.direction,
+                        peer: scope.peer.clone(),
+                    });
+            groups.push(ScopeGroup {
+                scope,
+                rib_scope,
+                ordinals,
+            });
+        }
+        Ok(Self {
+            groups,
+            observation_groups,
+            allocation,
+        })
+    }
+    fn lookup_work(&self) -> usize {
+        (usize::BITS - self.groups.len().max(1).leading_zeros()) as usize * 2 + 1
+    }
+    fn scope(&self, oi: usize) -> &NativeScope {
+        &self.groups[self.observation_groups[oi]].scope
+    }
+    fn session_range(
+        &self,
+        source: &crate::deep::bgp_session::SourcePartition,
+        session: &str,
+    ) -> std::ops::Range<usize> {
+        let compare = |group: &ScopeGroup| {
+            group
+                .scope
+                .source
+                .cmp(source)
+                .then_with(|| group.scope.session.as_deref().cmp(&Some(session)))
+        };
+        self.groups.partition_point(|g| compare(g).is_lt())
+            ..self.groups.partition_point(|g| !compare(g).is_gt())
+    }
+    fn expectation_ordinals(
+        &self,
+        e: &Expectation,
+        work: &mut usize,
+        limits: &Limits,
+    ) -> Result<&[usize]> {
+        charge_work(work, self.lookup_work(), limits)?;
+        // The exact expectation scope includes native absence, never wildcard.
+        // Source/session narrowing avoids constructing another partition/projection.
+        let source = e.query.source.as_deref();
+        let partition = e.query.partition.as_deref();
+        let compare = |group: &ScopeGroup| {
+            Some(group.scope.source.source_id.as_str())
+                .cmp(&source)
+                .then_with(|| Some(group.scope.source.partition_id.as_str()).cmp(&partition))
+                .then_with(|| group.scope.session.cmp(&e.query.session))
+        };
+        // Imported and captured groups have different SourcePartition kind order;
+        // select that kind from the explicit lifecycle rather than an ambient default.
+        let kind = if e.lifecycle.is_some() {
+            PartitionKind::Captured
+        } else {
+            PartitionKind::Imported
+        };
+        let compare = |g: &ScopeGroup| g.scope.source.kind.cmp(&kind).then_with(|| compare(g));
+        let start = self.groups.partition_point(|g| compare(g).is_lt());
+        let end = self.groups.partition_point(|g| !compare(g).is_gt());
+        charge_work(work, end - start, limits)?;
+        Ok(self.groups[start..end]
+            .iter()
+            .find(|g| expectation_scope(e, &g.scope))
+            .map_or(&[], |g| g.ordinals.as_slice()))
+    }
+    fn imported_effect_matches(
+        &self,
+        gi: usize,
+        effect: &crate::deep::bgp_import::ImportedNativeContinuity,
+        work: &mut usize,
+        limits: &Limits,
+    ) -> Result<bool> {
+        charge_work(work, 1, limits)?;
+        Ok(self.groups[gi]
+            .rib_scope
+            .as_ref()
+            .is_some_and(|scope| effect.affects_scope(scope)))
+    }
+}
 fn expectation_scope(e: &Expectation, s: &NativeScope) -> bool {
     e.query.source.as_deref() == Some(s.source.source_id.as_str())
         && e.query.partition.as_deref() == Some(s.source.partition_id.as_str())
@@ -651,10 +844,12 @@ impl VerifiedStore {
             return Err(Error::limit("bgp_expectation_work"));
         }
         let mut work = 0usize;
+        let inventory = ScopeInventory::new(self, member_bound * 64, &mut work, limits)?;
         let mut evaluations = Vec::new();
         for e in &profile.expectations {
             e.query.validate()?;
             identity(&e.id)?;
+            let scoped_ordinals = inventory.expectation_ordinals(e, &mut work, limits)?;
             let mut evaluation = ExpectationEvaluation {
                 status: "unresolved",
                 reason: "unknown_source_coverage",
@@ -665,16 +860,13 @@ impl VerifiedStore {
                 boundary_witnesses: Vec::new(),
                 imported_boundary_witnesses: Vec::new(),
             };
-            for (oi, o) in self.observations.iter().enumerate() {
+            for &oi in scoped_ordinals {
+                let o = &self.observations[oi];
                 work = work
                     .checked_add(1 + o.routes().len())
                     .ok_or_else(|| Error::limit("bgp_expectation_work"))?;
                 if work > limits.work {
                     return Err(Error::limit("bgp_expectation_work"));
-                }
-                let scope = native_scope(self, oi, limits)?;
-                if !expectation_scope(e, &scope) {
-                    continue;
                 }
                 evaluation.scoped_observations += 1;
                 // Captured MESSAGE effects come only from the native carrier;
@@ -727,14 +919,10 @@ impl VerifiedStore {
                 if event.continuity.is_some() {
                     // The producer owns scope/effect semantics, including inert
                     // immutable replay and whole-generation native quarantine.
-                    for (oi, _) in self.observations.iter().enumerate() {
+                    if let Some(&oi) = scoped_ordinals.first() {
                         charge_work(&mut work, 1, limits)?;
-                        let scope = native_scope(self, oi, limits)?;
-                        if expectation_scope(e, &scope)
-                            && captured_continuity_matches(self, ei, oi, &mut work, limits)?
-                        {
+                        if captured_continuity_matches(self, ei, oi, &mut work, limits)? {
                             relevant = true;
-                            break;
                         }
                     }
                 } else {
@@ -780,23 +968,10 @@ impl VerifiedStore {
                 {
                     for effect in &event.native_continuity {
                         charge_work(&mut work, 1, limits)?;
-                        for (oi, _) in self.observations.iter().enumerate() {
-                            charge_work(&mut work, 1, limits)?;
-                            let scope = native_scope(self, oi, limits)?;
-                            if expectation_scope(e, &scope) {
-                                if let (Some(session), Some(generation)) =
-                                    (&scope.session, scope.generation)
-                                {
-                                    matches |=
-                                        effect.affects_scope(&crate::deep::bgp_rib::RibScope {
-                                            source: scope.source,
-                                            session: session.clone(),
-                                            generation,
-                                            direction: scope.direction,
-                                            peer: scope.peer,
-                                        });
-                                }
-                            }
+                        if let Some(&oi) = scoped_ordinals.first() {
+                            let gi = inventory.observation_groups[oi];
+                            matches |=
+                                inventory.imported_effect_matches(gi, effect, &mut work, limits)?;
                         }
                         let scope = imported_effect_scope(effect, &event.checkpoint_id);
                         if expectation_scope(e, &scope) {
@@ -849,6 +1024,7 @@ impl VerifiedStore {
             .expectations
             .len()
             .checked_mul(8192)
+            .and_then(|n| n.checked_add(inventory.allocation))
             .ok_or_else(|| Error::limit("bgp_analysis_allocation"))?;
         for evaluation in &evaluations {
             for &(oi, _) in &evaluation.matched {
@@ -1134,7 +1310,6 @@ struct SelectorAvailability {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ChangeKey {
-    scope: NativeScope,
     prefix: PrefixIdentity,
     path_id: RoutePathId,
 }
@@ -1284,6 +1459,8 @@ impl VerifiedStore {
         if estimated > limits.retained_bytes {
             return Err(Error::limit("bgp_changes_retained"));
         }
+        let mut inventory_work = 0usize;
+        let inventory = ScopeInventory::new(self, estimated, &mut inventory_work, limits)?;
         let mut items = Vec::new();
         items
             .try_reserve_exact(count)
@@ -1349,11 +1526,12 @@ impl VerifiedStore {
         }
         // Source ordinal sort only. No reported clock or cross-store input participates.
         items.sort_by_key(|e| (e.record, e.suborder));
-        let mut previous: BTreeMap<ChangeKey, (usize, usize)> = BTreeMap::new();
+        let mut previous: BTreeMap<usize, BTreeMap<ChangeKey, (usize, usize)>> = BTreeMap::new();
         let mut changes = Vec::new();
         let mut availability = Vec::new();
         let mut work = count
             .checked_mul((usize::BITS - count.max(1).leading_zeros()) as usize + 2)
+            .and_then(|n| n.checked_add(inventory_work))
             .ok_or_else(|| Error::limit("bgp_changes_work"))?;
         if work > limits.work {
             return Err(Error::limit("bgp_changes_work"));
@@ -1368,7 +1546,8 @@ impl VerifiedStore {
             match item.item {
                 SourceItem::Observation(oi) => {
                     let o = &self.observations[oi];
-                    let scope = native_scope(self, oi, limits)?;
+                    let scope = inventory.scope(oi);
+                    let gi = inventory.observation_groups[oi];
                     if o.routes().is_empty() && query_scope(query, &scope) {
                         changes.push(Change {
                             item: item.item,
@@ -1387,11 +1566,13 @@ impl VerifiedStore {
                             return Err(Error::limit("bgp_changes_work"));
                         }
                         let key = ChangeKey {
-                            scope: scope.clone(),
                             prefix: r.prefix().clone(),
                             path_id: r.path_id(),
                         };
-                        let before = previous.get(&key).copied();
+                        let before = previous
+                            .get(&gi)
+                            .and_then(|routes| routes.get(&key))
+                            .copied();
                         let difference = match (r.action(), before) {
                             (bgp::RouteAction::Withdraw, _) => "explicit_withdrawal_observed",
                             (_, None) => "first_announcement_in_observed_segment",
@@ -1438,9 +1619,9 @@ impl VerifiedStore {
                             });
                         }
                         if r.action() == bgp::RouteAction::Announce {
-                            previous.insert(key, (oi, ri));
-                        } else {
-                            previous.remove(&key);
+                            previous.entry(gi).or_default().insert(key, (oi, ri));
+                        } else if let Some(routes) = previous.get_mut(&gi) {
+                            routes.remove(&key);
                         }
                     }
                 }
@@ -1450,12 +1631,20 @@ impl VerifiedStore {
                         // Reduce the complete source order before query filtering.
                         // Fallible canonical matching admits its aggregate copy work.
                         let mut failure = None;
-                        previous.retain(|_, (oi, _)| {
+                        previous.retain(|gi, routes| {
                             if failure.is_some() {
                                 return true;
                             }
-                            match captured_continuity_matches(self, ei, *oi, &mut work, limits) {
-                                Ok(affected) => !affected,
+                            let oi = inventory.groups[*gi].ordinals[0];
+                            match captured_continuity_matches(self, ei, oi, &mut work, limits) {
+                                Ok(true) => match charge_work(&mut work, routes.len(), limits) {
+                                    Ok(()) => false,
+                                    Err(error) => {
+                                        failure = Some(error);
+                                        true
+                                    }
+                                },
+                                Ok(false) => true,
                                 Err(error) => {
                                     failure = Some(error);
                                     true
@@ -1474,23 +1663,30 @@ impl VerifiedStore {
                                 .ok_or_else(|| Error::limit("bgp_changes_work"))?,
                             limits,
                         )?;
-                        previous.retain(|k, _| {
+                        charge_work(
+                            &mut work,
+                            previous.values().map(BTreeMap::len).sum(),
+                            limits,
+                        )?;
+                        previous.retain(|gi, _| {
+                            let scope = &inventory.groups[*gi].scope;
                             !e.scopes.iter().any(|s| {
-                                k.scope.lifecycle == Some(s.lifecycle)
-                                    && k.scope.session.as_deref()
+                                scope.lifecycle == Some(s.lifecycle)
+                                    && scope.session.as_deref()
                                         == Some(s.session.to_string().as_str())
                             })
                         });
                     }
                     charge_work(
                         &mut work,
-                        self.observations
+                        inventory
+                            .groups
                             .len()
                             .checked_mul(e.scopes.len().saturating_add(1))
                             .ok_or_else(|| Error::limit("bgp_changes_work"))?,
                         limits,
                     )?;
-                    if capture_event_matches(self, query, ei, &mut work, limits)? {
+                    if capture_event_matches(self, &inventory, query, ei, &mut work, limits)? {
                         changes.push(Change {
                             item: item.item,
                             route_index: None,
@@ -1520,10 +1716,19 @@ impl VerifiedStore {
                         limits,
                     )?;
                     for effect in &e.native_continuity {
-                        charge_work(&mut work, previous.len(), limits)?;
-                        clear_import_effect(&mut previous, effect);
+                        charge_work(&mut work, inventory.lookup_work(), limits)?;
+                        for gi in
+                            inventory.session_range(&effect.scope.source, &effect.scope.session)
+                        {
+                            if inventory.imported_effect_matches(gi, effect, &mut work, limits)? {
+                                // Removing a group still visits/drops its retained route keys.
+                                let routes = previous.get(&gi).map_or(0, BTreeMap::len);
+                                charge_work(&mut work, routes + inventory.lookup_work(), limits)?;
+                                previous.remove(&gi);
+                            }
+                        }
                     }
-                    if import_event_matches(self, query, e, &mut work, limits)? {
+                    if import_event_matches(&inventory, query, e, &mut work, limits)? {
                         changes.push(Change {
                             item: item.item,
                             route_index: None,
@@ -1536,7 +1741,7 @@ impl VerifiedStore {
                 }
             }
         }
-        let mut allocation = 0usize;
+        let mut allocation = inventory.allocation;
         for c in &changes {
             match c.item {
                 SourceItem::Observation(oi) => {
@@ -1563,7 +1768,7 @@ impl VerifiedStore {
         for a in &availability {
             admit_witness_allocation(self, a.observation_index, &mut allocation, limits)?;
         }
-        let base = changes_document(self, &changes, &availability, false, limits)?;
+        let base = changes_document(self, &inventory, &changes, &availability, false)?;
         let mut borrowed = Vec::new();
         for c in &changes {
             if let SourceItem::Observation(oi) = c.item {
@@ -1578,7 +1783,7 @@ impl VerifiedStore {
         }
         admit_borrowed_document(&base, &borrowed, limits)?;
         bounded_output(
-            changes_document(self, &changes, &availability, true, limits)?,
+            changes_document(self, &inventory, &changes, &availability, true)?,
             limits,
         )
     }
@@ -1600,6 +1805,7 @@ fn captured_continuity_matches(
 }
 fn capture_event_matches(
     store: &VerifiedStore,
+    inventory: &ScopeInventory,
     q: &Query,
     event_index: usize,
     work: &mut usize,
@@ -1611,12 +1817,13 @@ fn capture_event_matches(
     }
     if let Some(bound) = &e.continuity {
         // Preserve even inert source occurrences in their exact reporting scope.
-        let witness_scope = native_scope(store, bound.observation_index, limits)?;
+        let witness_scope = inventory.scope(bound.observation_index);
         if query_scope(q, &witness_scope) {
             return Ok(true);
         }
-        for (oi, _) in store.observations.iter().enumerate() {
-            let scope = native_scope(store, oi, limits)?;
+        for group in &inventory.groups {
+            let oi = group.ordinals[0];
+            let scope = &group.scope;
             if query_scope(q, &scope)
                 && captured_continuity_matches(store, event_index, oi, work, limits)?
             {
@@ -1625,8 +1832,8 @@ fn capture_event_matches(
         }
         return Ok(false);
     }
-    for (oi, _) in store.observations.iter().enumerate() {
-        let scope = native_scope(store, oi, limits)?;
+    for group in &inventory.groups {
+        let scope = &group.scope;
         if e.scopes.iter().any(|s| {
             scope.lifecycle == Some(s.lifecycle)
                 && scope.session.as_deref() == Some(s.session.to_string().as_str())
@@ -1675,23 +1882,6 @@ fn imported_event_breaks_continuity(e: &crate::deep::bgp_import::ImportedSourceE
         K::ContinuityGap | K::GenerationBoundary | K::Notification
     ) || e.kind == K::Opaque && e.context.is_some()
 }
-fn clear_import_effect(
-    previous: &mut BTreeMap<ChangeKey, (usize, usize)>,
-    effect: &crate::deep::bgp_import::ImportedNativeContinuity,
-) {
-    previous.retain(|key, _| {
-        let (Some(session), Some(generation)) = (&key.scope.session, key.scope.generation) else {
-            return true;
-        };
-        !effect.affects_scope(&crate::deep::bgp_rib::RibScope {
-            source: key.scope.source.clone(),
-            session: session.clone(),
-            generation,
-            direction: key.scope.direction,
-            peer: key.scope.peer.clone(),
-        })
-    });
-}
 fn import_context_scope(
     c: &crate::deep::bgp_import::ImportContext,
     limits: &Limits,
@@ -1721,7 +1911,7 @@ fn imported_effect_scope(
     }
 }
 fn import_event_matches(
-    store: &VerifiedStore,
+    inventory: &ScopeInventory,
     q: &Query,
     e: &crate::deep::bgp_import::ImportedSourceEvent,
     work: &mut usize,
@@ -1738,24 +1928,16 @@ fn import_event_matches(
         return Ok(false);
     }
     for effect in &e.native_continuity {
+        charge_work(work, inventory.lookup_work(), limits)?;
         // Canonical continuity can broaden direction within an admitted native
         // partition. Select the actual scope first; query peer text cannot
         // manufacture a different peer inside that immutable partition.
-        for (oi, _) in store.observations.iter().enumerate() {
+        for gi in inventory.session_range(&effect.scope.source, &effect.scope.session) {
             charge_work(work, 1, limits)?;
-            let scope = native_scope(store, oi, limits)?;
-            if query_scope(q, &scope) {
-                if let (Some(session), Some(generation)) = (&scope.session, scope.generation) {
-                    if effect.affects_scope(&crate::deep::bgp_rib::RibScope {
-                        source: scope.source,
-                        session: session.clone(),
-                        generation,
-                        direction: scope.direction,
-                        peer: scope.peer,
-                    }) {
-                        return Ok(true);
-                    }
-                }
+            if query_scope(q, &inventory.groups[gi].scope)
+                && inventory.imported_effect_matches(gi, effect, work, limits)?
+            {
+                return Ok(true);
             }
         }
         // Gap-only native scopes can precede normalized observations. Their
@@ -1779,16 +1961,11 @@ fn import_event_matches(
 }
 fn changes_document(
     store: &VerifiedStore,
+    inventory: &ScopeInventory,
     changes: &[Change],
     availability: &[SelectorAvailability],
     full: bool,
-    limits: &Limits,
 ) -> Result<Json> {
-    for c in changes {
-        if let SourceItem::Observation(oi) = c.item {
-            native_scope(store, oi, limits)?;
-        }
-    }
     Ok(Json::object([
         ("schema", CHANGES_SCHEMA.into()),
         ("store", store.reference()),
@@ -1862,12 +2039,7 @@ fn changes_document(
                                 }))
                             }),
                         ),
-                        (
-                            "native_scope",
-                            native_scope(store, oi, limits)
-                                .map(|s| s.json())
-                                .unwrap_or(Json::Null),
-                        ),
+                        ("native_scope", inventory.scope(oi).json()),
                         ("reference", observation_reference(store, oi)),
                         ("route_index", c.route_index.map_or(Json::Null, Json::from)),
                         (
@@ -1932,6 +2104,21 @@ fn changes_document(
                         ("reference", e.reference.clone()),
                         ("source_id", e.source_id.clone().into()),
                         ("checkpoint_id", e.checkpoint_id.clone().into()),
+                        (
+                            "native_effect_classification",
+                            if e.native_continuity.iter().any(|effect| effect.is_reset())
+                                && e.native_continuity.iter().any(|effect| !effect.is_reset())
+                            {
+                                "applied_native_reset_and_gap"
+                            } else if e.native_continuity.iter().any(|effect| effect.is_reset()) {
+                                "applied_native_reset"
+                            } else if !e.native_continuity.is_empty() {
+                                "applied_native_gap"
+                            } else {
+                                "no_applied_native_effect"
+                            }
+                            .into(),
+                        ),
                         (
                             "native_continuity",
                             Json::array(e.native_continuity.iter().map(|effect| effect.json())),
