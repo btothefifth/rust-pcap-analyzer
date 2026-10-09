@@ -137,11 +137,12 @@ fn profile(presence: &str, prefix: &str, asn: &str, coverage: &str) -> String {
 fn repeated_occurrences_and_complete_changes_follow_source_order() {
     let (_s, v) = fixture(&[(1, false), (1, false), (9, false)], false);
     let out = v.changes(&Query::default(), &Limits::default()).unwrap();
-    assert!(out.contains("unchanged_repeated_announcement"));
-    assert!(out.contains("complete_attribute_identity_changed"));
-    assert!(out.find("update-0").unwrap() < out.find("update-1").unwrap());
-    assert!(out.find("update-1").unwrap() < out.find("update-2").unwrap());
-    assert!(out.contains("\"route_installation_claimed\":false"));
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) { "python".into() } else { "python3".into() }
+    });
+    let program = "import json,sys; d=json.loads(sys.argv[1]); e=[x for x in d['events'] if x['kind']=='announce']; assert [x['reference']['record_id'] for x in e]==['update-0','update-1','update-2']; assert [x['difference'] for x in e]==['first_announcement_in_observed_segment','unchanged_repeated_announcement','complete_attribute_identity_changed']; assert e[0]['before_reference'] is None; assert [x['before_reference']['observation']['record_id'] for x in e[1:]]==['update-0','update-1']; assert all(x['native_scope']['session']=='1' and x['native_scope']['generation']==0 and x['native_scope']['direction']==0 and x['native_scope']['peer']=='192.0.2.1' and x['native_scope']['captured_lifecycle']==0 for x in e); assert d['route_installation_claimed'] is False";
+    let run = std::process::Command::new(python).args(["-c", program, &out]).output().unwrap();
+    assert!(run.status.success(), "{}\n{out}", String::from_utf8_lossy(&run.stderr));
 }
 #[test]
 fn observed_match_supports_present_and_contradicts_absent_with_all_repeats() {

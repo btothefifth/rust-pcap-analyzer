@@ -208,11 +208,29 @@ fn profile(store: &VerifiedStore, session: &str, prefix: &str, presence: &str) -
 fn changes(f: &Fixture, q: &Query) -> String {
     f.store.changes(q, &Limits::default()).unwrap()
 }
+fn assert_json(output: &str, predicate: &str, arguments: &[&str]) {
+    // Reuse the owner suite's independent Python stdlib JSON traversal.
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) { "python".into() } else { "python3".into() }
+    });
+    let program = format!("import json,sys\nd=json.load(sys.stdin)\n{predicate}");
+    let mut child = Command::new(python).args(["-c", &program, "stdin"]).args(arguments)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped()).spawn().unwrap();
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(output.as_bytes()).unwrap();
+    }
+    let run = child.wait_with_output().unwrap();
+    assert!(run.status.success(), "{}\n{output}", String::from_utf8_lossy(&run.stderr));
+}
 fn expect(f: &Fixture, session: &str, prefix: &str, presence: &str, status: &str) {
     let text = profile(&f.store, session, prefix, presence);
     let p = ExpectationProfile::parse(text.as_bytes(), &Limits::default()).unwrap();
     let out = f.store.expectations(&p, &Limits::default()).unwrap();
-    assert!(out.contains(&format!("\"status\":\"{status}\"")), "{out}");
+    assert_json(&out, "r=d['results']; assert len(r)==1; r=r[0]; assert r['id']=='row'; assert r['status']==sys.argv[2]; assert r['scope']['session']==sys.argv[3]; assert r['scope']['prefix']==sys.argv[4]; assert r['scope']['source_id']==sys.argv[5]; assert r['scope']['checkpoint_id']==sys.argv[6]; assert r['scope']['captured_lifecycle'] is None", &[status, session, prefix,
+        &f.store.observations().iter().find(|o| o.source().session.as_deref()==Some(session)).unwrap().import_context().unwrap().source_id,
+        &f.store.observations().iter().find(|o| o.source().session.as_deref()==Some(session)).unwrap().import_context().unwrap().checkpoint_id]);
 }
 fn cli(f: &Fixture, command: &str, extra: &[&str]) -> String {
     cli_with_relationship(f, command, extra, Some("internal"))
@@ -292,11 +310,7 @@ fn bmp_gap_then_update_cannot_bridge_predecessors_but_sibling_and_recovery_survi
         )
         .unwrap();
     // Only the unaffected sibling peer may retain its identical predecessor.
-    assert_eq!(
-        out.matches("unchanged_repeated_announcement").count(),
-        1,
-        "{out}"
-    );
+    assert_json(&out, "events=[e for e in d['events'] if e['kind']=='announce']; repeated=[e for e in events if e['difference']=='unchanged_repeated_announcement']; assert len(repeated)==1; e=repeated[0]; assert e['native_scope']['session']=='bmp:1:pre'; assert e['before_reference']['observation']['observation_index']<e['reference']['observation_index']; assert e['native_scope']['source_id']=='source-a'; assert e['native_scope']['checkpoint_id']=='checkpoint-a'; assert all(e['before_reference'] is None for e in events if e['native_scope']['session'] in ('bmp:0:pre','bmp:0:post'))", &[]);
     for session in ["bmp:0:pre", "bmp:0:post"] {
         expect(&f, session, "198.51.100.0/24", "absent", "unresolved");
     }
@@ -766,13 +780,13 @@ fn imported_boundary_peer_filters_use_actual_peer_and_keep_omitted_filter_api_an
             ..Query::default()
         };
         let out = changes(&f, &q);
-        assert_eq!(out.contains("bmp-gap:"), peer != Some("unrelated-peer"));
+        assert_json(&out, "effects=[e for e in d['events'] if e.get('native_continuity')]; assert bool(effects)==(sys.argv[2]=='true'); assert all(e['source_id']=='source-a' and e['checkpoint_id']=='checkpoint-a' for e in effects); assert all(x['source_id']=='source-a' and x['peer']==sys.argv[3] for e in effects for x in e['native_continuity'])", &[if peer != Some("unrelated-peer") { "true" } else { "false" }, &actual]);
         let mut args = vec!["--session", "bmp:0:pre", "--direction", "0"];
         if let Some(peer) = peer {
             args.extend(["--peer", peer]);
         }
         let out = cli(&f, "changes", &args);
-        assert_eq!(out.contains("bmp-gap:"), peer != Some("unrelated-peer"));
+        assert_json(&out, "effects=[e for e in d['events'] if e.get('native_continuity')]; assert bool(effects)==(sys.argv[2]=='true'); assert all(e['source_id']=='source-a' and e['checkpoint_id']=='checkpoint-a' for e in effects); assert all(x['source_id']=='source-a' and x['peer']==sys.argv[3] for e in effects for x in e['native_continuity'])", &[if peer != Some("unrelated-peer") { "true" } else { "false" }, &actual]);
     }
     let base = v2_profile(&profile(&f.store, "bmp:0:pre", "203.0.114.0/24", "present"));
     for peer in ["none".to_string(), encode_optional_text("unrelated-peer")] {
