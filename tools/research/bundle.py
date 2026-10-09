@@ -11,12 +11,81 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from tools.product import comparison
+from . import bgp_compare
 from .contract import (InvalidResearch, canonical, decode_json, digest, file_identity,
                        compare_fields, recompute_differential, MAX_DOCUMENT)
 
 SCHEMA = "pcap-evidence.research-bundle.v1"
+BGP_SCHEMA = "pcap-evidence.bgp.research-bundle.v1"
 MAX_BUNDLE = 96 * 1024 * 1024
 MAX_MEMBERS = 64
+MAX_MEMBER = 32 * 1024 * 1024
+
+
+def _mode(left, right):
+    """Exact BGP schemas select their owner; mixed families never fall through."""
+    if type(left) is not dict or type(right) is not dict:
+        raise InvalidResearch("bundle interpretations must be objects")
+    schemas = (left.get("schema"), right.get("schema"))
+    if any(type(schema) is not str for schema in schemas):
+        raise InvalidResearch("bundle interpretation schema must be text")
+    bgp_schemas = {bgp_compare.SCHEMA, bgp_compare.SCHEMA_V2}
+    if any(schema in bgp_schemas for schema in schemas):
+        if schemas[0] != schemas[1] or schemas[0] not in bgp_schemas:
+            raise InvalidResearch("bundle interpretation schema mismatch")
+        return "bgp"
+    return "capture"
+
+
+def _bgp_first(report):
+    index = report["first_observed_disagreement"]
+    return None if index is None else {"index": index, "row": report["rows"][index]}
+
+
+def _bgp_witnesses(source, report):
+    """Check producer-declared ranges against bytes, without parsing records."""
+    first = _bgp_first(report)
+    ranges = []
+    if first is not None:
+        for side in ("left", "right"):
+            span = first["row"][side + "_source_range"]
+            if span is None:
+                continue
+            start, end = int(span["start"]), int(span["end"])
+            if not 0 <= start < end <= len(source):
+                raise InvalidResearch("BGP witness outside exact source")
+            ranges.append({"producer_side": side, "record_offset": first["row"]["record_offset"],
+                           "source_start": str(start), "source_end": str(end),
+                           "sha256": digest(source[start:end])})
+    return {"status": "CHECKED_DECLARED_RAW_RANGES" if first is not None else "NO_OBSERVED_DIVERGENCE",
+            "ranges": ranges, "independent_record_mapping": False,
+            "interpretation_correctness_proven": False,
+            "notes": ["Ranges are producer-declared byte anchors; no parsed-record mapping is established.",
+                      "Agreement does not establish correctness."]}
+
+
+def _member_identity(raw):
+    return {"bytes": len(raw), "sha256": digest(raw)}
+
+
+def _bgp_dataset(left, right, report, members):
+    """A recomputable provenance projection inside the existing manifest."""
+    sides = {}
+    for side, document in (("left", left), ("right", right)):
+        native = document.get("native_evidence")
+        sides[side] = {"interpretation": _member_identity(members[side + ".interpretation.json"]),
+                       "schema": document["schema"], "producer": document["producer"],
+                       "native_partition": document.get("native_partition"),
+                       "native_coverage_verification": document.get("native_coverage_verification"),
+                       "native_evidence": None if native is None else {
+                           "manifest_sha256": digest(canonical(native)),
+                           "semantic_identity": native.get("semantic_identity"),
+                           "semantic_profile": native.get("semantic_profile"),
+                           "sequence": native.get("sequence"), "window": native.get("window")}}
+    return {"source": report["source"], "normalization": report["normalization"],
+            "differential": _member_identity(members["differential.json"]),
+            "interpretations": sides, "source_authenticated": False,
+            "semantic_correctness_proven": False, "independent_record_mapping": False}
 
 
 def _witnesses(source_bytes, report):
@@ -72,11 +141,14 @@ def _specs(specs):
 def create(path, source, left, right, *, specifications, artifacts=None, case=None):
     destination=Path(path)
     if destination.exists():raise FileExistsError("bundle output already exists")
-    identity=file_identity(source);data=Path(source).read_bytes()
+    mode=_mode(left,right)
+    identity=file_identity(source,max_bytes=MAX_MEMBER)
+    with Path(source).open("rb") as stream:data=stream.read(MAX_MEMBER+1)
+    if len(data)>MAX_MEMBER:raise InvalidResearch("bundle source size limit")
     if {"sha256":digest(data),"bytes":str(len(data))}!=identity:raise InvalidResearch("source changed while bundling")
-    report=compare_fields(left,right)
+    report=bgp_compare.compare(left,right) if mode=="bgp" else compare_fields(left,right)
     if report["source"]!=identity:raise InvalidResearch("interpretations not bound to selected capture")
-    witnesses=_witnesses(data,report)
+    witnesses=_bgp_witnesses(data,report) if mode=="bgp" else _witnesses(data,report)
     members={"source.capture":data,"left.interpretation.json":canonical(left)+b"\n",
              "right.interpretation.json":canonical(right)+b"\n","differential.json":canonical(report)+b"\n",
              "witnesses.json":canonical(witnesses)+b"\n","specifications.json":canonical(_specs(specifications))+b"\n",
@@ -89,13 +161,22 @@ def create(path, source, left, right, *, specifications, artifacts=None, case=No
         members["artifacts/"+name]=raw
     if len(members)>MAX_MEMBERS-1 or sum(map(len,members.values()))>MAX_BUNDLE:raise InvalidResearch("bundle budget")
     manifest={"schema":SCHEMA,"source":identity,"contains_raw_capture":True,
-              "first_divergence":report["first_semantic_divergence"],"adjudication":"UNRESOLVED",
+              "first_divergence":_bgp_first(report) if mode=="bgp" else report["first_semantic_divergence"],"adjudication":"UNRESOLVED",
               "canonical_engine_modified":False,"software_dependencies_are_not_independent_votes":True,
               "files":{name:{"bytes":len(raw),"sha256":digest(raw)} for name,raw in sorted(members.items())}}
+    if mode=="bgp":
+        manifest["schema"]=BGP_SCHEMA
+        manifest["derived_dataset"]=_bgp_dataset(left,right,report,members)
     members["manifest.json"]=canonical(manifest)+b"\n"
     # Verification charges the manifest and every expanded member. Creation
     # must admit the same final representation before any publication.
     if sum(map(len,members.values()))>MAX_BUNDLE:raise InvalidResearch("expanded bundle limit")
+    if any(len(raw)>MAX_MEMBER for raw in members.values()):raise InvalidResearch("bundle member size limit")
+    # Every JSON consumer below uses the bounded document decoder. Admit the
+    # exact newline-bearing representation, including the provenance manifest.
+    if any(len(members[name])>MAX_DOCUMENT for name in ("manifest.json","left.interpretation.json",
+            "right.interpretation.json","differential.json","witnesses.json","specifications.json")):
+        raise InvalidResearch("bundle document byte budget")
     destination.parent.mkdir(parents=True,exist_ok=True)
     fd,temp=tempfile.mkstemp(prefix=".research-",dir=destination.parent)
     try:
@@ -105,6 +186,7 @@ def create(path, source, left, right, *, specifications, artifacts=None, case=No
                     entry=zipfile.ZipInfo(name,date_time=(2020,1,1,0,0,0));entry.compress_type=zipfile.ZIP_DEFLATED;entry.external_attr=0o100600<<16
                     z.writestr(entry,raw)
             file.flush();os.fsync(file.fileno())
+            if os.fstat(file.fileno()).st_size>MAX_BUNDLE:raise InvalidResearch("bundle size limit")
         os.link(temp,destination)  # No-clobber publication on a trusted stable parent.
         return {"status":"CREATED","sha256":file_identity(destination,max_bytes=MAX_BUNDLE)["sha256"],
                 "source":identity,"adjudication":"UNRESOLVED"}
@@ -124,15 +206,21 @@ def verify(path):
             parts=PurePosixPath(e.filename).parts
             if e.filename in members or not parts or e.is_dir() or e.filename.startswith("/") or any(p in {".",".."} for p in parts) or "\\" in e.filename or ":" in e.filename or (e.external_attr>>16)&0o170000==0o120000:
                 raise InvalidResearch("unsafe/duplicate bundle member")
-            if e.file_size>32*1024*1024:raise InvalidResearch("bundle member size limit")
+            if e.file_size>MAX_MEMBER:raise InvalidResearch("bundle member size limit")
             members[e.filename]=z.read(e)
     manifest=decode_json(members.pop("manifest.json",b""))
-    if manifest.get("schema")!=SCHEMA or set(manifest.get("files",{}))!=set(members):raise InvalidResearch("bundle inventory mismatch")
+    if (type(manifest) is not dict or type(manifest.get("schema")) is not str
+            or type(manifest.get("files")) is not dict):
+        raise InvalidResearch("invalid bundle manifest")
+    if manifest.get("schema") not in {SCHEMA,BGP_SCHEMA} or set(manifest.get("files",{}))!=set(members):raise InvalidResearch("bundle inventory mismatch")
     for name,raw in members.items():
         if manifest["files"][name]!={"bytes":len(raw),"sha256":digest(raw)}:raise InvalidResearch("bundle content digest mismatch")
     source=members["source.capture"]
     identity={"sha256":digest(source),"bytes":str(len(source))}
     if manifest["source"]!=identity:raise InvalidResearch("bundle source mismatch")
+    if manifest["schema"]==BGP_SCHEMA:
+        return _verify_bgp(manifest,members,source,identity)
+    if "derived_dataset" in manifest:raise InvalidResearch("mixed bundle mode")
     left=comparison.load(members["left.interpretation.json"]);right=comparison.load(members["right.interpretation.json"])
     recorded=decode_json(members["differential.json"])
     report=recompute_differential(left,right,recorded.get("schema"))
@@ -142,5 +230,32 @@ def verify(path):
     _specs(decode_json(members["specifications.json"]))
     return {"schema":"pcap-evidence.research-bundle-verification.v1","status":"PASS",
             "source":identity,"recomputed_differential":True,"recomputed_source_witnesses":True,
+            "semantic_correctness_proven":False,"authorship_authenticated":False,
+            "security_impact":"not_established","adjudication":"UNRESOLVED"}
+
+
+def _verify_bgp(manifest, members, source, identity):
+    keys={"schema","source","contains_raw_capture","first_divergence","adjudication",
+          "canonical_engine_modified","software_dependencies_are_not_independent_votes","files","derived_dataset"}
+    if (set(manifest)!=keys or manifest["contains_raw_capture"] is not True
+            or manifest["adjudication"]!="UNRESOLVED" or manifest["canonical_engine_modified"] is not False
+            or manifest["software_dependencies_are_not_independent_votes"] is not True):
+        raise InvalidResearch("invalid BGP bundle claims")
+    left=decode_json(members["left.interpretation.json"])
+    right=decode_json(members["right.interpretation.json"])
+    if _mode(left,right)!="bgp":raise InvalidResearch("mixed bundle mode")
+    report=bgp_compare.compare(left,right)
+    if report["source"]!=identity or canonical(report)+b"\n"!=members["differential.json"]:
+        raise InvalidResearch("recomputed divergence differs")
+    if canonical(manifest["first_divergence"])!=canonical(_bgp_first(report)):
+        raise InvalidResearch("manifest divergence differs")
+    if canonical(manifest["derived_dataset"])!=canonical(_bgp_dataset(left,right,report,members)):
+        raise InvalidResearch("recomputed derived dataset differs")
+    if canonical(_bgp_witnesses(source,report))+b"\n"!=members["witnesses.json"]:
+        raise InvalidResearch("recomputed source witnesses differ")
+    _specs(decode_json(members["specifications.json"]))
+    return {"schema":"pcap-evidence.bgp.research-bundle-verification.v1","status":"PASS",
+            "source":identity,"recomputed_differential":True,"recomputed_source_witnesses":True,
+            "recomputed_derived_dataset":True,"independent_record_mapping":False,
             "semantic_correctness_proven":False,"authorship_authenticated":False,
             "security_impact":"not_established","adjudication":"UNRESOLVED"}

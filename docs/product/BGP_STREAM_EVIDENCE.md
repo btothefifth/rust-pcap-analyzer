@@ -197,6 +197,37 @@ conclusions.
 
 ## Finite acceptance and remaining qualification
 
+### Reproducible first-disagreement bundles
+
+The existing research commands accept exact-schema BGP v1 or v2 interpretation
+peers and retain their comparator's first observed disagreement:
+
+```sh
+python3 -B -m tools.research bundle original.mrt native.json external.json \
+  --specifications specifications.json --output disagreement.zip
+python3 -B -m tools.research verify-bundle disagreement.zip
+```
+
+The BGP bundle variant uses the existing archive inventory and no-overwrite
+publication. It includes the exact original source, interpretations,
+differential, specification references and byte-range witnesses. The source
+must match both interpretations; mixed interpretation modes reject. Sources
+and individual expanded members are limited to 32 MiB, JSON documents to
+8 MiB and both the physical and expanded archive to 96 MiB, including its manifest.
+Admission precedes publication; larger sources require a separately scoped
+research approach rather than silently omitting source bytes.
+
+The same manifest records reproducible derived-dataset provenance: source and
+stored interpretation/differential identities, normalization, and retained
+native partition, sequence, window and native-manifest identities when present.
+Verification reruns the existing BGP comparator and recomputes those bindings
+and first-disagreement byte hashes. Ranges remain producer-declared anchors;
+the bundle does not independently map parsed records or replay omitted original
+NDJSON. A self-consistent replacement of source and interpretations can remain
+reproducible without establishing parser correctness or producer/collector
+authenticity. Agreement, disagreement and a passing bundle verification supply
+no canonical state admission or protocol qualification.
+
 Owning controls must exercise virtual input above 64 MiB without a large disk
 fixture, read splits and truncation, exact caps and one-below rejection, actual
 PIT association, canonical BGP4MP continuity, checkpoint isolation, reversed
