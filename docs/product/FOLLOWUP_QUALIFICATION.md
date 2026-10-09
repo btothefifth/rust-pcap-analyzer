@@ -1,5 +1,50 @@
 # Follow-up qualification and continuation
 
+## Bounded BGP corpus and semantic comparison
+
+This is the initial scope for the follow-on to merged PR #1. Implementation and
+execution of the broader corpus matrix are pending. The baseline's finite
+samples and gate results remain in
+[`pr-followup-validation.json`](../../evidence/pr-followup-validation.json).
+
+| Increment | Acceptance evidence | Current state |
+|---|---|---|
+| Source diversity | Public RIB and UPDATE samples spanning at least two collectors, two UTC dates, and IPv4/IPv6; record admitted bytes and any missing profile cells | Pending |
+| Independent comparison | Independently produced normalized data with pinned producer/adapter versions; compare existing per-field route actions/prefixes, then path/attribute fields only where both sides declare comparable coverage | Pending |
+| Disagreement regression | Preserve the first divergence, exact source anchors and both interpretations through existing bundles; adjudicate a confirmed defect against bytes/specification and retain a small synthetic regression | Pending |
+
+Each sample needs its URL, retrieval time, exact admitted digest/length,
+checkpoint identity, decoder/configuration, coverage/dispositions, and output
+digests. A partial HTTP/gzip prefix must retain missing parent digest and trailer
+verification as unknown. A missing-OPEN quarantine or unsupported family remains
+visible; it does not become successful route-semantic coverage. Sources replay
+independently across checkpoints.
+
+Use the existing [stream evidence and comparison contract](BGP_STREAM_EVIDENCE.md).
+An external implementation supplies a disagreement probe, not an oracle by
+consensus. Start with the v2 action/prefix fields already implemented. Any broader
+field needs an explicit availability contract and independently expected cases
+before comparison can claim agreement. Record comparable and unavailable fields
+separately, and verify the full export even when a bounded row partition is used.
+
+Keep public input bytes and generated reports in ignored local storage; commit
+source manifests, recipes and synthetic regression fixtures. For the initial
+matrix, cap each acquired compressed fragment at 2 MiB, each expanded source at
+16 MiB, and all owned scratch at 256 MiB including input/output coexistence.
+Use smaller sources/partitions when existing tool limits refuse admission;
+preserve the failed attempt and state the narrowed comparison scope.
+
+Before each acquisition or replay, account for all project storage and peak
+coexistence under [AGENTS.md](../../AGENTS.md). Serialize costly commands with
+one Cargo/test worker, a verified 2 GiB memory cap and no swap; retain bounded
+commands, wall-time and process-tree memory observations. These finite samples
+do not establish a stable throughput or aggregate RSS qualification.
+
+Performance optimization, sustained fuzzing, full normative qualification and
+caller-clocked GR/LLGR assessment remain separately scoped work. This increment
+extends the evidence matrix through existing owners; it adds no protocol-state
+or live-input feature.
+
 ## Ordinary integrated gates
 
 Run from a checkout with this candidate applied. All output paths below are NEW

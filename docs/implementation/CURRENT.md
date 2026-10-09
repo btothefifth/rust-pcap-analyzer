@@ -1,7 +1,7 @@
 # Current implementation pointer
 
-This page points to the active offline BGP surfaces, the current follow-up scope,
-and its source-bound receipt. It is navigation, not proof by itself.
+This page points to the active offline BGP surfaces, the merged implementation
+baseline, and the next qualification work. It is navigation, not proof by itself.
 
 ## Active BGP surfaces
 
@@ -18,7 +18,12 @@ The [support matrix](../product/bgp-support-matrix.json) links each profile area
 to its owning code and tests. The [BGP completion contract](../product/BGP_COMPLETION.md)
 and its leaf contracts describe their boundaries.
 
-## Current follow-up scope
+## Merged implementation baseline
+
+[PR #1](https://github.com/btothefifth/rust-pcap-analyzer/pull/1) merged into
+`main` at `1d41a6d6ce91983dcba28f7e7cb85b4584d1b650`. Its tree is identical to
+the reviewed `b23e911` revision; the receipt below remains bound to that source
+generation.
 
 Persisted change and expectation analysis now shares a bounded source-scope
 inventory. Change output separates applied native continuity effects from
@@ -39,7 +44,7 @@ it does not validate the interpretation by itself. See
 [`bgp_compare.py`](../../tools/research/bgp_compare.py) and
 [`bundle.py`](../../tools/research/bundle.py).
 
-## Follow-up source-bound validation
+## Merged baseline validation
 
 The follow-up receipt is
 [`pr-followup-validation.json`](../../evidence/pr-followup-validation.json).
@@ -48,6 +53,15 @@ coherence outcome, bounded sample details, and validation status. Consult the
 receipt for its current disposition; this pointer does not assert a pass. The
 earlier `8aa92ad` receipt is a historical baseline listed in
 [VALIDATION.md](../VALIDATION.md).
+
+## Active follow-on: bounded BGP corpus and semantic comparison
+
+The follow-on branch starts with the scope and acceptance criteria in
+[the BGP qualification plan](../product/FOLLOWUP_QUALIFICATION.md#bounded-bgp-corpus-and-semantic-comparison).
+Its target is broader source diversity and independently produced comparable
+route fields, using the existing replay, per-field export, comparator and bundle
+owners. No new corpus or semantic-parity result is claimed by this planning
+increment. The merged receipt does not validate this later source generation.
 
 ## Remaining qualification
 
