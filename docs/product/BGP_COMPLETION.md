@@ -1,11 +1,12 @@
 # BGP completion contract
 
 Status: current offline BGP product contract. The support matrix records
-declared profile areas and owning code/tests. The implementation pointer routes
-to source-generation evidence. The root-owned
-[evidence/bgp-profile-review-validation.json](../../evidence/bgp-profile-review-validation.json)
-receipt will record executed outcomes and exact source inventory; local, hosted, and
-qualification scopes remain separate.
+declared profile areas and owning code/tests. The [follow-up receipt](../../evidence/pr-followup-validation.json)
+records source identity, inventory, local gate results, coherence outcome,
+bounded sample scope, and validation status. Consult it for current disposition;
+this contract makes no independent pass claim. The `8aa92ad` receipt remains
+the historical baseline listed in [VALIDATION.md](../VALIDATION.md); local,
+hosted, and broader qualification scopes remain separate.
 
 ## Responsibility
 
@@ -14,20 +15,14 @@ boundary for completing BGP support in the offline PCAP evidence platform. The
 existing producer, import, candidate-state, replay, and association contracts
 remain the code-driving leaves for their respective APIs. Where an older leaf
 describes a problem already repaired in a later accepted slice, this contract
-and current code/tests govern current status and the stale leaf must be
-reconciled in the same phase that touches it.
+and current code/tests govern current status. Treat any conflicting older leaf as
+historical until its owning contract and code have been reconciled.
 
-The [current implementation pointer](../implementation/CURRENT.md) names the
-source generation under review and links only evidence bound to that generation.
+The [current implementation pointer](../implementation/CURRENT.md) identifies
+the follow-up scope and receipt. Its exact source generation and final
+results are read from the receipt, not inferred from this contract.
 Older objective and slice summaries remain historical where they differ from the
 current code, tests, or owning contracts.
-
-BMAD qualification: this program crosses captured wire decoding, capability and
-session state, route-state reduction, external-source ingestion, persistent
-replay, policy, product output, and independent qualification. A shallow
-"support BGP" label would permit implementations that parse fields but invent
-negotiation, collapse contradictory evidence, or call a candidate route an
-installed route.
 
 ## Outcome and completion definition
 
@@ -112,12 +107,12 @@ semantic support.
 | BGP-C03 | Complete declared wire profile | hard | every profile row has valid, boundary, malformed, duplicate, and unsupported-neighbor tests | delete one profile matrix row/test link | wire decoder | open |
 | BGP-C04 | AS4 correctness | hard | NEW/NEW, NEW/OLD, AS_TRANS, AS4_PATH and AS4_AGGREGATOR reconstruction/discard rules match independent vectors | path with longer AS4_PATH than AS_PATH | AS semantic reducer | versioned AS4 reconstruction/discard behavior has finite vector coverage; broader normative coverage remains open |
 | BGP-C05 | Attribute conformance | hard | flags, length, multiplicity, mandatory attributes and treat-as-withdraw/discard/session-reset dispositions are explicit | wrong flags or duplicate mandatory attribute | UPDATE validator | typed occurrences, dispositions, and source-bound semantic checks have finite owner coverage; complete profile qualification remains separate |
-| BGP-C06 | Stateful replay fidelity | hard | gaps/conflicts/resets/reordered records never manufacture continuous session or current route state | changed historical record after reset | session/RIB/replay | source-scoped replay boundaries have finite owner controls; exact-generation outcomes are recorded in the root receipt. Richer finite-state observation remains open, while actual endpoint/router FSM state is outside this offline profile |
+| BGP-C06 | Stateful replay fidelity | hard | gaps/conflicts/resets/reordered records never manufacture continuous session or current route state | changed historical record after reset | session/RIB/replay | source-scoped replay boundaries have owner controls; final-generation outcomes are recorded in the [follow-up receipt](../../evidence/pr-followup-validation.json). Richer finite-state observation remains open, while actual endpoint/router FSM state is outside this offline profile |
 | BGP-C07 | Explainable route policy | hard | every selected/unresolved candidate has deterministic ordered reasons and all alternatives remain available | equal candidates differing at final tie-break | policy engine | bounded persisted policy and ordered traces have finite owner coverage; independent full-policy qualification remains separate |
 | BGP-C08 | Cross-source normalization without collapse | hard | capture, MRT, BMP and future adapters share route semantics but cannot merge source partitions implicitly | same route bytes from two sources | import/adapters | versioned semantic identity and persisted source-scoped joins cover the supported capture/MRT/BGP4MP/BMP subset; broader cross-source qualification remains separate |
-| BGP-C09 | Bounded atomic publication | hard | every public operation fails without partial state/output under each lower budget | one-below output/work/retained budget | every producer/consumer | bounded and atomic producer/consumer paths have owner-specific exact/one-below controls; source-generation outcomes are recorded by the root receipt |
-| BGP-C10 | Operational end-to-end path | hard | CLI capture/import -> evidence -> state -> persisted receipt -> replay/query/association succeeds and exposes cuts | force a boundary between UPDATEs | sink/CLI/history | fresh captured/MRT/BMP replay and persisted query, policy, and association commands have source-bound outcomes in the root receipt; qualification remains separate |
-| BGP-C11 | Adversarial and platform qualification | hard for qualified claim | exact-head Linux CI plus the separately claimed normative, fuzz, lawful corpus, scale/RSS, and security evidence retained | exact-head Linux CI or fuzz crash | validation/CI | open: current repository CI is Linux-only. Older Windows/macOS receipts are historical and bind only their recorded source generations; fuzz, corpus, scale/RSS, security, and complete normative coverage remain unqualified |
+| BGP-C09 | Bounded atomic publication | hard | every public operation fails without partial state/output under each lower budget | one-below output/work/retained budget | every producer/consumer | bounded and atomic producer/consumer paths have owner-specific exact/one-below controls; final-generation outcomes are recorded in the [follow-up receipt](../../evidence/pr-followup-validation.json) |
+| BGP-C10 | Operational end-to-end path | hard | CLI capture/import -> evidence -> state -> persisted receipt -> replay/query/association succeeds and exposes cuts | force a boundary between UPDATEs | sink/CLI/history | fresh captured/MRT/BMP replay and persisted query, policy, and association outcomes are recorded in the [follow-up receipt](../../evidence/pr-followup-validation.json); qualification remains separate |
+| BGP-C11 | Adversarial and platform qualification | hard for qualified claim | exact-head Linux CI plus separate normative, fuzz, lawful corpus, scale/RSS, and security evidence | exact-head Linux CI or fuzz crash | validation/CI | `8aa92ad` CI is historical; current PR checks are a mutable view and must be tied to their reported SHA. The local follow-up receipt does not establish hosted CI for a later PR head. Normative, fuzz, corpus, CPU/RSS, and broader qualification remain open |
 | BGP-C12 | Maintainable extension model | optimization | new opaque capability/attribute requires no decoder rewrite; semantic support is registry-driven and isolated | add synthetic unknown code | typed registries | open |
 
 ## Architecture and ownership
@@ -153,6 +148,32 @@ generation context. RIB reduction owns route replacement/withdrawal state.
 Policy owns ranking. Adapters own external container truth and source identity.
 No layer may promote a weaker layer's label into endpoint authority.
 
+Ownership follows the evidence path. Raw capture and imported bytes remain in
+the source adapters and sealed journals: [captured journal](../../product/src/deep/bgp_store.rs),
+[MRT adapter](../../product/src/deep/bgp_mrt.rs), [MRT source store](../../product/src/deep/bgp_mrt_store.rs),
+[BMP adapter](../../product/src/deep/bgp_bmp.rs), and [BMP source store](../../product/src/deep/bgp_bmp_store.rs).
+Native interpretation and effects belong to the [wire decoder](../../product/src/deep/bgp.rs),
+[captured pipeline](../../product/src/deep/bgp_pipeline.rs), [session observer](../../product/src/deep/bgp_session.rs),
+and [route reducers](../../product/src/deep/bgp_rib.rs) and [candidate state](../../product/src/deep/bgp_state.rs).
+
+The follow-up shares one bounded scope inventory across change and expectation
+analysis in [`bgp_persisted/analysis.rs`](../../product/src/deep/bgp_persisted/analysis.rs).
+Its output distinguishes applied native reset/gap effects from source boundaries
+or metadata with no route action. [`ImportedSourceEvent::new`](../../product/src/deep/bgp_import.rs)
+checks source labels and attached identity while leaving observation and effect
+binding to the source producer. MRT archive assembly and persisted replay are
+owned by [`bgp_mrt_archive.rs`](../../product/src/deep/bgp_mrt_archive.rs) and
+[`bgp_persisted/replay.rs`](../../product/src/deep/bgp_persisted/replay.rs).
+
+[Replay](../../product/src/deep/bgp_replay.rs), persisted consumers, [policy](../../product/src/deep/bgp_policy.rs),
+and [association](../../product/src/deep/bgp_association.rs) derive candidate
+views from the admitted evidence. Research comparison bundles retain exact
+source-range witnesses for a first BGP divergence and a derived-dataset
+provenance manifest; see [`bgp_compare.py`](../../tools/research/bgp_compare.py)
+and [`bundle.py`](../../tools/research/bundle.py). Bundles remain unresolved
+research evidence until adjudicated. The final validation receipt describes the
+source generation and checks; it does not replace product source evidence.
+
 Implementation contracts for the external-source, persisted-consumer,
 semantic-identity, and profile-evidence seams are maintained in
 [MRT ingestion](BGP_MRT.md), [MRT source storage](BGP_MRT_STORE.md),
@@ -183,7 +204,7 @@ distinct through timestamp regressions, ASN metadata enrichment, and multiple
 peer sessions in one file. A terminal reset closes only its own peer partition.
 
 The owning source and black-box falsifiers are in
-`product/tests/bgp_mrt_bgp4mp_replay.rs`:
+[`product/tests/bgp_mrt_bgp4mp_replay.rs`](../../product/tests/bgp_mrt_bgp4mp_replay.rs):
 `imported_generation_boundaries_preserve_order_and_fail_closed_when_missing_or_reversed`,
 `terminal_reset_without_notification_closes_only_its_peer_partition`, and
 `cli_import_fresh_replay_query_and_export_retain_bgp4mp_events_and_routes`.
@@ -212,15 +233,15 @@ excused by external discard. Owning focused source tests include
 `product/tests/bgp_attribute_context.rs`,
 `product/tests/bgp_phase1.rs::rfc7606_dispositions_control_emitted_route_actions`,
 and `product/tests/bgp_producer.rs` for duplicate-occurrence preservation.
-These paths identify the proof owners; exact outcomes will be recorded against
-the source inventory in the planned root-owned receipt.
+These paths identify the proof owners. Exact final outcomes and their source
+inventory belong to the [follow-up receipt](../../evidence/pr-followup-validation.json).
 
 ## Implementation, design, and proof boundaries
 
 The [support matrix](bgp-support-matrix.json) is the concise profile inventory;
 its rows identify source modules and owning tests. Validation outcomes are
-recorded in [CURRENT.md](../implementation/CURRENT.md) and the receipt bound to
-the exact source inventory.
+recorded in [CURRENT.md](../implementation/CURRENT.md) and the
+[follow-up receipt](../../evidence/pr-followup-validation.json).
 
 The product has captured BGP, MRT/BGP4MP, BMP, persisted replay and consumer,
 and incremental MRT stream evidence surfaces. Their contracts remain offline:
@@ -242,17 +263,14 @@ The following implementation, design, and proof boundaries remain open:
    direction, path-ID state, lifecycle, and caller-reported clock windows.
    `bgp changes` and `bgp expectations` provide source-ordered, caller-scoped
    analysis; unknown clocks, missing boundaries, and incomplete fields remain
-   unknown rather than proving absence. The observation-event selector owner
-   suite returned 11 passing finite checks. That selector result does not prove
-   complete source coverage or cover the separately identified captured
-   decoded-Gap continuity handoff.
+   unknown rather than proving absence. Coverage and exact outcomes for the
+   follow-up generation are in the receipt.
 3. **Persisted evidence projection.** Captured, MRT, and BMP stores retain
    source-specific evidence; full persisted rows expose checked native
-   version-origin references and route evidence. The 12-case persisted-evidence
-   owner suite returned 12 passing finite checks, including captured continuity.
-   The typed contract is in [BGP_CAPTURED_CONTINUITY.md](BGP_CAPTURED_CONTINUITY.md).
-   Selector and projection results do not establish source authenticity or
-   endpoint state.
+   version-origin references and route evidence. The typed contract is in
+   [BGP_CAPTURED_CONTINUITY.md](BGP_CAPTURED_CONTINUITY.md). Persisted rows are
+   projections of admitted source evidence; they do not establish source
+   authenticity or endpoint state.
 4. **Reducer accounting and output units.** The accepted observer and
    Adj-RIB-In prepared paths avoid copying unrelated prior history on an
    ordinary append. The RIB path uses affected-entry staging, typed logical
@@ -262,9 +280,9 @@ The following implementation, design, and proof boundaries remain open:
    at `min(retained-state limit, 8 MiB default)`; the caller's original limit
    still governs actual archive or pipeline bytes. Exact/one-below outer output
    behavior remains the owning encoder/store's responsibility. These logical
-   units do not bound allocator behavior, OOM, RSS, CPU, or throughput; embedded
-   assembled local outcomes are recorded against the exact source inventory;
-   full scale qualification remains separate.
+   units do not bound complete byte-copy behavior, allocator use, RSS, CPU, or
+   throughput. The final receipt owns scoped sample measurements; full scale
+   qualification remains separate.
 5. **Offline finite-state observation.** Keep source-scoped transition
    observation open where ordered records support it. This does not grant actual
    speaker/router FSM authority. Caller-clocked GR/LLGR assessment is design
@@ -272,15 +290,16 @@ The following implementation, design, and proof boundaries remain open:
    uncertainty as its own evidence field, and keep it separate from broader
    qualification. Host wall-clock expiry is never inferred.
 
-The planned root-owned profile receipt linked above will record executed
-outcomes and the exact source inventory; local, hosted, and qualification scopes
-remain separate.
-Current GitHub Actions validation is Linux-only. Bind any CI statement to an
-exact source generation. Windows/macOS results from older receipts are
-historical. Complete normative review, sustained fuzzing, lawful real-corpus
-differential/minimization, measured scale/RSS, and security qualification each
-remain separate gates until their own receipts bind the claimed source and
-scope.
+The follow-up receipt records the exact source identity and scoped outcomes;
+its status applies only to that generation and does not inherit the historical
+`8aa92ad` result. GitHub Actions is Linux-only. The successful root/native,
+streaming, and product checks at `8aa92ad` are historical; its runner-acquisition
+and 45-minute cancellation attempts are incomplete, not product results. The
+mutable [PR checks view](https://github.com/btothefifth/rust-pcap-analyzer/pull/1/checks)
+must be checked against its reported SHA before use. Representative
+multi-collector/date/corpus parity, normative coverage, sustained fuzzing,
+complete byte-copy behavior, whole-process CPU and RSS bounds, and caller-clocked
+GR/LLGR assessment remain unqualified.
 
 ## Test-design charter
 
@@ -316,9 +335,9 @@ cannot compensate for a stale fixture rejected by an earlier valid guard.
 
 ## Evidence and history boundary
 
-Earlier objective and slice narratives record their own historical scope. They
-do not describe current missing or completed work when the current support
-matrix and owning code/tests differ. Validation results remain bound to the
-source inventory and environment named in their own receipts; no earlier receipt
-is inherited by this contract revision or by a later candidate. The implementation pointer identifies the accepted source inventory; the
-planned root-owned receipt will record its scoped validation outcomes.
+Earlier objective, slice, and `8aa92ad` receipt narratives remain historical
+and retain their original bytes. Validation results stay bound to the source
+inventory and environment in each receipt. Read the follow-up receipt's status,
+source identity, and results from
+[`pr-followup-validation.json`](../../evidence/pr-followup-validation.json), not
+inferred from a previous generation.

@@ -1,98 +1,54 @@
-# Validation report — streaming evidence integration
+# Validation evidence
 
-**Overall disposition: PASS for the configured local Windows gate; broader
-qualification remains open.**
+The follow-up receipt is
+[`evidence/pr-followup-validation.json`](../evidence/pr-followup-validation.json).
+Its `status` field records the validation disposition. Consult the receipt for
+the exact source identity and inventory, product/root gate results, independent
+coherence outcome, and bounded sample measurements. This document makes no
+independent validation claim for a later source generation.
 
-The local host provided Python 3.12, the pinned Rust 1.85.1 toolchain and a
-The local host also exercised the opt-in product-depth tests, pcap-depth
-capture smoke path, sealed-history application smoke path, and optional OPC UA
-transform boundary tests. Those are separate evidence classes and do not upgrade
-the broader full-history, fuzz, scale, live-capture or normative gates.
+## Current candidate and source-bound samples
 
-Windows native linker. The root snapshot analyzer and the new `streaming/`
-crate passed their configured debug/release tests, formatting and warnings-denied
-Clippy checks. The Python evidence tooling and the independent root CLI oracles
-also passed. This is local synthetic proof only: no cross-platform CI, fuzz
-campaign, performance qualification, security audit or representative real-world
-capture replay is represented as passing.
+Use the receipt's exact source identity and file count when identifying the
+candidate that was validated. Do not copy unconfirmed hashes or gate totals from
+this page. The follow-up includes bounded source-bound public UPDATE, chronology, and RIB
+prefix samples. Read their exact sizes, completeness, missing parent-source
+identity, unsupported entries, and retained coverage gaps from the receipt.
+These prefixes are samples only and do not establish coverage beyond the records
+actually admitted.
 
-## Checks actually executed
+## Hosted CI
 
-| Surface | Observed result | What it establishes |
-|---|---|---|
-| Python source checks, fixture regeneration and independent reference oracle | PASS | Portable tooling and checked-in synthetic fixture truth are internally consistent |
-| Root Rust check, debug/release tests, binary build and warnings-denied Clippy | PASS | Native Windows execution with Rust 1.85.1 and the configured linker |
-| Root Rust test inventory | PASS, 133 collected on Windows | 135 selectors are recorded; two Unix-only selectors were not collected on Windows |
-| Streaming Rust check, debug/release tests, example target, build and warnings-denied Clippy | PASS, 40 contract tests | The bounded reader/runner, event schema path, plugins and example compile and pass their local contracts |
-| Root and streaming rustfmt checks | PASS | The reviewed Rust source is formatted |
-| Root CLI and independent hardening CLI oracle | PASS, 93 synthetic cases | The actual compiled root CLI was compared with independent expectations |
-| Python evidence-tool suite | PASS, 68 tests and 23 subtests | Indexing, chain verification, replay, minimization, corpus and process-boundary helpers pass locally |
-| Semantic mutation checks | PASS, 3/3 mutants killed | Named tests detect timestamp, conflict and forged-index regressions |
-| Root and streaming fuzz manifests | PASS, `cargo check` | Fuzz targets compile; no fuzz campaign or coverage claim is made |
-| Streaming fixture smoke run and SQLite projection | PASS | A release CLI emitted a 31-event hash-chained log for the synthetic Modbus fixture and the source-bound index queried it |
-| Source package and manifest | PASS after the package-builder fix | The deterministic archive includes reviewed `streaming/` and the public corpus manifest while excluding generated targets and non-test captures |
+The repository's hosted CI policy is Linux-only. At the historical `8aa92ad`
+source, successful hosted runs exist for root/native, streaming, and product
+qualification checks. A separate native attempt was cancelled before runner
+acquisition; a product PR attempt reached the 45-minute job limit without step
+results, while a same-source product push run succeeded. The
+[checks for `8aa92ad`](https://github.com/btothefifth/rust-pcap-analyzer/commit/8aa92ad963b00bbe05fa4374a2f6fb29d40b57b8/checks)
+are an immutable historical view.
 
-The exact commands, platform, timestamps, stdout/stderr and source identity are
-retained in `evidence/local-validation.json`. Its current status is `PASS` and
-`native_rust_executed` is true for this local run. The qualification receipt is
-also retained outside the repository because it is a run artifact, not a source
-contract.
+The [PR checks page](https://github.com/btothefifth/rust-pcap-analyzer/pull/1/checks)
+is a mutable current view. Check its reported SHA before using it. The local
+receipt does not establish hosted CI for a later PR head. Windows and macOS
+receipts below are historical local runs, not current hosted CI.
 
-## Not included in this local gate
+## Qualification limits
 
-The test inventory is not a claim that every selector ran on every platform.
-Conditional tests can change collection on Linux, macOS or a different compiler.
-The included workflow is configuration, not a CI result. The fuzz workspaces
-compile, but no sustained fuzz campaign, coverage threshold or crash-free claim
-was observed. No performance or peak-RSS qualification, security audit,
-large-file run, differential semantic comparison against other analyzers, or
-representative real-world capture replay is claimed. The bundled corpus is a
-manifest with an optional upstream test-capture entry; it is not a representative
-operational corpus and is not fetched by default.
+The bounded sample evidence does not qualify representative multi-collector,
+multi-date, or real-corpus parity; complete normative protocol coverage;
+sustained fuzzing; complete byte-copy behavior; or whole-process CPU, physical
+RSS, or peak-memory bounds. Caller-clocked GR/LLGR assessment remains design
+pending. Linux CI and local synthetic runs do not establish behavior on untested
+platforms, source authenticity, or actual router state.
 
-The streaming path is deliberately bounded-window evidence analysis. It emits
-explicit coverage boundaries and sets `complete_protocol_history=false` at
-capture completion. It does not provide lossless full-history TCP reconstruction
-across discarded windows, TLS decryption, or a sandbox for trusted in-process
-plugins. See [`docs/streaming/CONTRACT.md`](streaming/CONTRACT.md).
+## Evidence index
 
-## Repeat the local gate
+| Receipt | Generation and disposition |
+|---|---|
+| [`pr-followup-validation.json`](../evidence/pr-followup-validation.json) | Current follow-up generation. Read its recorded status, identity, inventory, gate results, coherence, and sample scope from the receipt. |
+| [`bgp-imported-analysis-feedback-validation.json`](../evidence/bgp-imported-analysis-feedback-validation.json) | Historical baseline at `8aa92ad`: source identity `9d827ffa7d86ef25d6e12636506c88e36c9fad796c4b032554781b18be40d2b8`, 741 files; 50 product and 14 root gates; 774 debug and 774 release product tests, and 294 debug and 294 release root tests; zero failures or ignored tests. Receipt bytes remain unchanged. |
+| [`local-validation.json`](../evidence/local-validation.json), [`bgp-profile-review-validation.json`](../evidence/bgp-profile-review-validation.json), and [`bgp-stream-validation.json`](../evidence/bgp-stream-validation.json) | Earlier source-bound local runs. Their platform, selectors, and hosted status apply only to their recorded generations. |
+| [`objectives-1-4-validation.json`](../evidence/objectives-1-4-validation.json), [`pr-feedback-validation.json`](../evidence/pr-feedback-validation.json), [`pr-feedback-round2-validation.json`](../evidence/pr-feedback-round2-validation.json), [`pr-feedback-round3-validation.json`](../evidence/pr-feedback-round3-validation.json), and [`pr-feedback-round4-validation.json`](../evidence/pr-feedback-round4-validation.json) | Earlier objective and PR-feedback generations; see each immutable receipt for its scope. |
 
-From the repository root, with Python 3.11+ and the pinned Rust toolchain:
-
-```text
-python scripts/validate.py
-python tools/evidence_tool.py qualify . receipts/local --timeout 600
-```
-
-The first command runs the root portable/native gate and writes a source-bound
-receipt. The second runs the root and streaming qualification matrix. Neither
-installs tools or silently turns an unmet prerequisite into a pass. A source
-change during either run invalidates that run's receipt.
-
-Useful individual commands are:
-
-```text
-cargo test --locked --offline --all-targets
-cargo test --locked --offline --release --all-targets
-cargo clippy --locked --offline --all-targets -- -D warnings
-cargo test --manifest-path streaming/Cargo.toml --locked --offline --all-targets
-cargo test --manifest-path streaming/Cargo.toml --locked --offline --release --all-targets
-cargo clippy --manifest-path streaming/Cargo.toml --locked --offline --all-targets -- -D warnings
-cargo fmt --all -- --check
-cargo fmt --manifest-path streaming/Cargo.toml --all -- --check
-```
-
-## Interpretation and promotion
-
-Portable checks reduce fixture, packaging and process-boundary mistakes. Native
-synthetic tests establish the named contracts, not all network behavior. A
-representative capture is still needed to validate an external mismatch. Any
-cross-tool disagreement must be resolved against packet bytes, protocol rules
-and independently established expectations, not majority vote or a single
-decoder treated as infallible.
-
-Source hashes, archive checksums and successful extraction establish content
-identity, not correctness, authenticity of real captures, successful deployment,
-or attack attribution. Read [`LIMITATIONS.md`](LIMITATIONS.md) before widening
-input size or accepting untrusted uploads.
+Earlier receipts remain available as historical evidence. Do not combine their
+gate counts or carry their PASS status to the current candidate.
