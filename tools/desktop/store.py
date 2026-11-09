@@ -43,6 +43,7 @@ def decimal(value):
     return str(n)
 
 def query(path,filters=None):
+    """Return events with a contributing packet inside the inclusive time bounds."""
     f=filters or {};allowed={"after","limit","kind","status","protocol","session","frame","ip","port","start_ns","end_ns"}
     if not isinstance(f,dict)or set(f)-allowed:raise ValueError("unknown filter")
     limit=f.get("limit",MAX_ROWS)
@@ -69,12 +70,21 @@ def query(path,filters=None):
         sql+=" AND EXISTS(SELECT 1 FROM sessions s WHERE s.session=e.session AND (s.source_ip=? OR s.destination_ip=?))";args.extend([address,address])
     elif port is not None:
         sql+=" AND EXISTS(SELECT 1 FROM sessions s WHERE s.session=e.session AND (s.source_port=? OR s.destination_port=?))";args.extend([port,port])
-    for key,op in (("start_ns",">="),("end_ns","<=")):
-        if f.get(key):
-            text=f[key]
-            if not isinstance(text,str)or len(text)>40:raise ValueError("time range")
-            sort=time_key(text)
-            sql+=f" AND EXISTS(SELECT 1 FROM event_packets ep JOIN packets p ON ep.frame=p.frame WHERE ep.seq=e.seq AND p.ts_sort{op}?)";args.append(sort)
+    time_conditions = []
+    time_bounds = {}
+    for key, op in (("start_ns", ">="), ("end_ns", "<=")):
+        text = f.get(key)
+        if text not in (None, ""):
+            if not isinstance(text, str) or len(text) > 40:
+                raise ValueError("time range")
+            time_bounds[key] = time_key(text)
+            time_conditions.append(f"p.ts_sort{op}?")
+            args.append(time_bounds[key])
+    if len(time_bounds) == 2 and time_bounds["start_ns"] > time_bounds["end_ns"]:
+        raise ValueError("inverted time range")
+    if time_conditions:
+        sql += (" AND EXISTS(SELECT 1 FROM event_packets ep JOIN packets p ON ep.frame=p.frame"
+                " WHERE ep.seq=e.seq AND " + " AND ".join(time_conditions) + ")")
     sql+=" ORDER BY e.seq_sort LIMIT ?";args.append(limit+1)
     with read_db(path)as db:rows=[json.loads(row[0])for row in db.execute(sql,args)]
     more=len(rows)>limit;rows=rows[:limit]

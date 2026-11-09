@@ -99,8 +99,9 @@ def main() -> int:
                                          "reason": "Rust compiler/Cargo absent; native checks were not run"})
             else:
                 binary_name = str(native_artifact(ROOT, "Cargo.toml", "pcap-evidence.exe" if os.name == "nt" else "pcap-evidence", profile="debug"))
-                commands = [["rustc", "--version"], ["cargo", "check", "--locked", "--offline", "--all-targets"],
+                commands = [["rustc", "--version"], ["cargo", "fmt", "--all", "--", "--check"], ["cargo", "check", "--locked", "--offline", "--all-targets"],
                             ["cargo", "test", "--locked", "--offline", "--all-targets"],
+                            ["cargo", "test", "--locked", "--offline", "--doc"],
                             ["cargo", "test", "--locked", "--offline", "--release", "--all-targets"],
                             ["cargo", "clippy", "--locked", "--offline", "--all-targets", "--", "-D", "warnings"],
                             ["cargo", "build", "--locked", "--offline", "--all-targets"],

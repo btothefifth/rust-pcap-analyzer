@@ -89,3 +89,40 @@ fn mixed_or_absent_modbus_capture_scope_is_unclassified() {
             .any(|row| row.reason == "modbus_transaction_capture_scope_invalid"));
     }
 }
+
+#[test]
+fn modbus_pairing_requires_consistent_application_metadata() {
+    let request = application(Role::Request, [7; 32]);
+    let response = application(Role::Response, [7; 32]);
+    for direction in [0, 1] {
+        let mut request = request.clone();
+        let mut response = response.clone();
+        request.direction = direction;
+        response.direction = 1 - direction;
+        let valid =
+            correlate::transactions(&[request.clone(), response.clone()], &Limits::default())
+                .unwrap();
+        assert_eq!(valid[0].status, "candidate_pair");
+        response.direction = direction;
+        let same = correlate::transactions(&[request, response], &Limits::default()).unwrap();
+        assert_eq!(same[0].status, "ambiguous");
+        assert_eq!(
+            same[0].reason,
+            "modbus_request_response_capture_directions_not_opposite"
+        );
+    }
+    for request_side in [false, true] {
+        for wrong_protocol in [false, true] {
+            let mut pair = [request.clone(), response.clone()];
+            let invalid = &mut pair[usize::from(!request_side)];
+            if wrong_protocol {
+                invalid.protocol = "dnp3";
+            } else {
+                invalid.direction = 2;
+            }
+            let rows = correlate::transactions(&pair, &Limits::default()).unwrap();
+            assert!(rows.iter().all(|row| row.status != "candidate_pair"));
+            assert!(rows.iter().any(|row| row.status == "unclassified"));
+        }
+    }
+}

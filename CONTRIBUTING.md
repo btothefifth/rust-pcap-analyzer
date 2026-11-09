@@ -1,51 +1,63 @@
 # Contributing
 
-Start at `docs/CURRENT.md` and the controlling contract in `docs/ENGINEERING.md`.
-Do not use a green fixture self-hash or a high test count as a correctness claim.
+Start with `docs/implementation/CURRENT.md` for current work and
+`docs/ENGINEERING.md` for the implementation contract.
 
-For a change, name the invariant, its smallest owner, an independent expected
-result, the nearest valid case that must remain accepted, and a counterexample.
-Keep raw observation, reconstruction policy, and external labels separate. Prefer
-exact typed errors over silent fallback, and preserve source spans in transformations.
+Use the Rust toolchain pinned in `rust-toolchain.toml` and Python 3.11 or later.
+Keep changes focused, preserve source spans, and return typed errors for invalid
+input. For a bug fix, add a regression that fails on the original code and
+check that the nearest valid input still works.
 
-Run, in increasing cost order:
+## Local checks
+
+Format the workspace you changed, then run its checks. For the root crate, use
 
 ```sh
-python scripts/static_check.py
-python scripts/make_fixtures.py --check
-python scripts/reference_verify.py
-python scripts/test_oracle.py
-cargo check --locked --offline --all-targets
+cargo fmt --all
+cargo clippy --locked --offline --all-targets -- -D warnings
 cargo test --locked --offline --all-targets
-cargo test --locked --offline --release --all-targets
-cargo clippy --locked --offline --all-targets
-cargo build --locked --offline --bins
-python scripts/check_cli.py
-python scripts/mutation_check.py
+cargo test --locked --offline --doc
+```
+
+For another workspace, add `--manifest-path`, for example
+
+```sh
+cargo fmt --manifest-path product/Cargo.toml --all
+cargo clippy --manifest-path product/Cargo.toml --locked --offline --all-targets -- -D warnings
+cargo test --manifest-path product/Cargo.toml --locked --offline --all-targets
+cargo test --manifest-path product/Cargo.toml --locked --offline --doc
+```
+
+The root validation driver checks fixtures, formatting, debug and release tests,
+doctests, Clippy, CLI behavior, and mutation tests. It saves a JSON receipt.
+
+```sh
+python3 scripts/validate.py
 cargo doc --locked --offline --no-deps
 ```
 
-`python scripts/validate.py` orders the main gates and retains output. Do not install
-an unpinned tool in the middle of validation. Format source using the pinned
-`cargo fmt` before a reviewed release; the current baseline has a passing formatting
-check recorded in `docs/VALIDATION.md`.
+The repository-wide driver covers all six runtime workspaces, product feature
+profiles, Python and JavaScript tests, and the linked C ABI. Provision the
+pinned test-only dependencies before running its offline checks. Choose a new
+output directory for each run.
 
-When native tests are added/renamed/removed, intentionally run
-`python scripts/update_test_manifest.py` and review its delta. Ordinary validation
-checks, rather than regenerates, that inventory. `cfg(unix)` tests apply only on Unix.
+```sh
+python3 -m pip install -r scripts/requirements-qualification.txt
+CARGO_TARGET_DIR="$PWD/target" python3 scripts/validate_product.py --output evidence/cleanup-check
+```
 
-Fixtures are synthetic. Keep `TRUTH.json` independently reviewed, not mechanically
-generated from the Rust result. Updating both the implementation and oracle to the
-same unverified assumption does not establish agreement with the specification.
-Retain a targeted semantic mutant when changing an important guard. A compilation
-failure is not a successful semantic mutation test.
+When adding, renaming, or removing Rust tests, update and review the selector
+manifest with `python3 scripts/update_test_manifest.py`. CI checks the manifest
+without regenerating it.
 
-The optional fuzz workspace needs separately installed nightly/cargo-fuzz tooling
-and dependency review. See `fuzz/README.md`. Long fuzz campaigns, real-corpus replay,
-Windows/macOS verification, scale tests and security review must have their own
-receipts before they are claimed.
+## Fixtures and scope
 
-Do not add real captures, credentials, decrypted secrets, local outputs, `target/`,
-or unrelated local policy/configuration sources to commits. Third-party material
-remains subject to its own license; this project's MIT file does not grant rights to
-redistribute it.
+Fixtures are synthetic. Derive expected results from the protocol contract or an
+independent oracle. Review changes to `TRUTH.json` separately from parser output.
+
+Keep real captures, credentials, generated output, and build directories out of
+commits. Third-party material requires its own redistribution permission.
+
+Optional fuzz workspaces and external comparators have separate dependencies.
+See `fuzz/README.md`. Record platform, corpus, scale, and fuzz coverage with the
+commands and source revision actually tested.

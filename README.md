@@ -49,7 +49,7 @@ guesswork.
 
 BGP outputs describe source-bound observations and candidate route state. They
 do not prove source authenticity, bilateral endpoint negotiation, actual router
-state, route installation, reachability, causality. The
+state, route installation, reachability, or causality. The
 streaming path reports bounded-window coverage and does not reconstruct complete
 history across discarded windows. See [limitations](docs/LIMITATIONS.md) before
 using the tools on real captures.
