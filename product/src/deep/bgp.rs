@@ -1079,6 +1079,14 @@ pub(crate) fn attribute_flags(code: u8) -> Option<u8> {
     }
 }
 
+// Later duplicates are retained as evidence but never replace the first occurrence.
+fn accepted_attribute(ranges: &[AttributeRange], code: u8) -> bool {
+    ranges
+        .iter()
+        .find(|range| range.code == code)
+        .is_some_and(|range| range.disposition == "accept_evidence_only")
+}
+
 fn attribute_error_disposition(code: u8) -> &'static str {
     match code {
         6 | 7 | 9 | 10 | 17 | 18 | 26 => "attribute_discard",
@@ -1911,13 +1919,7 @@ fn decode_attribute_value(
             } else {
                 item.as_path = parse_as_path(&b[value_start..value_end], asn_width, limits)?;
             }
-            if item
-                .as_path
-                .iter()
-                .any(|segment| segment.values.contains(&0))
-            {
-                return Err(bad("bgp_as_zero", value_start, "AS_PATH contains AS 0"));
-            }
+            validate_as_path_values(&item.as_path, value_start)?;
         }
         3 => {
             if length != 4 {
@@ -2409,11 +2411,18 @@ pub(crate) fn parse_as_path(b: &[u8], width: usize, limits: &Limits) -> Result<V
     Ok(out)
 }
 
+pub(super) fn validate_as_path_values(path: &[AsPathSegment], offset: usize) -> Result<()> {
+    if path.iter().any(|segment| segment.values.contains(&0)) {
+        return Err(bad("bgp_as_zero", offset, "AS_PATH contains AS 0"));
+    }
+    Ok(())
+}
+
 // RFC 4271 requires valid host-address syntax. These classes are invalid
 // without knowing the receiver's interfaces or subnet; those local semantic
 // checks cannot be inferred from offline evidence. RFC 7606 retains TAW for
 // ordinary NEXT_HOP syntax errors through the owning attribute disposition.
-fn validate_ipv4_next_hop(address: Ipv4Addr, offset: usize) -> Result<()> {
+pub(super) fn validate_ipv4_next_hop(address: Ipv4Addr, offset: usize) -> Result<()> {
     if address.is_unspecified() || address.is_multicast() || address.is_broadcast() {
         return Err(bad(
             "bgp_next_hop",

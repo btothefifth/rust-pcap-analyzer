@@ -317,7 +317,15 @@ pub fn text_protocol(p: Protocol, b: &[u8]) -> Result<Decoded> {
             if words.len() < 2 || words[0].len() > 64 {
                 return Err(bad("imap", "missing tag/verb"));
             }
-            let verb = keyword(words[1]);
+            let numeric = words[0] == b"*" && words[1].iter().all(u8::is_ascii_digit);
+            let index = if numeric { 2 } else { 1 };
+            let token = words
+                .get(index)
+                .ok_or_else(|| bad("imap", "missing reply verb"))?;
+            let verb = keyword(token);
+            if numeric && !["EXISTS", "RECENT", "EXPUNGE", "FETCH"].contains(&verb.as_str()) {
+                return Err(bad("imap", "unsupported numeric reply"));
+            }
             if ![
                 "CAPABILITY",
                 "NOOP",
@@ -361,12 +369,12 @@ pub fn text_protocol(p: Protocol, b: &[u8]) -> Result<Decoded> {
             {
                 return Err(bad("imap", "unsupported command/reply"));
             }
-            let start = words[0].len()
-                + s[words[0].len()..]
-                    .iter()
-                    .take_while(|v| **v == b' ')
-                    .count();
-            d = d.text("verb", verb, start, start + words[1].len());
+            let mut start = 0;
+            for word in words.iter().take(index) {
+                start += word.len();
+                start += s[start..].iter().take_while(|v| **v == b' ').count();
+            }
+            d = d.text("verb", verb, start, start + token.len());
             d.issues.push("literal_and_multiline_data_not_reassembled");
         }
         _ => return Err(bad("text_protocol", "not a supported text protocol")),
@@ -562,7 +570,20 @@ pub fn sip(b: &[u8]) -> Result<Decoded> {
             .iter()
             .position(|v| *v == b':')
             .ok_or_else(|| bad("sip_header", "missing colon"))?;
-        let key = String::from_utf8_lossy(&s[..colon]).to_ascii_lowercase();
+        // RFC 3261 HCOLON permits SP/HTAB between the token and colon.
+        let name_end = s[..colon]
+            .iter()
+            .rposition(|v| !matches!(v, b' ' | b'\t'))
+            .map_or(0, |i| i + 1);
+        let name = &s[..name_end];
+        if name.is_empty()
+            || !name
+                .iter()
+                .all(|v| v.is_ascii_alphanumeric() || b"-.!%*_+`'~".contains(v))
+        {
+            return Err(bad("sip_header", "invalid header name"));
+        }
+        let key = String::from_utf8_lossy(name).to_ascii_lowercase();
         if key == "content-length" || key == "l" {
             let text = std::str::from_utf8(&s[colon + 1..])
                 .map_err(|_| bad("sip_length", "invalid length"))?

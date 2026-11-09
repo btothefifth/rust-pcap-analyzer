@@ -1025,6 +1025,63 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn bacnet_logical_sources_never_complete_each_others_service_tags() {
+        let a = [
+            0x81, 10, 0, 24, 1, 8, 0, 1, 1, 0x11, 0x3c, 42, 0, 1, 12, 12, 2, 0, 0, 1, 0x19, 85,
+            0x3e, 0x21,
+        ];
+        let mut b = [
+            0x81, 10, 0, 17, 1, 8, 0, 1, 1, 0x22, 0x38, 42, 1, 1, 12, 0x2a, 0x3f,
+        ];
+        for same in [false, true] {
+            b[9] = if same { 0x11 } else { 0x22 };
+            with_test_sink(
+                Limits::default(),
+                &[a.as_slice(), b.as_slice()].concat(),
+                |sink, _| {
+                    for (i, raw) in [a.as_slice(), b.as_slice()].into_iter().enumerate() {
+                        let frame = i as u64 + 1;
+                        sink.augment(&captured_packet(
+                            frame,
+                            if i == 0 { 0 } else { a.len() },
+                            raw,
+                            Json::Null,
+                        ))
+                        .unwrap();
+                        let mut event = message(frame);
+                        event.protocol = Some("bacnet_ip".into());
+                        event.evidence = Evidence::bytes(&EvidenceBytes::from_packet(
+                            raw,
+                            PacketId {
+                                capture: sink.map.namespace(),
+                                frame,
+                                record_offset: frame * 100,
+                            },
+                            0,
+                        ));
+                        let result = sink.augment(&event).unwrap();
+                        if i == 1 {
+                            let segmentation = get(&result.data, "depth_segmentation").unwrap();
+                            assert_eq!(
+                                get(segmentation, "service_tags") != Some(&Json::Null),
+                                same
+                            );
+                            let assembly = get(segmentation, "assembly").unwrap();
+                            let evidence = get(assembly, "evidence").unwrap();
+                            if same {
+                                assert!(evidence.encode().contains("\"frame\":\"1\""));
+                                assert!(evidence.encode().contains("\"frame\":\"2\""));
+                            } else {
+                                assert_eq!(evidence, &Json::Null);
+                            }
+                        }
+                    }
+                },
+            );
+        }
+    }
+
     fn protocol_issue(session: Option<u64>, protocol: &str) -> Event {
         let mut event = Event::new(
             EventKind::ProtocolIssue,

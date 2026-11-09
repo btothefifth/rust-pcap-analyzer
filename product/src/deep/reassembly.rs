@@ -260,6 +260,16 @@ impl Segments {
             after: Chain::default().identity(),
         })
     }
+    pub(crate) fn cut_prefix(&mut self, prefix: &str) {
+        self.chains.retain(|key, chain| {
+            if key.starts_with(prefix) {
+                self.retained -= chain.bytes();
+                false
+            } else {
+                true
+            }
+        });
+    }
     pub fn expire(&mut self, frame: u64, max_idle_frames: u64) -> Vec<(String, Outcome)> {
         let expired: Vec<_> = self
             .chains

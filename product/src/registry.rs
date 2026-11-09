@@ -69,7 +69,8 @@ pub fn signature(p: Protocol, b: &[u8]) -> bool {
         Protocol::Rtp => b[0] >> 6 == 2,
         Protocol::Tftp => b.len() >= 2 && b[0] == 0 && (1..=6).contains(&b[1]),
         Protocol::Pptp => b.len() >= 8 && b[4..8] == [0x1a, 0x2b, 0x3c, 0x4d],
-        Protocol::Telnet => b[0] == 0xff,
+        // Escaped IAC alone is also a BGP marker; initial detection needs a command.
+        Protocol::Telnet => b[0] == 0xff && b.get(1).is_some_and(|v| (240..=254).contains(v)),
         // A completed command/status line or SIP header must validate before matching.
         Protocol::Ftp | Protocol::Pop3 | Protocol::Imap | Protocol::Sip => true,
         _ => false,
@@ -140,34 +141,53 @@ struct Stream {
 }
 impl Stream {
     fn drain(&mut self, out: &mut Output<'_>, final_input: bool) -> Result<()> {
-        while !self.pending.is_empty() && !self.failed {
-            self.work = self
-                .work
-                .checked_add(self.pending.len())
-                .ok_or_else(|| Error::limit("plugin_work"))?;
-            if self.work > self.work_limit {
-                return Err(Error::limit("plugin_work"));
-            }
-            match self.p.decode(self.pending.data()) {
-                Ok(d) => {
-                    let at = self.offset.unwrap_or(0);
-                    let end = at
-                        .checked_add(d.consumed as i64)
-                        .ok_or_else(|| Error::limit("stream_offset"))?;
-                    let bytes = self.pending.slice(0..d.consumed)?;
-                    out.message(self.p.name(), &bytes, Some((at, end)), d.json(), None, true)?;
-                    self.pending = self.pending.slice(d.consumed..self.pending.len())?;
-                    self.offset = Some(end);
+        let mut cursor = 0;
+        let result = (|| {
+            while cursor < self.pending.len() && !self.failed {
+                if self.work >= self.work_limit {
+                    return Err(Error::limit("plugin_work"));
                 }
-                Err(e) if e.code == ErrorCode::Truncated && !final_input => break,
-                Err(e) => {
-                    out.issue(self.p.name(), e.to_string(), &self.pending)?;
-                    self.pending = EvidenceBytes::default();
-                    self.failed = true;
+                let remaining = &self.pending.data()[cursor..];
+                let decoded = self.p.decode(remaining);
+                // Successful framers inspect their consumed prefix. An incomplete
+                // or rejected attempt may scan all available bytes; charge it too.
+                let attempted = decoded.as_ref().map_or(remaining.len(), |d| d.consumed);
+                self.work = self
+                    .work
+                    .checked_add(attempted)
+                    .filter(|work| *work <= self.work_limit)
+                    .ok_or_else(|| Error::limit("plugin_work"))?;
+                match decoded {
+                    Ok(d) => {
+                        let at = self.offset.unwrap_or(0);
+                        let end = at
+                            .checked_add(d.consumed as i64)
+                            .ok_or_else(|| Error::limit("stream_offset"))?;
+                        let bytes = self.pending.slice(cursor..cursor + d.consumed)?;
+                        out.message(self.p.name(), &bytes, Some((at, end)), d.json(), None, true)?;
+                        cursor += d.consumed;
+                        self.offset = Some(end);
+                    }
+                    Err(e) if e.code == ErrorCode::Truncated && !final_input => break,
+                    Err(e) => {
+                        out.issue(
+                            self.p.name(),
+                            e.to_string(),
+                            &self.pending.slice(cursor..self.pending.len())?,
+                        )?;
+                        cursor = self.pending.len();
+                        self.failed = true;
+                    }
                 }
             }
+            Ok(())
+        })();
+        // Preserve progress even if a later frame exhausts a budget or its sink
+        // fails. Copy the unconsumed tail once, rather than once per frame.
+        if cursor != 0 {
+            self.pending = self.pending.slice(cursor..self.pending.len())?;
         }
-        Ok(())
+        result
     }
 }
 impl StreamAnalyzer for Stream {

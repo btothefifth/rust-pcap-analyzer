@@ -2465,3 +2465,44 @@ fn imported_unsupported_ipv6_next_hop_layout_cuts_continuity_on_sealed_replay() 
             .all(|entry| entry.status == RouteStatus::Unresolved));
     }
 }
+
+#[test]
+fn atomic_aggregate_uses_first_accepted_occurrence_on_fresh_replay() {
+    for (extra, expected) in [
+        (vec![], false),
+        (vec![0x40, 6, 0], true),
+        (vec![0x40, 6, 1, 0], false),
+        (vec![0x40, 6, 1, 0, 0x40, 6, 0], false),
+        (vec![0x40, 6, 0, 0x40, 6, 1, 0], true),
+    ] {
+        let mut raw = update(4, true);
+        let attr_len = u16::from_be_bytes([raw[21], raw[22]]) as usize;
+        raw.splice(23 + attr_len..23 + attr_len, extra.clone());
+        raw[21..23].copy_from_slice(&((attr_len + extra.len()) as u16).to_be_bytes());
+        let total = raw.len() as u16;
+        raw[16..18].copy_from_slice(&total.to_be_bytes());
+        let mut body = peer(1, 0, 101);
+        body.extend(&raw);
+        let (scratch, archive) = store(&append(&[up(1), message(0, &body)]));
+        let normalized = archive.state.observations()[0].normalized();
+        let Json::Array(routes) = field(normalized, "routes") else {
+            panic!("routes")
+        };
+        assert_eq!(
+            field(field(&routes[0], "attributes"), "atomic_aggregate"),
+            &Json::from(expected)
+        );
+        let Json::Array(ranges) = field(field(normalized, "message_detail"), "attribute_ranges")
+        else {
+            panic!("ranges")
+        };
+        assert_eq!(
+            ranges
+                .iter()
+                .filter(|r| field(r, "type") == &Json::from(6u8))
+                .count(),
+            extra.iter().filter(|b| **b == 6).count()
+        );
+        assert_fresh_bmp_replay(&scratch, &archive);
+    }
+}

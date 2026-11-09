@@ -606,11 +606,37 @@ fn identical_attributes_under_conflicting_record_labels_keep_exact_version_occur
     let length = second.len() as u16;
     second[16..18].copy_from_slice(&length.to_be_bytes());
     send(&mut w, ns, 1, 2, "same-label", second);
+    send(
+        &mut w,
+        ns,
+        1,
+        3,
+        "after-conflict",
+        continuity_message(4, &[]),
+    );
+    opens(&mut w, ns, 2, 200);
+    let mut sibling = wire(10, false);
+    let end = sibling.len();
+    sibling[end - 3] = 205;
+    send(&mut w, ns, 2, 201, "sibling", sibling);
     w.seal().unwrap();
     let store = load(&path);
+    assert!(store.captured_source_events().iter().any(|event| matches!(
+        event.kind,
+        bgp_store::CapturedSourceEventKind::RejectedContainer
+    ) && event.record_id.as_deref()
+        == Some("after-conflict")
+        && event.scopes.iter().any(|scope| scope.session == 1)));
     let full = store.query_evidence(&Query::default(), &limits()).unwrap();
     parsed_assert(&full,"r=next(r for r in x['routes'] if r['prefix']=='203.0.113.0/24')\nassert r['status']=='unresolved'\nv=r['version_occurrences']\nassert len(v)==2\nassert [len(a['occurrences']) for a in v]==[1,1]\nassert [len(a['occurrences'][0]['normalized_observation']['routes']) for a in v]==[1,2]\nassert len({a['occurrences'][0]['source_occurrence_id'] for a in v})==2\nassert len({a['occurrences'][0]['normalized_observation_sha256'] for a in v})==2");
     parsed_assert(&full,"b=next(r for r in x['routes'] if r['prefix']=='204.0.113.0/24')\nassert len(b['version_occurrences'])==1\nv=b['version_occurrences'][0]\nassert v['disposition']=='conflicting' and len(v['occurrences'])==1\no=v['occurrences'][0]\nassert o['route_index']==1 and o['native_origin']['route_index']==1\nassert len(o['normalized_observation']['routes'])==2");
+    parsed_assert(&full, "r=next(r for r in x['routes'] if r['prefix']=='205.0.113.0/24')\nassert r['status']=='active'");
+    assert_eq!(
+        full,
+        load(&path)
+            .query_evidence(&Query::default(), &limits())
+            .unwrap()
+    );
     for version_index in 0..=1 {
         let query = Query {
             prefix: Some("203.0.113.0/24".into()),

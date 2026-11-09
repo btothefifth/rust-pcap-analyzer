@@ -756,11 +756,15 @@ pub fn replay(path: &Path, maximum: u64, limits: Limits) -> Result<ReplayArchive
                         // A rejected source record cannot prove continuous
                         // candidate state. Retain its sealed bytes and mark only
                         // the known session as gapped; never invent withdrawal.
-                        manager.observe_gap(
-                            session,
-                            format!("journal-rejected-message:{}", sha256::hex(&actual)),
-                            "sealed_source_message_rejected".into(),
-                        )?;
+                        // Identity quarantine already invalidates the whole partition.
+                        // Its pipeline rejects mutation, including another gap.
+                        if !manager.is_tainted(session) {
+                            manager.observe_gap(
+                                session,
+                                format!("journal-rejected-message:{}", sha256::hex(&actual)),
+                                "sealed_source_message_rejected".into(),
+                            )?;
+                        }
                     }
                 }
             }

@@ -777,3 +777,22 @@ fn virtual_source_above_batch_ceiling_has_constant_record_high_water() {
     assert_eq!(high[0], high[1]);
     assert!(high[1] < 3 * 1024 * 1024);
 }
+
+#[test]
+fn known_invalid_rib_values_remain_unsupported_on_stream_replay() {
+    for (at, value) in [(37, [0; 4]), (44, [224, 0, 0, 1])] {
+        let mut invalid = rib();
+        // 12-byte header + 16-byte entry prefix + attribute-relative offset.
+        invalid[at..at + 4].copy_from_slice(&value);
+        let raw = [table(), invalid.clone(), rib()].concat();
+        let mut rows = Vec::new();
+        visit(&raw, |e| {
+            rows.push((e.record_sha256.to_owned(), e.observation.is_some()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1], (sha256::hex(&sha256::digest(&invalid)), false));
+        assert!(rows[2].1);
+    }
+}
