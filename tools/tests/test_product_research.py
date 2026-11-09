@@ -297,6 +297,31 @@ class DesktopStoreTests(Temp):
         with self.assertRaises(ValueError):store.packet_bytes(self.database,self.source,'1')
     def test_unknown_time_not_zero(self):self.assertNotEqual(store.overview(self.database)['first_ns'],'0')
     def test_time_filter_exact(self):self.assertEqual(len(store.query(self.database,{'kind':'packet.observed','start_ns':'7000000000','end_ns':'7000000000'})['rows']),1)
+    def test_time_bounds_apply_to_one_packet(self):
+        sequence = store.query(self.database, {'kind': 'packet.observed'})['rows'][0]['sequence']
+        db = sqlite3.connect(self.database)
+        try:
+            db.execute("UPDATE packets SET timestamp_ns='10', ts_sort=? WHERE frame='1'", (store.time_key('10'),))
+            db.execute("INSERT INTO packets SELECT '2', ?, record_offset, data_offset, caplen, original_length, link_type, section, interface, sha256, '30', ?, raw_timestamp FROM packets WHERE frame='1'", ('2'.zfill(20), store.time_key('30')))
+            db.execute("INSERT INTO event_packets(seq,frame) VALUES (?, '2')", (sequence,))
+            db.commit()
+        finally:
+            db.close()
+        for bounds, expected in [
+            ({'start_ns': '15', 'end_ns': '25'}, False),
+            ({'start_ns': '10', 'end_ns': '10'}, True),
+            ({'start_ns': '30', 'end_ns': '30'}, True),
+            ({'start_ns': '25'}, True),
+            ({'end_ns': '15'}, True),
+            ({'start_ns': '31'}, False),
+            ({'end_ns': '9'}, False),
+        ]:
+            with self.subTest(bounds=bounds):
+                page = store.query(self.database, {'kind': 'packet.observed', **bounds})
+                self.assertEqual(bool(page['rows']), expected)
+        with self.assertRaisesRegex(ValueError, 'inverted time range'):
+            store.query(self.database, {'start_ns': '25', 'end_ns': '15'})
+
     def test_timeline_counts(self):self.assertEqual(sum(x['count']for x in store.timeline(self.database)['buckets']),1)
     def test_detail_references(self):
         row=store.query(self.database,{'kind':'packet.observed'})['rows'][0];detail=store.detail(self.database,row['sequence']);self.assertEqual(detail['event']['evidence']['packets'][0]['frame'],'1')

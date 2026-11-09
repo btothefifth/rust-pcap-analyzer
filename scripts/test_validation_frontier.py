@@ -24,6 +24,14 @@ class ValidationFrontier(unittest.TestCase):
         for _, manifest in frontier.WORKSPACES:
             self.assertIn('workspace', tomllib.loads((ROOT / manifest).read_text()))
 
+    def test_every_runtime_workspace_checks_format_lints_and_doctests(self):
+        commands = dict(frontier.native_commands())
+        for label, manifest in frontier.WORKSPACES:
+            self.assertEqual(commands[label + '-doctests'],
+                             ['test', '--manifest-path', manifest, '--locked', '--offline', '--doc'])
+            self.assertEqual(commands[label + '-format'][-2:], ['--', '--check'])
+            self.assertEqual(commands[label + '-clippy'][-3:], ['--', '-D', 'warnings'])
+
     def test_all_declared_feature_profiles_selected_in_isolation(self):
         features = tomllib.loads((ROOT / 'product/Cargo.toml').read_text())['features']
         self.assertEqual(set(frontier.FEATURE_PROFILES), {''} | (set(features) - {'default'}))

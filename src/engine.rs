@@ -1,4 +1,4 @@
-//! The real producer -> reconstruction -> protocol -> report path.
+//! Capture analysis, transport reconstruction, and protocol correlation.
 use crate::capture::{CaptureIter, PacketMeta, ParseMode, RecordKind};
 use crate::correlate::{AttemptMatch, Transaction};
 use crate::dnp3::{self, Dnp3Result};
@@ -131,7 +131,7 @@ pub struct Analysis {
     pub correlation_error: Option<Error>,
 }
 impl Analysis {
-    /// Means no detected degradation in the supported path; not proof of capture completeness.
+    /// Reports parse warnings, incomplete reconstruction, and protocol diagnostics.
     pub fn has_diagnostics(&self) -> bool {
         self.datagrams.iter().any(|d| match &d.data {
             Err(_) => true,

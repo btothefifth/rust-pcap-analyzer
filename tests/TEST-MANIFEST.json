@@ -29,6 +29,7 @@
     "cli::require_clean_returns_diagnostic_status_without_hiding_report",
     "correlation_capture_scope::modbus_transaction_candidates_separate_capture_identity_from_flow_numbers",
     "correlation_capture_scope::mixed_or_absent_modbus_capture_scope_is_unclassified",
+    "correlation_capture_scope::modbus_pairing_requires_consistent_application_metadata",
     "dnp3_confirmations::solicited_candidate_has_exact_fragment_and_crc_checked_header_witnesses",
     "dnp3_confirmations::unsolicited_confirm_pairs_only_inside_its_separate_namespace",
     "dnp3_confirmations::unmatched_confirm_is_retained_and_legacy_transaction_output_is_unchanged",

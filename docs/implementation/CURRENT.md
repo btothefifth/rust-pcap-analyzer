@@ -63,3 +63,8 @@ remain unqualified. Logical work and retention limits do not establish whole-
 process CPU or peak-memory bounds. Actual endpoint state, source authenticity,
 route installation, reachability, and causality remain outside the offline
 evidence boundary.
+
+## Cleanup audit
+
+The [cleanup audit](CLEANUP_AUDIT_2026-11-09.md) records the repository review,
+regression repairs, validation scope, and remaining evidence limits.

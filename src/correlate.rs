@@ -182,7 +182,9 @@ pub fn transactions(
                         .filter(|work| *work <= limits.max_correlation_checks)
                         .ok_or_else(|| Error::limit("transaction_capture_scope_work"))?;
                     let capture = capture_scope(&message.raw);
-                    if !message.shape_valid
+                    if application.direction > 1
+                        || application.protocol != "modbus"
+                        || !message.shape_valid
                         || !message.semantics_supported
                         || message.role == Role::Unknown
                         || capture.is_none()
@@ -251,15 +253,18 @@ pub fn transactions(
             } else {
                 false
             };
-        let dnp_same_direction = protocol == "dnp3"
-            && group.requests.len() == 1
+        let same_direction = group.requests.len() == 1
             && group.responses.len() == 1
             && applications[group.requests[0].application].direction
                 == applications[group.responses[0].application].direction;
         let (status, reason) = match (group.requests.len(), group.responses.len()) {
-            (1, 1) if dnp_same_direction => (
+            (1, 1) if same_direction => (
                 "ambiguous",
-                "dnp3_request_response_capture_directions_not_opposite",
+                if protocol == "dnp3" {
+                    "dnp3_request_response_capture_directions_not_opposite"
+                } else {
+                    "modbus_request_response_capture_directions_not_opposite"
+                },
             ),
             (1, 1) if inconsistent_modbus => (
                 "inconsistent_response",

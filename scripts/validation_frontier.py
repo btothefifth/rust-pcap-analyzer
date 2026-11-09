@@ -45,6 +45,7 @@ def native_commands():
         for name, options in (
             ('format', ['fmt', '--all', '--', '--check']),
             ('tests', ['test', '--locked', '--offline', '--all-targets']),
+            ('doctests', ['test', '--locked', '--offline', '--doc']),
             ('release-tests', ['test', '--locked', '--offline', '--release', '--all-targets']),
             ('clippy', ['clippy', '--locked', '--offline', '--all-targets', '--', '-D', 'warnings']),
             ('build', ['build', '--locked', '--offline', '--release', '--all-targets']),
