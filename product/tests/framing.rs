@@ -419,3 +419,49 @@ fn c37118_framing_known_answer() {
         assert!(Protocol::Synchrophasor.decode(&bytes[..end]).is_err());
     }
 }
+
+#[cfg(feature = "extensions")]
+#[test]
+fn imap_numeric_untagged_replies_preserve_verb_spans() {
+    for (raw, verb) in [
+        (b"* 23 EXISTS\r\n".as_slice(), "EXISTS"),
+        (b"* 2 EXPUNGE\r\n".as_slice(), "EXPUNGE"),
+        (b"* 1 FETCH (FLAGS (\\Seen))\r\n".as_slice(), "FETCH"),
+        (b"*  0  RECENT\r\n".as_slice(), "RECENT"),
+        (b"* OK ready\r\n".as_slice(), "OK"),
+        (b"a047 OK done\r\n".as_slice(), "OK"),
+    ] {
+        let decoded = Protocol::Imap.decode(raw).unwrap();
+        let field = decoded.fields.iter().find(|f| f.name == "verb").unwrap();
+        assert_eq!(&raw[field.start..field.end], verb.as_bytes());
+        assert_eq!(field.value, pcap_evidence::json::Json::from(verb));
+    }
+    for raw in [b"* 23\r\n".as_slice(), b"* 23 NOPE\r\n", b"* 23 OK\r\n"] {
+        assert!(Protocol::Imap.decode(raw).is_err());
+    }
+}
+
+#[cfg(feature = "extensions")]
+#[test]
+fn sip_header_separator_whitespace_preserves_length_checks() {
+    for header in [
+        "Content-Length : 0",
+        "Content-Length\t: 0",
+        "l : 0",
+        "L\t : 0",
+    ] {
+        let raw = format!("OPTIONS sip:a@example.test SIP/2.0\r\n{header}\r\n\r\n");
+        assert_eq!(
+            Protocol::Sip.decode(raw.as_bytes()).unwrap().consumed,
+            raw.len()
+        );
+        let conflict =
+            format!("OPTIONS sip:a@example.test SIP/2.0\r\nContent-Length: 1\r\n{header}\r\n\r\nx");
+        assert!(Protocol::Sip.decode(conflict.as_bytes()).is_err());
+    }
+    for header in [": x", "Bad Name: x", "Bad@: x", " Content-Length: 0"] {
+        let raw =
+            format!("OPTIONS sip:a@example.test SIP/2.0\r\n{header}\r\nContent-Length: 0\r\n\r\n");
+        assert!(Protocol::Sip.decode(raw.as_bytes()).is_err());
+    }
+}

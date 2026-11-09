@@ -319,3 +319,117 @@ fn opcua_complete_singleton_write_response_uses_explicit_security_context() {
         .contains("\"localized_text\":\"0\""));
     assert!(!field(&report, "service").encode().contains("\"locale\""));
 }
+
+fn routed_bacnet(
+    source: (u16, &[u8]),
+    destination: (u16, &[u8]),
+    origin: Option<[u8; 6]>,
+    last: bool,
+) -> Vec<u8> {
+    let mut b = vec![0x81, if origin.is_some() { 4 } else { 10 }, 0, 0];
+    if let Some(origin) = origin {
+        b.extend(origin);
+    }
+    b.extend([1, 0x28]);
+    for (net, address) in [destination, source] {
+        b.extend(net.to_be_bytes());
+        b.push(address.len() as u8);
+        b.extend(address);
+    }
+    b.push(255);
+    b.extend([if last { 0x38 } else { 0x3c }, 42, u8::from(last), 1, 12]);
+    b.extend(if last {
+        &[0x2a, 0x3f][..]
+    } else {
+        &[0x0c, 2, 0, 0, 1, 0x19, 85, 0x3e, 0x21][..]
+    });
+    let len = b.len() as u16;
+    b[2..4].copy_from_slice(&len.to_be_bytes());
+    b
+}
+#[test]
+fn bacnet_segments_are_isolated_by_logical_source_destination_and_forwarder() {
+    let first = routed_bacnet(
+        (1, &[0x11]),
+        (2, &[0x33]),
+        Some([192, 0, 2, 1, 0xba, 0xc0]),
+        false,
+    );
+    for change in 0..5 {
+        let mut last = routed_bacnet(
+            (1, &[0x11]),
+            (2, &[0x33]),
+            Some([192, 0, 2, 1, 0xba, 0xc0]),
+            true,
+        );
+        // BVLC origin; DNET; DADR; SNET; SADR.
+        last[[4, 12, 15, 16, 19][change]] ^= 1;
+        let mut session = deep::bacnet::Session::new(Limits::default()).unwrap();
+        assert!(session
+            .push("7:0", &evidence(&first, 1), 1)
+            .unwrap()
+            .completed
+            .is_none());
+        assert!(session
+            .push("7:0", &evidence(&last, 2), 2)
+            .unwrap()
+            .completed
+            .is_none());
+        let good = routed_bacnet(
+            (1, &[0x11]),
+            (2, &[0x33]),
+            Some([192, 0, 2, 1, 0xba, 0xc0]),
+            true,
+        );
+        let joined = session
+            .push("7:0", &evidence(&good, 3), 3)
+            .unwrap()
+            .completed
+            .unwrap();
+        assert_eq!(
+            joined.packets().iter().map(|p| p.frame).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+}
+
+#[test]
+fn bacnet_addressed_cut_preserves_sibling_and_broad_cut_retires_all_addresses() {
+    let address = vec![7; 255];
+    let first = routed_bacnet((1, &address), (2, &address), None, false);
+    let last = routed_bacnet((1, &address), (2, &address), None, true);
+    let sibling_first = routed_bacnet((3, &address), (2, &address), None, false);
+    let sibling_last = routed_bacnet((3, &address), (2, &address), None, true);
+    let mut session = deep::bacnet::Session::new(Limits::default()).unwrap();
+    session.push("scope", &evidence(&first, 1), 1).unwrap();
+    session
+        .push("scope", &evidence(&sibling_first, 2), 2)
+        .unwrap();
+    session.cut_addressed("scope", &first).unwrap();
+    assert!(session
+        .push("scope", &evidence(&last, 3), 3)
+        .unwrap()
+        .completed
+        .is_none());
+    assert!(session
+        .push("scope", &evidence(&sibling_last, 4), 4)
+        .unwrap()
+        .completed
+        .is_some());
+    assert!(session
+        .push("scope", &evidence(&first, 5), 5)
+        .unwrap()
+        .completed
+        .is_some());
+    session.cut("scope", 3, 42, 12);
+    assert!(session
+        .push("scope", &evidence(&last, 6), 6)
+        .unwrap()
+        .completed
+        .is_none());
+    assert!(session
+        .push("scope", &evidence(&sibling_last, 7), 7)
+        .unwrap()
+        .completed
+        .is_none());
+}

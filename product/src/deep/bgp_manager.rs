@@ -100,6 +100,12 @@ impl CapturedSessionManager {
         self.sessions.contains_key(&session)
     }
 
+    pub(crate) fn is_tainted(&self, session: u64) -> bool {
+        self.sessions
+            .get(&session)
+            .is_some_and(CapturedSessionPipeline::tainted)
+    }
+
     pub fn session_ids(&self) -> Vec<u64> {
         self.sessions.keys().copied().collect()
     }

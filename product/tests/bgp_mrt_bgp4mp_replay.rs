@@ -3,7 +3,7 @@
 use pcap_evidence::{json::Json, sha256};
 use pcap_evidence_product::deep::{
     bgp::RouteAction,
-    bgp_mrt::{MrtLimits, MrtSource},
+    bgp_mrt::{MrtBatch, MrtLimits, MrtSource},
     bgp_mrt_store,
     bgp_state::{ApplyStatus, CandidateState, ObservationKind},
     Limits,
@@ -1857,8 +1857,8 @@ fn update_without_established_state_and_unnegotiated_add_path_layout_are_quarant
 fn illegal_fsm_transition_cannot_admit_an_update_after_two_open_messages() {
     let scratch = Scratch::new();
     for (case, initial, old, new) in [
-        ("connect-openconfirm", 2, 2, 5),
-        ("active-openconfirm", 3, 3, 5),
+        ("connect-established", 2, 2, 6),
+        ("active-established", 3, 3, 6),
         ("opensent-established", 4, 4, 6),
     ] {
         let mut records = if initial == 4 {
@@ -3977,5 +3977,203 @@ fn native_mrt_versions_bind_exact_observation_occurrence_and_route_ordinal() {
     for (key, entry) in archive.bgp4mp_rib.entries() {
         let fresh = replay.bgp4mp_rib.entries().get(key).unwrap();
         assert_eq!(entry.versions, fresh.versions);
+    }
+}
+
+#[test]
+fn delay_open_and_sender_keepalive_preserve_negotiation_on_fresh_replay() {
+    let scratch = Scratch::new();
+    for initial in [2, 3, 4] {
+        for outgoing in [false, true] {
+            let meta = || Bgp4mpMetadata::new(2, 64_512, 64_513, 7);
+            let message = |raw: &[u8], sent| {
+                message_record(
+                    MessageRecordMetadata::new(meta(), 16, 1, 100, None, sent),
+                    raw,
+                )
+            };
+            let mut records = vec![state_record(
+                meta(),
+                0,
+                100,
+                1,
+                if initial == 4 { 2 } else { initial },
+            )];
+            if initial == 4 {
+                records.push(state_record(meta(), 0, 100, 2, 4));
+            }
+            records.extend([
+                message(&open(64_512, false, [198, 51, 100, 1]), false),
+                message(&open(64_513, false, [198, 51, 100, 2]), true),
+                message(&bgp_message(4, &[]), outgoing),
+                state_record(meta(), 0, 100, initial, 5),
+                state_record(meta(), 0, 100, 5, 6),
+                message(&update(2, false), false),
+            ]);
+            let path = scratch.file(&format!("delay-{initial}-{outgoing}"));
+            let archive = import(&path, &records.concat(), "delay-open");
+            assert_eq!(archive.bgp4mp_candidates.len(), 1);
+            assert_eq!(
+                archive
+                    .bgp4mp_candidate_observation(&archive.bgp4mp_candidates[0])
+                    .unwrap()
+                    .import_context()
+                    .unwrap()
+                    .generation,
+                0
+            );
+            let keepalive = &archive.bgp4mp_events[archive.bgp4mp_events.len() - 4];
+            assert_eq!(
+                field_string(keepalive, "parse_status"),
+                Some(if outgoing {
+                    "decoded_keepalive"
+                } else {
+                    "quarantined_keepalive_fsm_state"
+                })
+            );
+            assert!(!archive
+                .json()
+                .encode()
+                .contains("illegal_reported_fsm_transition"));
+            let replay = bgp_mrt_store::replay(
+                &path,
+                4 * 1024 * 1024,
+                MrtLimits::default(),
+                Limits::default(),
+            )
+            .unwrap();
+            assert_eq!(archive.json(), replay.json());
+        }
+    }
+}
+
+#[test]
+fn atomic_aggregate_uses_first_accepted_occurrence_on_fresh_replay() {
+    let scratch = Scratch::new();
+    for (index, (extra, expected)) in [
+        (vec![], false),
+        (vec![0x40, 6, 0], true),
+        (vec![0x40, 6, 1, 0], false),
+        (vec![0x40, 6, 1, 0, 0x40, 6, 0], false),
+        (vec![0x40, 6, 0, 0x40, 6, 1, 0], true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let flow = established_flow(1, false, 0);
+        let batch = MrtBatch::parse(&flow, source("atomic"), &MrtLimits::default()).unwrap();
+        let end = batch.records.last().unwrap().offset as usize;
+        let mut bytes = flow[..end].to_vec();
+        let mut raw = update(2, false);
+        let attr_len = u16::from_be_bytes([raw[21], raw[22]]) as usize;
+        raw.splice(23 + attr_len..23 + attr_len, extra.clone());
+        raw[21..23].copy_from_slice(&((attr_len + extra.len()) as u16).to_be_bytes());
+        let total = raw.len() as u16;
+        raw[16..18].copy_from_slice(&total.to_be_bytes());
+        bytes.extend(message_record(
+            MessageRecordMetadata::new(
+                Bgp4mpMetadata::new(2, 64_512, 64_513, 7),
+                16,
+                1,
+                100,
+                None,
+                false,
+            ),
+            &raw,
+        ));
+        let path = scratch.file(&format!("atomic-{index}"));
+        let archive = import(&path, &bytes, "atomic");
+        let normalized = archive.state.observations()[0].normalized();
+        let Json::Array(routes) = json_field(normalized, "routes") else {
+            panic!("routes")
+        };
+        assert_eq!(
+            json_field(json_field(&routes[0], "attributes"), "atomic_aggregate"),
+            &Json::from(expected)
+        );
+        let fresh = bgp_mrt_store::replay(
+            &path,
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(archive.json(), fresh.json());
+    }
+}
+
+#[test]
+fn sender_keepalive_without_valid_bilateral_context_remains_quarantined() {
+    let scratch = Scratch::new();
+    for case in 0..3 {
+        let meta = || Bgp4mpMetadata::new(2, 64_512, 64_513, 7);
+        let message = |raw: &[u8], sent| {
+            message_record(
+                MessageRecordMetadata::new(meta(), 16, 1, 100, None, sent),
+                raw,
+            )
+        };
+        let mut bytes = state_record(meta(), 0, 100, 1, 2);
+        if case >= 1 {
+            bytes.extend(message(&open(64_512, false, [198, 51, 100, 1]), false));
+        }
+        if case == 2 {
+            bytes.extend(message(&open(64_513, false, [198, 51, 100, 2]), true));
+            bytes.extend(state_record(meta(), 0, 100, 2, 6));
+        }
+        bytes.extend(message(&bgp_message(4, &[]), true));
+        let path = scratch.file(&format!("keepalive-context-{case}"));
+        let archive = import(&path, &bytes, "keepalive-context");
+        assert_eq!(
+            field_string(archive.bgp4mp_events.last().unwrap(), "parse_status"),
+            Some("quarantined_keepalive_fsm_state")
+        );
+        assert!(archive.bgp4mp_candidates.is_empty());
+        let replay = bgp_mrt_store::replay(
+            &path,
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(archive.json(), replay.json());
+    }
+}
+
+#[test]
+fn invalid_rib_values_preserve_sealed_evidence_and_valid_neighbor() {
+    let scratch = Scratch::new();
+    let (bytes, _) = unsupported_rib_fixture();
+    let batch = MrtBatch::parse(&bytes, source("rib-values"), &MrtLimits::default()).unwrap();
+    let start = batch.records[1].offset as usize;
+    let mut valid = bytes[start..bytes.len() - 4].to_vec();
+    let body_len = (valid.len() - 12) as u32;
+    valid[8..12].copy_from_slice(&body_len.to_be_bytes());
+    valid[26..28].copy_from_slice(&20u16.to_be_bytes());
+    for (index, (at, value)) in [(37, [0; 4]), (44, [224, 0, 0, 1])].into_iter().enumerate() {
+        let mut invalid = valid.clone();
+        invalid[at..at + 4].copy_from_slice(&value);
+        let raw = [bytes[..start].to_vec(), invalid.clone(), valid.clone()].concat();
+        let path = scratch.file(&format!("rib-values-{index}"));
+        let archive = import(&path, &raw, "rib-values");
+        assert_eq!(archive.candidates.len(), 1);
+        assert_eq!(archive.candidates[0].record_index, 2);
+        assert!(archive
+            .batch()
+            .normalize_rib_entry(1, 0, &Limits::default())
+            .unwrap()
+            .is_none());
+        let replay = bgp_mrt_store::replay(
+            &path,
+            4 * 1024 * 1024,
+            MrtLimits::default(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(archive.json(), replay.json());
+        assert!(fs::read(&path)
+            .unwrap()
+            .windows(invalid.len())
+            .any(|part| part == invalid));
     }
 }

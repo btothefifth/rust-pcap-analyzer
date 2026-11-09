@@ -1266,10 +1266,7 @@ pub(crate) fn replay_message_record(
                 },
                 limits,
             )?;
-            let atomic_aggregate = parsed
-                .attribute_ranges
-                .iter()
-                .any(|occurrence| occurrence.code == 6 && occurrence.disposition != "discard");
+            let atomic_aggregate = super::accepted_attribute(&parsed.attribute_ranges, 6);
             finish_imported_update(
                 &mut normalized,
                 identities,
@@ -1362,7 +1359,18 @@ pub(crate) fn replay_message_record(
                     continuity_gap: None,
                 });
             }
-            let accepted_state = !session.state_conflict && matches!(session.fsm, Some(5 | 6));
+            // RFC 4271 sends the local KEEPALIVE before entering OpenConfirm,
+            // including DelayOpen paths. This does not authorize incoming controls
+            // in an opening state or infer negotiation from one OPEN.
+            let (_, opening_basis) = producer::layout_evidence(&session.decoder, true);
+            let opening_sender = outer.locally_generated
+                && matches!(session.fsm, Some(2..=4))
+                && matches!(
+                    opening_basis,
+                    "both_four_octet_advertisements" | "two_octet_bilateral_advertisements"
+                );
+            let accepted_state =
+                !session.state_conflict && (matches!(session.fsm, Some(5 | 6)) || opening_sender);
             Ok(ReplayRecord {
                 event: event_json(
                     source.event(&key, Some(direction), generation),
@@ -1631,8 +1639,8 @@ pub(crate) fn replay_malformed_record(
 fn valid_fsm_transition(old: u16, new: u16) -> bool {
     match old {
         1 => matches!(new, 2 | 3),
-        2 => matches!(new, 1 | 3 | 4),
-        3 => matches!(new, 1 | 2 | 4),
+        2 => matches!(new, 1 | 3 | 4 | 5),
+        3 => matches!(new, 1 | 2 | 4 | 5),
         4 => matches!(new, 1 | 3 | 5),
         5 => matches!(new, 1 | 6),
         6 => new == 1,
@@ -2391,9 +2399,11 @@ mod transition_tests {
             (2, 1),
             (2, 3),
             (2, 4),
+            (2, 5),
             (3, 1),
             (3, 2),
             (3, 4),
+            (3, 5),
             (4, 1),
             (4, 3),
             (4, 5),
@@ -2404,8 +2414,6 @@ mod transition_tests {
             assert!(valid_fsm_transition(old, new), "{old} -> {new}");
         }
         for (old, new) in [
-            (2, 5),
-            (3, 5),
             (2, 6),
             (3, 6),
             (4, 6),

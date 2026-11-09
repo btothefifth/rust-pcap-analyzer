@@ -1022,3 +1022,25 @@ fn contextual_conversion_preflights_its_own_attribute_limit() {
     };
     assert!(b.normalize_rib_entry(1, 0, &l).is_err());
 }
+
+#[test]
+fn malformed_known_rib_values_preserve_raw_evidence_and_valid_neighbor() {
+    for (start, value) in [(9, [0; 4]), (16, [224, 0, 0, 1])] {
+        let mut invalid = attrs();
+        invalid[start..start + 4].copy_from_slice(&value);
+        let bytes = [table(), rib_v4_with_attributes(&invalid), rib_v4()].concat();
+        let batch = parse(&bytes);
+        assert!(batch
+            .normalize_rib_entry(1, 0, &Limits::default())
+            .unwrap()
+            .is_none());
+        assert!(batch
+            .normalize_rib_entry(2, 0, &Limits::default())
+            .unwrap()
+            .is_some());
+        let MrtBody::Rib(rib) = &batch.records[1].body else {
+            panic!("RIB")
+        };
+        assert_eq!(rib.entries[0].attributes, invalid);
+    }
+}

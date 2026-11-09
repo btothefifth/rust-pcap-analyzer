@@ -1110,10 +1110,16 @@ fn semantic_attributes(
                         .map_err(|_| Error::limit("mrt_import_as_path"))?;
                     out.as_path.push(AsPathSegment { kind, values });
                 }
+                if super::bgp::validate_as_path_values(&out.as_path, 0).is_err() {
+                    return Ok(None);
+                }
             }
             3 if len == 4 => {
-                out.next_hop =
-                    Some(Ipv4Addr::new(value[0], value[1], value[2], value[3]).to_string())
+                let address = Ipv4Addr::new(value[0], value[1], value[2], value[3]);
+                if super::bgp::validate_ipv4_next_hop(address, 0).is_err() {
+                    return Ok(None);
+                }
+                out.next_hop = Some(address.to_string());
             }
             4 if len == 4 => {
                 out.med = Some(u32::from_be_bytes(

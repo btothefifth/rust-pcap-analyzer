@@ -340,10 +340,7 @@ pub(crate) fn replay_record(
                                         let identities =
                                             mrt::imported_route_identities(&mut routes, limits)?;
                                         let atomic_aggregate =
-                                            parsed.attribute_ranges.iter().any(|occurrence| {
-                                                occurrence.code == 6
-                                                    && occurrence.disposition != "discard"
-                                            });
+                                            super::accepted_attribute(&parsed.attribute_ranges, 6);
                                         let context = context(
                                             batch,
                                             record,

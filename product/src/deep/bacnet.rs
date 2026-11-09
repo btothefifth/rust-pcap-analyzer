@@ -4,7 +4,7 @@ use super::{
     model::*,
     reassembly::{Outcome, Segment, Segments},
 };
-use pcap_evidence::{json::Json, provenance::EvidenceBytes, Error, Result};
+use pcap_evidence::{json::Json, provenance::EvidenceBytes, sha256, Error, Result};
 use std::ops::Range;
 #[derive(Clone, Debug)]
 pub struct Tag {
@@ -185,6 +185,8 @@ fn tag_list(
 #[derive(Clone, Debug)]
 pub struct Apdu {
     pub at: usize,
+    /// Digest of explicitly present NPDU addresses and forwarded BVLC origin.
+    pub routing_identity: [u8; 32],
     pub kind: u8,
     pub invoke: Option<u8>,
     pub service: Option<u8>,
@@ -215,13 +217,20 @@ pub fn apdu(b: &[u8]) -> Result<Apdu> {
     if control & 0x50 != 0 {
         return Err(bad("npdu", at + 1, "reserved control bits"));
     }
+    let mut routing = vec![u8::from(b[1] == 4)];
+    if b[1] == 4 {
+        routing.extend_from_slice(&b[4..10]);
+    }
+    routing.push(u8::from(control & 32 != 0));
     at += 2;
     if control & 32 != 0 {
         need(b, at + 3, "npdu_destination")?;
         let len = usize::from(b[at + 2]);
         need(b, at + 3 + len, "npdu_destination")?;
+        routing.extend_from_slice(&b[at..at + 3 + len]);
         at += 3 + len;
     }
+    routing.push(u8::from(control & 8 != 0));
     if control & 8 != 0 {
         need(b, at + 3, "npdu_source")?;
         let len = usize::from(b[at + 2]);
@@ -229,6 +238,7 @@ pub fn apdu(b: &[u8]) -> Result<Apdu> {
             return Err(bad("npdu_source", at, "empty source address"));
         }
         need(b, at + 3 + len, "npdu_source")?;
+        routing.extend_from_slice(&b[at..at + 3 + len]);
         at += 3 + len;
     }
     if control & 32 != 0 {
@@ -288,6 +298,7 @@ pub fn apdu(b: &[u8]) -> Result<Apdu> {
     }
     Ok(Apdu {
         at,
+        routing_identity: sha256::digest(&routing),
         kind,
         invoke,
         service,
@@ -475,6 +486,9 @@ impl Session {
         })
     }
     pub fn push(&mut self, scope: &str, bytes: &EvidenceBytes, frame: u64) -> Result<Outcome> {
+        if scope.len() > 512 {
+            return Err(Error::limit("bacnet_scope"));
+        }
         let a = apdu(bytes.data())?;
         let seq = a
             .sequence
@@ -483,10 +497,14 @@ impl Session {
             return Err(bad("bacnet_segment", a.at, "not segmented service data"));
         }
         let key = format!(
-            "{scope}:{}:{}:{}",
-            a.kind,
-            a.invoke.unwrap_or(255),
-            a.service.unwrap_or(255)
+            "{}{}",
+            transaction_key(
+                scope,
+                a.kind,
+                a.invoke.unwrap_or(255),
+                a.service.unwrap_or(255)
+            ),
+            sha256::hex(&a.routing_identity)
         );
         self.segments.push(
             &key,
@@ -499,10 +517,33 @@ impl Session {
             },
         )
     }
+    /// Retire every logical address under this transport/transaction boundary.
     pub fn cut(&mut self, scope: &str, kind: u8, invoke: u8, service: u8) {
-        self.segments.cut(
-            &format!("{scope}:{kind}:{invoke}:{service}"),
-            "explicit_bacnet_scope_boundary",
-        );
+        self.segments
+            .cut_prefix(&transaction_key(scope, kind, invoke, service));
     }
+    /// Retire only the transaction and routing identity carried by this datagram.
+    pub fn cut_addressed(&mut self, scope: &str, datagram: &[u8]) -> Result<()> {
+        let a = apdu(datagram)?;
+        let key = format!(
+            "{}{}",
+            transaction_key(
+                scope,
+                a.kind,
+                a.invoke.unwrap_or(255),
+                a.service.unwrap_or(255)
+            ),
+            sha256::hex(&a.routing_identity)
+        );
+        self.segments.cut(&key, "explicit_bacnet_scope_boundary");
+        Ok(())
+    }
+}
+fn transaction_key(scope: &str, kind: u8, invoke: u8, service: u8) -> String {
+    // Fixed-size keys preserve the segment owner's key budget even for the
+    // longest NPDU addresses. Separators cannot alias caller-provided scopes.
+    format!(
+        "{}:{kind}:{invoke}:{service}:",
+        sha256::hex(&sha256::digest(scope.as_bytes()))
+    )
 }
