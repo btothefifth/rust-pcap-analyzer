@@ -375,7 +375,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path not in files:raise ValueError("not found")
                 name=files[path];raw=(WEB/name).read_bytes();self.output(raw,ctype={"html":"text/html; charset=utf-8","js":"text/javascript; charset=utf-8","mjs":"text/javascript; charset=utf-8","css":"text/css; charset=utf-8"}[name.rsplit(".",1)[1]]);return
             supplied=self.headers.get("Authorization","")
-            if not secrets.compare_digest(supplied,"Bearer "+self.server.token):raise RequestDenied("session authorization required")
+            if not supplied.isascii() or not secrets.compare_digest(supplied,"Bearer "+self.server.token):
+                raise RequestDenied("session authorization required")
             if post:
                 if self.headers.get("Content-Type","").split(";")[0]!="application/json":raise ValueError("JSON request required")
                 n=int(self.headers.get("Content-Length","0"))

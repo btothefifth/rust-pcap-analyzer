@@ -468,6 +468,28 @@ fn http_incomplete_header_is_not_success() {
     assert!(protocols::http_header(b"GET / HTTP/1.1\r\nHost: x\r\n").is_err());
 }
 #[test]
+fn http_request_target_must_be_nonempty_and_free_of_whitespace_and_controls() {
+    for target in ["", "/a b", "/a\tb", "/a\0b", "/a\x7fb"] {
+        let request = format!("GET {target} HTTP/1.1\r\n\r\n");
+        assert!(
+            protocols::http_header(request.as_bytes()).is_err(),
+            "{target:?}"
+        );
+    }
+    for (method, target) in [
+        ("GET", "/"),
+        ("GET", "/a%20b"),
+        ("GET", "http://example.test/a"),
+        ("CONNECT", "example.test:443"),
+        ("OPTIONS", "*"),
+    ] {
+        let request = format!("{method} {target} HTTP/1.1\r\n\r\n");
+        let (metadata, consumed) = protocols::http_header(request.as_bytes()).unwrap();
+        assert_eq!(consumed, request.len());
+        assert!(metadata.encode().contains(target));
+    }
+}
+#[test]
 fn quic_short_header_is_not_claimed_decrypted() {
     assert!(protocols::quic(&[0x40, 1, 2, 3, 4, 5, 6, 7]).is_err());
 }

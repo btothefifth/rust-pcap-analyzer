@@ -485,6 +485,13 @@ impl Parser {
             }
             "s7" | "iso_cotp" => {
                 let c = super::iso::cotp(raw.data())?;
+                if matches!(c.kind, 0xe0 | 0xd0 | 0x80 | 0xc0) && !self.cotp.is_empty() {
+                    return Err(bad(
+                        "cotp_connection_boundary",
+                        5,
+                        "connection control interrupted an unfinished TSDU",
+                    ));
+                }
                 if c.kind != 0xf0 {
                     return Ok(Some(super::iso::tpkt(raw, &self.limits)?));
                 }
