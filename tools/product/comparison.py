@@ -56,7 +56,9 @@ def validate(v):
     if not isinstance(v,dict) or v.get("schema")!=SCHEMA or v.get("normalization")!=NORMALIZATION:
         raise ValueError("unsupported interpretation schema/normalizer")
     source=v.get("source",{})
-    if set(source)!={"sha256","bytes"} or not re.fullmatch(r"[0-9a-f]{64}",source.get("sha256","")):
+    if (not isinstance(source, dict) or set(source) != {"sha256", "bytes"}
+            or not isinstance(source["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source["sha256"])):
         raise ValueError("source identity required")
     _decimal(source["bytes"])
     p=v.get("producer",{})
@@ -64,16 +66,21 @@ def validate(v):
         raise ValueError("explicit producer identity required")
     if p["origin"] not in {"independent_engine","independent_fixture","external_tool","manual_research"}:
         raise ValueError("unsupported producer origin")
-    if not re.fullmatch(r"[0-9a-f]{64}",p.get("config_sha256","")): raise ValueError("producer config hash required")
+    config_hash = p.get("config_sha256")
+    if not isinstance(config_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", config_hash):
+        raise ValueError("producer config hash required")
     if not isinstance(p.get("command"),list) or not isinstance(p.get("dependencies"),list): raise ValueError("producer provenance required")
     coverage=v.get("coverage")
-    if not isinstance(coverage,dict) or set(coverage)!=set(LAYERS) or any(x not in {"complete","partial","not_collected","unsupported"} for x in coverage.values()):
+    if (not isinstance(coverage, dict) or set(coverage) != set(LAYERS)
+            or any(not isinstance(x, str) or x not in {"complete", "partial", "not_collected", "unsupported"}
+                   for x in coverage.values())):
         raise ValueError("explicit all-layer adapter coverage required")
     rows=v.get("observations")
     if not isinstance(rows,list) or len(rows)>10000: raise ValueError("observation budget")
     seen=set()
     for row in rows:
-        if not isinstance(row,dict) or row.get("layer") not in LAYERS or row.get("status") not in STATES:
+        if (not isinstance(row, dict) or row.get("layer") not in LAYERS
+                or not isinstance(row.get("status"), str) or row["status"] not in STATES):
             raise ValueError("invalid observation layer/state")
         key=row.get("key")
         if not isinstance(key,str) or not 1<=len(key)<=1024: raise ValueError("source anchor required")

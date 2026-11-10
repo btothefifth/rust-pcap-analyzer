@@ -39,6 +39,31 @@ fn cotp(part: &[u8], final_part: bool) -> Vec<u8> {
     bytes.extend_from_slice(part);
     bytes
 }
+#[test]
+fn cotp_connection_controls_require_a_cut_during_an_unfinished_tsdu() {
+    for kind in [0xe0, 0xd0, 0x80, 0xc0] {
+        let control = [3, 0, 0, 11, 6, kind, 0, 0, 0, 1, 0];
+        let mut parser = Parser::new("iso_cotp", Limits::default(), Context::default()).unwrap();
+        let (mut at, mut output) = (0, Vec::new());
+        feed(&mut parser, &mut at, &control, &mut output).unwrap();
+        assert_eq!(output.len(), 1);
+        output.clear();
+        feed(&mut parser, &mut at, &cotp(&[5], false), &mut output).unwrap();
+        let error = feed(&mut parser, &mut at, &control, &mut output).unwrap_err();
+        assert_eq!(error.field, "cotp_connection_boundary");
+        assert!(output.is_empty());
+        assert_eq!(
+            feed(&mut parser, &mut at, &cotp(&[0], true), &mut output)
+                .unwrap_err()
+                .field,
+            "continuation_requires_cut"
+        );
+        parser.cut("connection_changed").unwrap();
+        feed(&mut parser, &mut at, &cotp(&[5, 0], true), &mut output).unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].report.evidence.data(), &[5, 0]);
+    }
+}
 fn ua(channel: u32, request: u32, token: u32, sequence: u32, flag: u8, part: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::from(*b"MSG");
     bytes.push(flag);

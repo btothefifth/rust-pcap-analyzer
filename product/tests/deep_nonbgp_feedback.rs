@@ -177,6 +177,110 @@ fn cotp_gap_cuts_only_its_named_scope() {
 }
 
 #[test]
+fn cotp_connection_controls_and_malformed_input_cut_only_the_named_scope() {
+    for control in [
+        vec![3, 0, 0, 11, 6, 0xe0, 0, 0, 0, 1, 0],
+        vec![3, 0, 0, 11, 6, 0xd0, 0, 0, 0, 1, 0],
+        vec![3, 0, 0, 11, 6, 0x80, 0, 0, 0, 1, 0],
+        vec![3, 0, 0, 11, 6, 0xc0, 0, 0, 0, 1, 0],
+        vec![3, 0],
+    ] {
+        let mut session = CotpSession::new(Limits::default()).unwrap();
+        session.push("A", &dt(b"A", false, 1), 1).unwrap();
+        session.push("B", &dt(b"B", false, 2), 2).unwrap();
+        assert!(session.push("A", &evidence(&control, 3), 3).is_err());
+        let a = session
+            .push("A", &dt(b"C", true, 4), 4)
+            .unwrap()
+            .completed
+            .unwrap();
+        assert_eq!(a.data(), b"C");
+        assert_eq!(a.packets().len(), 1);
+        let b = session
+            .push("B", &dt(b"D", true, 5), 5)
+            .unwrap()
+            .completed
+            .unwrap();
+        assert_eq!(b.data(), b"BD");
+        assert_eq!(b.packets().len(), 2);
+    }
+}
+
+#[test]
+fn cotp_expedited_data_preserves_the_ordinary_tsdu() {
+    let mut session = CotpSession::new(Limits::default()).unwrap();
+    session.push("A", &dt(b"A", false, 1), 1).unwrap();
+    let expedited = evidence(&[3, 0, 0, 8, 2, 0x10, 0x80, 0], 2);
+    assert!(session.push("A", &expedited, 2).is_err());
+    let data = session
+        .push("A", &dt(b"B", true, 3), 3)
+        .unwrap()
+        .completed
+        .unwrap();
+    assert_eq!(data.data(), b"AB");
+}
+
+#[test]
+fn cip_multiple_service_rejections_preserve_status_without_a_service_table() {
+    use deep::cip;
+    let limits = Limits::default();
+    for message in [&[0x8a, 0, 8, 0][..], &[0x8a, 0, 4, 1, 0x34, 0x12, 0xff][..]] {
+        let decoded = cip::message(message, 40, &limits).unwrap();
+        assert_eq!(
+            member(&decoded, "general_status"),
+            Some(&Json::from(message[2]))
+        );
+        assert!(member(&decoded, "services").is_none());
+        let mut packet = vec![0; 40];
+        packet[0] = 0x6f;
+        packet[2..4].copy_from_slice(&(16 + message.len() as u16).to_le_bytes());
+        packet[30] = 2; // Null address followed by unconnected data.
+        packet[36..38].copy_from_slice(&0xb2u16.to_le_bytes());
+        packet[38..40].copy_from_slice(&(message.len() as u16).to_le_bytes());
+        packet.extend_from_slice(message);
+        let report = cip::decode(&evidence(&packet, 1), &limits).unwrap();
+        let data = member(field(&report, "cpf[1]"), "data").unwrap();
+        assert_eq!(
+            member(data, "general_status"),
+            Some(&Json::from(message[2]))
+        );
+    }
+    for status in [0, 0x1e] {
+        let child_status = if status == 0 { 0 } else { 8 };
+        let message = [
+            0x8a,
+            0,
+            status,
+            0,
+            2,
+            0,
+            6,
+            0,
+            10,
+            0,
+            0x8e,
+            0,
+            0,
+            0,
+            0x8e,
+            0,
+            child_status,
+            0,
+        ];
+        let decoded = cip::message(&message, 0, &limits).unwrap();
+        let Json::Array(services) = member(&decoded, "services").unwrap() else {
+            panic!("service table")
+        };
+        assert_eq!(services.len(), 2);
+        assert_eq!(
+            member(&services[1], "general_status"),
+            Some(&Json::from(child_status))
+        );
+        assert!(cip::message(&[0x8a, 0, status, 0], 0, &limits).is_err());
+    }
+}
+
+#[test]
 fn cotp_rejected_push_does_not_advance_or_retain_a_scope_counter() {
     let limits = Limits {
         active: 1,
