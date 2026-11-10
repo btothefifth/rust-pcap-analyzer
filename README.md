@@ -65,6 +65,7 @@ The repository pins Rust 1.85.1 in `rust-toolchain.toml`. The core CLI can be
 built and run offline once that toolchain is available. Python is used for
 repository validation and fixture tooling, not by the Rust application.
 
+- [Proposed next parser slice](docs/product/NEXT_PARSER_SLICE.md)
 - [Library API](docs/API.md) and [file formats](docs/FORMAT.md)
 - [Current implementation pointer](docs/implementation/CURRENT.md) and
   [validation evidence](docs/VALIDATION.md)
