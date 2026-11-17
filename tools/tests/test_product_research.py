@@ -24,6 +24,21 @@ class Temp(unittest.TestCase):
     def snapshot(self):return adapters.container_normalize(self.source)
 
 class ResearchTests(Temp):
+    def test_malformed_schema_types_raise_value_error(self):
+        valid = self.snapshot()
+        for path in [('source',), ('source', 'sha256'), ('producer', 'config_sha256'),
+                     ('coverage', 'capture_record'), ('observations', 0, 'status')]:
+            for value in (None, [], {}, 1, True):
+                with self.subTest(path=path, value=value):
+                    malformed = copy.deepcopy(valid)
+                    target = malformed
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                    with self.assertRaises(ValueError):
+                        comparison.load(json.dumps(malformed).encode())
+        self.assertEqual(comparison.validate(valid), valid)
+
     def test_matching_independent_container_and_events(self):
         left=self.snapshot();raw=b''.join(worker.inspection_lines(self.source,'sample'));right=adapters.event_normalize(raw,contract.file_identity(self.source),'1',origin='independent_fixture')
         result=contract.compare_fields(left,right);self.assertIsNone(result['first_semantic_divergence']);self.assertFalse(result['consensus_used'])

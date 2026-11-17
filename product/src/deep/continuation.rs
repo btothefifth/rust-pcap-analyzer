@@ -28,7 +28,8 @@ pub struct Parser {
     buffer: StreamBuffer,
     limits: Limits,
     context: Context,
-    cotp: EvidenceBytes,
+    // A non-final DT can have no payload and still leave a TSDU pending.
+    cotp: Option<EvidenceBytes>,
     dnp: BTreeMap<(u16, u16), DnpTransport>,
     ua: BTreeMap<(u32, u32), UaAssembly>,
     ua_last: BTreeMap<u32, u32>,
@@ -49,7 +50,7 @@ impl Parser {
             buffer: StreamBuffer::new(limits.input_bytes, limits.spans)?,
             limits,
             context,
-            cotp: EvidenceBytes::default(),
+            cotp: None,
             dnp: BTreeMap::new(),
             ua: BTreeMap::new(),
             ua_last: BTreeMap::new(),
@@ -142,7 +143,7 @@ impl Parser {
             self.requires_cut = true;
             // Rejected continuation cannot retain an assembly for a later feed.
             // DNP keeps its rejected witnesses for its existing cut report.
-            self.cotp = EvidenceBytes::default();
+            self.cotp = None;
             self.ua.clear();
             self.ua_last.clear();
         }
@@ -485,19 +486,32 @@ impl Parser {
             }
             "s7" | "iso_cotp" => {
                 let c = super::iso::cotp(raw.data())?;
+                if matches!(c.kind, 0xe0 | 0xd0 | 0x80 | 0xc0) && self.cotp.is_some() {
+                    return Err(bad(
+                        "cotp_connection_boundary",
+                        5,
+                        "connection control interrupted an unfinished TSDU",
+                    ));
+                }
                 if c.kind != 0xf0 {
                     return Ok(Some(super::iso::tpkt(raw, &self.limits)?));
                 }
                 let part = raw.slice(c.payload)?;
-                if self.cotp.spans().len().saturating_add(part.spans().len()) > self.limits.spans {
+                let spans = self
+                    .cotp
+                    .as_ref()
+                    .map_or(0, |pending| pending.spans().len());
+                if spans.saturating_add(part.spans().len()) > self.limits.spans {
                     return Err(Error::limit("cotp_spans"));
                 }
                 self.check_retained(part.len(), "cotp_retained_bytes")?;
-                self.cotp.append(&part, self.limits.input_bytes)?;
+                let mut pending = self.cotp.take().unwrap_or_default();
+                pending.append(&part, self.limits.input_bytes)?;
                 if !c.eot {
+                    self.cotp = Some(pending);
                     return Ok(None);
                 }
-                let data = std::mem::take(&mut self.cotp);
+                let data = pending;
                 let report = if data.data().first() == Some(&0x32) {
                     super::iso::s7(&data, &self.limits)?
                 } else {
@@ -607,7 +621,8 @@ impl Parser {
     /// Logical retained payload across all concurrently open assemblies. Final
     /// removal, abort, cut and rejected-feed cleanup release this budget.
     fn check_retained(&self, additional: usize, field: &'static str) -> Result<()> {
-        let retained = self.ua.values().try_fold(self.cotp.len(), |n, assembly| {
+        let cotp_bytes = self.cotp.as_ref().map_or(0, EvidenceBytes::len);
+        let retained = self.ua.values().try_fold(cotp_bytes, |n, assembly| {
             n.checked_add(assembly.pending.len())
                 .ok_or_else(|| Error::limit(field))
         })?;
@@ -630,18 +645,26 @@ impl Parser {
             max_json_bytes: d.max_json_bytes.min(self.limits.output_bytes),
         }
     }
+    /// Discard stream and application state, then report the discarded evidence.
+    /// A report error does not undo the cut.
     pub fn cut(&mut self, reason: &'static str) -> Result<Report> {
         let pending = self.buffer.gap();
+        let cotp = self.cotp.take();
+        let dnp = std::mem::take(&mut self.dnp);
+        let ua = std::mem::take(&mut self.ua);
+        self.ua_last.clear();
+        self.requires_cut = false;
+
         let mut r = Report::new("application.boundary", &pending, &self.limits)?;
         let mut states = Vec::new();
-        if !self.cotp.is_empty() {
-            states.push(pcap_evidence_stream::events::Evidence::bytes(&self.cotp).json());
+        if let Some(pending) = cotp {
+            states.push(pcap_evidence_stream::events::Evidence::bytes(&pending).json());
         }
-        for s in self.dnp.values() {
+        for s in dnp.into_values() {
             states.push(pcap_evidence_stream::events::Evidence::bytes(&s.pending).json());
             states.push(pcap_evidence_stream::events::Evidence::bytes(&s.wire).json());
         }
-        for s in self.ua.values() {
+        for s in ua.into_values() {
             states.push(pcap_evidence_stream::events::Evidence::bytes(&s.pending).json());
         }
         r.add(
@@ -650,18 +673,13 @@ impl Parser {
             0..0,
             "explicit_application_state_boundary",
         )?;
-        self.cotp = EvidenceBytes::default();
-        self.dnp.clear();
-        self.requires_cut = false;
-        self.ua.clear();
-        self.ua_last.clear();
         r.note(Status::Incomplete, reason, 0, pending.len())?;
         Ok(r)
     }
     pub fn finish(&mut self) -> Result<Option<Report>> {
         if self.requires_cut
             || !self.buffer.bytes().is_empty()
-            || !self.cotp.is_empty()
+            || self.cotp.is_some()
             || !self.dnp.is_empty()
             || !self.ua.is_empty()
         {

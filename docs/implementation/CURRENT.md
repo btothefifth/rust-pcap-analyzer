@@ -54,7 +54,7 @@ receipt for its current disposition; this pointer does not assert a pass. The
 earlier `8aa92ad` receipt is a historical baseline listed in
 [VALIDATION.md](../VALIDATION.md).
 
-## Active follow-on: bounded BGP corpus and semantic comparison
+## Merged follow-on — bounded BGP corpus and semantic comparison
 
 The follow-on branch starts with the scope and acceptance criteria in
 [the BGP qualification plan](../product/FOLLOWUP_QUALIFICATION.md#bounded-bgp-corpus-and-semantic-comparison).
@@ -68,8 +68,9 @@ samples and independent synthetic witnesses, with missing OPEN and IPv6 RIB
 coverage explicit. One plan review and two implementation review rounds are
 complete; the final implementation round found no actionable findings. All 56
 product gates and 16 root gates passed on the unchanged reviewed source. Final
-status/receipt updates record those results separately. Hosted CI and merge are
-external follow-up gates; the earlier merged receipt remains historical.
+status/receipt updates record those results separately. PR #2 merged at
+`afc5d6d8423e8bf153ff03788dda555c803a9af5`. The receipt remains bound to its
+recorded source and checks.
 
 ## Remaining qualification
 
@@ -90,3 +91,6 @@ evidence boundary.
 
 The [cleanup audit](CLEANUP_AUDIT_2026-11-09.md) records the repository review,
 regression repairs, validation scope, and remaining evidence limits.
+
+The [November 10 main audit](MAIN_AUDIT_2026-11-10.md) records subsequent parser
+and desktop input defects, repairs, and the next-slice recommendation.
