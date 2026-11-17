@@ -62,10 +62,11 @@ No missing probe is replaced with Python interpretation.
 
 ## JSON / TLV / workbench consumers
 
-The product TLV path inherits the existing JSON value model. The completed local
-run exercised the product CLI on all five PCAP fixtures with NDJSON and TLV,
-decoded TLV using the existing Python reader, and asserted complete event-sequence
-parity. This is projection consistency only; native workbench, linked ABI and
+The product TLV path inherits the existing JSON value model. The original local
+run compared NDJSON and TLV on five PCAP fixtures. The current product gate
+compares all events on eleven fixtures, validates semantic reports against
+the v1 schema, and checks split FC23 values and FC43 object hashes against
+their packet spans. This is projection consistency only; native workbench, linked ABI and
 normative protocol gates remain separately executable.
 
 ## Development-only fuzzing

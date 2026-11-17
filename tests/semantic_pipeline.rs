@@ -102,14 +102,8 @@ fn changed_modbus_references_cannot_retarget_a_mapping() {
     assert!(report::analysis(&analysis, false)
         .encode()
         .contains("read_mapping"));
-    let engine::ApplicationData::Modbus(data) =
-        &mut analysis.applications[reference.application].data
-    else {
-        unreachable!()
-    };
-    let source = &mut data.messages[reference.message].raw;
-    let packet = source.spans()[0].packet;
-    *source = pcap_evidence::provenance::EvidenceBytes::from_packet(source.data(), packet, 31);
+    let other = engine::analyze(&capture("modbus_bits_valid.pcap"), Config::default()).unwrap();
+    analysis.transactions[index] = other.transactions[index].clone();
     assert!(!report::analysis(&analysis, false)
         .encode()
         .contains("read_mapping"));
@@ -118,8 +112,7 @@ fn changed_modbus_references_cannot_retarget_a_mapping() {
 #[test]
 fn modbus_decoder_failure_applies_only_to_its_capture_and_generation() {
     use pcap_evidence::{correlate::transactions, Error, Limits};
-    let mut analysis =
-        engine::analyze(&capture("modbus_bits_valid.pcap"), Config::default()).unwrap();
+    let analysis = engine::analyze(&capture("modbus_bits_valid.pcap"), Config::default()).unwrap();
     let mut failure = engine::ApplicationAnalysis {
         flow: analysis.transactions[0].flow,
         direction: 0,
@@ -129,8 +122,9 @@ fn modbus_decoder_failure_applies_only_to_its_capture_and_generation() {
             error: Error::limit("test"),
         },
     };
-    analysis.applications.push(failure.clone());
-    assert!(transactions(&analysis.applications, &Limits::default())
+    let mut observations = analysis.applications().to_vec();
+    observations.push(failure.clone());
+    assert!(transactions(&observations, &Limits::default())
         .unwrap()
         .iter()
         .any(|tx| tx.status == "candidate_pair"));
@@ -138,8 +132,8 @@ fn modbus_decoder_failure_applies_only_to_its_capture_and_generation() {
         capture: analysis.capture_sha256,
         error: Error::limit("test"),
     };
-    analysis.applications.push(failure);
-    assert!(!transactions(&analysis.applications, &Limits::default())
+    observations.push(failure);
+    assert!(!transactions(&observations, &Limits::default())
         .unwrap()
         .iter()
         .any(|tx| tx.status == "candidate_pair"));
@@ -177,9 +171,6 @@ fn moving_a_pair_to_another_flow_or_capture_invalidates_its_mapping() {
         .find(|t| t.status == "candidate_pair")
         .unwrap();
     pair.flow = 0;
-    for r in [pair.requests[0], pair.responses[0]] {
-        snapshot.applications[r.application].flow = 0;
-    }
     assert!(!has_mapping(&snapshot));
 }
 
@@ -197,7 +188,7 @@ fn partial_mbap_requires_one_capture_to_compete_with_a_pair() {
         .iter()
         .find(|t| t.status == "candidate_pair")
         .unwrap();
-    let app = &snapshot.applications[pair.requests[0].application];
+    let app = &snapshot.applications()[pair.requests[0].application];
     let engine::ApplicationData::Modbus(data) = &app.data else {
         unreachable!()
     };
@@ -221,7 +212,7 @@ fn partial_mbap_requires_one_capture_to_compete_with_a_pair() {
         };
         let result = modbus::decode(&stream, modbus::Role::Request, &Limits::default()).unwrap();
         assert_eq!(result.issues[0].code, "truncated_modbus_adu");
-        let mut apps = snapshot.applications.clone();
+        let mut apps = snapshot.applications().to_vec();
         apps.push(engine::ApplicationAnalysis {
             data: engine::ApplicationData::Modbus(result),
             ..app.clone()

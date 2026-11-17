@@ -499,9 +499,13 @@ impl State<'_> {
             Ok(d) => d,
             Err(e) => {
                 if meta.captured_len < meta.original_len {
-                    if let Some(header) =
-                        network::snapped_tcp(meta.link_type, &raw, scope, self.c.max_tunnel_depth)
-                    {
+                    if let Some(header) = network::snapped_tcp(
+                        meta.link_type,
+                        &raw,
+                        scope,
+                        self.c.max_tunnel_depth,
+                        self.c.base.checksum_policy,
+                    ) {
                         self.observe_tcp_header(
                             header,
                             meta.frame,
@@ -567,6 +571,7 @@ impl State<'_> {
                 EvidenceStatus::Incomplete,
             )?;
             if self.c.base.checksum_policy == ChecksumPolicy::RequireValid {
+                self.resolve_rejected_reassembly(&d, &path, depth, ancestors);
                 return Ok(());
             }
         }
@@ -575,6 +580,7 @@ impl State<'_> {
                 &d,
                 path.clone(),
                 self.c.max_tunnel_depth.saturating_sub(depth),
+                network::HeaderUse::Loss(self.c.base.checksum_policy),
             ) {
                 self.observe_tcp_header(
                     header,
@@ -629,7 +635,9 @@ impl State<'_> {
                     EvidenceStatus::Unsupported,
                 )?,
                 Err(e) => {
-                    self.resolve_checksum_rejection(&datagram, &path, depth, &contributors, &e);
+                    if wire::is_checksum_rejection(&e) {
+                        self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
+                    }
                     self.diagnostic(e.to_string(), contributors, EvidenceStatus::Rejected)?;
                     return Ok(());
                 }
@@ -672,6 +680,9 @@ impl State<'_> {
                 );
             }
             Err(e) => {
+                if wire::is_checksum_rejection(&e) {
+                    self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
+                }
                 self.diagnostic(
                     format!("tunnel_candidate_rejected:{e}"),
                     contributors.clone(),
@@ -743,28 +754,27 @@ impl State<'_> {
         let transport = match wire::decode_transport(&datagram, self.c.base.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
-                self.resolve_checksum_rejection(&datagram, &path, depth, &contributors, &e);
+                if wire::is_checksum_rejection(&e) {
+                    self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
+                }
                 self.diagnostic(e.to_string(), contributors, EvidenceStatus::Unsupported)?;
                 return Ok(());
             }
         };
         self.transport(datagram.scope, path, transport, contributors, frame, time)
     }
-    fn resolve_checksum_rejection(
+    fn resolve_rejected_reassembly(
         &mut self,
         datagram: &wire::Datagram,
         path: &[String],
         depth: usize,
         packets: &[PacketId],
-        error: &Error,
     ) {
-        if error.code != pcap_evidence::ErrorCode::Checksum {
-            return;
-        }
         if let Some((scope, path, header, _)) = network::tcp_prefix_path(
             datagram,
             path.to_vec(),
             self.c.max_tunnel_depth.saturating_sub(depth),
+            network::HeaderUse::Resolve,
         ) {
             let (key, _) = Key::new(scope.clone(), path, 6, header.source, header.destination);
             if let Some(tracker) = self.active.get_mut(&key).and_then(|a| a.tracker.as_mut()) {
@@ -1062,11 +1072,18 @@ impl State<'_> {
         remaining: &mut usize,
     ) -> Result<()> {
         if let Some(packet) = flow.uncertain_payload {
-            self.diagnostic(
-                "tcp_generation_payload_uncertain",
-                vec![packet],
+            let mut event = Event::new(
+                EventKind::Diagnostic,
                 EvidenceStatus::Ambiguous,
-            )?;
+                Json::object([
+                    ("reason", "tcp_generation_payload_uncertain".into()),
+                    ("window", window.into()),
+                    ("generation", flow.generation.into()),
+                ]),
+            );
+            event.session = Some(id);
+            event.evidence = Evidence::packets(vec![packet]);
+            self.sink.emit(&event)?;
         }
         let flow_ambiguous = !flow.reconstruction_errors.is_empty()
             || !flow.anomalies.is_empty()

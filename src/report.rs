@@ -253,7 +253,7 @@ fn modbus_pair_fields(
         return None;
     }
     for ((r, binding), direction) in pair.refs.iter().zip(&pair.bindings).zip(pair.directions) {
-        let app = value.applications.get(r.application)?;
+        let app = value.applications().get(r.application)?;
         let ApplicationData::Modbus(data) = &app.data else {
             return None;
         };
@@ -443,7 +443,7 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
             "applications",
             J::array(
                 value
-                    .applications
+                    .applications()
                     .iter()
                     .enumerate()
                     .map(|(index, application)| {

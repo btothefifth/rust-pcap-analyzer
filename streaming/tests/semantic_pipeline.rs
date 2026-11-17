@@ -293,7 +293,7 @@ fn modbus_mapping_references_resolve_to_both_wire_values() {
                 let Json::Number(index) = field(reference, "message") else {
                     panic!("missing message")
                 };
-                let ApplicationData::Modbus(data) = &snapshot.applications[*app as usize].data
+                let ApplicationData::Modbus(data) = &snapshot.applications()[*app as usize].data
                 else {
                     panic!("wrong protocol")
                 };
@@ -729,10 +729,19 @@ fn strict_checksum_adjudication_releases_only_completed_reassembly() {
     config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
     let first = ipv4_fragment(&tail, 0..24, true);
     let last = ipv4_fragment(&tail, 24..32, false);
-    for (extra, paired) in [
-        (vec![tail], true),
-        (vec![first.clone(), last], true),
-        (vec![first], false),
+    let routed_first = tiny_capture::routed_ipv4(&first);
+    let routed_last = tiny_capture::routed_ipv4(&last);
+    let mut bad_ip = tail.clone();
+    bad_ip[24] ^= 1;
+    let original = tail.len() as u32;
+    for (extra, original_length, paired) in [
+        (vec![tail.clone()], None, true),
+        (vec![first.clone(), last], None, true),
+        (vec![first], None, false),
+        (vec![ipv4_fragment(&tail, 0..16, true)], None, false),
+        (vec![tail[..48].to_vec()], Some(original), false),
+        (vec![bad_ip[..48].to_vec()], Some(original), true),
+        (vec![routed_first, routed_last], None, true),
     ] {
         let mut frames = vec![
             tcp(false, 100, 0, 2, &[]),
@@ -746,8 +755,12 @@ fn strict_checksum_adjudication_releases_only_completed_reassembly() {
                 &[0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34],
             ),
         ];
+        let record = capture(&frames).len();
         frames.extend(extra);
-        let raw = capture(&frames);
+        let mut raw = capture(&frames);
+        if let Some(original) = original_length {
+            raw[record + 12..record + 16].copy_from_slice(&original.to_le_bytes());
+        }
         let snapshot = pcap_evidence::engine::analyze(&raw, config.base.clone()).unwrap();
         assert_eq!(
             pcap_evidence::report::analysis(&snapshot, false)
@@ -755,13 +768,26 @@ fn strict_checksum_adjudication_releases_only_completed_reassembly() {
                 .contains("read_mapping"),
             paired
         );
+        let events = run(&raw, config.clone()).events;
         assert_eq!(
-            run(&raw, config.clone())
-                .events
+            events
                 .iter()
                 .any(|e| e.data.encode().contains("read_mapping")),
             paired
         );
+        if !paired {
+            let loss = events
+                .iter()
+                .find(|e| e.data.encode().contains("tcp_generation_payload_uncertain"))
+                .unwrap();
+            let request = events
+                .iter()
+                .find(|e| e.kind == EventKind::Message)
+                .unwrap();
+            assert!(loss.session.is_some());
+            assert_eq!(loss.session, request.session);
+            assert!(loss.data.encode().contains("\"window\""));
+        }
     }
 }
 
@@ -805,5 +831,96 @@ fn native_modbus_limits_apply_across_stream_directions() {
             assert!(events.contains(code));
             assert_eq!(events.matches("\"kind\":\"protocol.message\"").count(), 1);
         }
+    }
+}
+
+#[test]
+fn native_message_budget_admits_earliest_completed_exchange() {
+    use tiny_capture::{capture, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    for (second_id, limit, expected_pairs) in [(2, 2, 1), (1, 2, 0), (2, 4, 2)] {
+        let mut next_req = req;
+        next_req[1] = second_id;
+        next_req[9] = 17;
+        let mut next_rsp = rsp;
+        next_rsp[1] = second_id;
+        let raw = capture(&[
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 500, 101, 0x12, &[]),
+            tcp(false, 101, 501, 0x18, &req),
+            tcp(true, 501, 113, 0x18, &rsp),
+            tcp(false, 113, 512, 0x18, &next_req),
+            tcp(true, 512, 125, 0x18, &next_rsp),
+        ]);
+        let mut config = StreamConfig::default();
+        config.base.modbus_ports = vec![2000];
+        config.base.limits.max_protocol_messages = limit;
+        let events = run(&raw, config).events;
+        let frames: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == EventKind::Message)
+            .map(|e| e.evidence.packets[0].frame)
+            .collect();
+        assert_eq!(frames, (3..3 + limit as u64).collect::<Vec<_>>());
+        let mappings: Vec<_> = events
+            .iter()
+            .filter(|e| e.data.encode().contains("read_mapping"))
+            .collect();
+        assert_eq!(mappings.len(), expected_pairs);
+        if limit == 2 && second_id == 2 {
+            assert!(mappings[0]
+                .data
+                .encode()
+                .contains("\"starting_address_zero_based\":9"));
+        }
+    }
+}
+
+#[test]
+fn gre_checksum_rejection_resolves_only_completed_fragment_sets() {
+    use pcap_evidence::wire::internet_checksum;
+    use tiny_capture::{capture, ipv4_fragment, tcp, tunneled};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let wrap = |frame: Vec<u8>, reverse| tunneled("gre", 7, reverse, &frame);
+    let pair = [
+        wrap(tcp(false, 100, 0, 2, &[]), false),
+        wrap(tcp(true, 500, 101, 0x12, &[]), true),
+        wrap(tcp(false, 101, 501, 0x18, &req), false),
+        wrap(tcp(true, 501, 113, 0x18, &rsp), true),
+    ];
+    let mut good = wrap(tcp(false, 113, 512, 0x18, &req), false);
+    good[34] |= 0x80;
+    good.splice(38..38, [0; 4]);
+    let payload_len = good.len() - 34;
+    good[16..18].copy_from_slice(&((20 + payload_len) as u16).to_be_bytes());
+    good[24..26].fill(0);
+    let ip_checksum = internet_checksum(&good[14..34]);
+    good[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
+    let gre_checksum = internet_checksum(&good[34..]);
+    good[38..40].copy_from_slice(&gre_checksum.to_be_bytes());
+    let mut bad = good.clone();
+    bad[38] ^= 1;
+    let first = ipv4_fragment(&bad, 0..56, true);
+    let last = ipv4_fragment(&bad, 56..payload_len, false);
+    for (tail, paired) in [
+        (vec![good], false),
+        (vec![bad], true),
+        (vec![first.clone()], false),
+        (vec![first, last], true),
+    ] {
+        let mut frames = pair.to_vec();
+        frames.extend(tail);
+        let mut config = StreamConfig::default();
+        config.base.modbus_ports = vec![2000];
+        config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+        let events = run(&capture(&frames), config).events;
+        assert_eq!(
+            events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            paired
+        );
     }
 }

@@ -535,7 +535,7 @@ pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Ve
     let mut packet_messages: BTreeMap<PacketId, Vec<MessageRef>> = BTreeMap::new();
     let mut checks = 0usize;
     let budget = analysis.config.limits.max_correlation_checks;
-    for (ai, application) in analysis.applications.iter().enumerate() {
+    for (ai, application) in analysis.applications().iter().enumerate() {
         let message_packets: Vec<Vec<PacketId>> = match &application.data {
             ApplicationData::Dnp3(d) => d.messages.iter().map(|m| m.packets.clone()).collect(),
             ApplicationData::Modbus(m) => m.messages.iter().map(|m| m.raw.packets()).collect(),

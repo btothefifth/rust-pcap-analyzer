@@ -368,10 +368,15 @@ fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>>
         let mut key = None;
         if f & 0x8000 != 0 {
             need(b, p + 4, "gre_checksum")?;
-            if u16be(b, p + 2) != 0 || (!partial && wire::internet_checksum(b) != 0) {
-                return Err(malformed(
+            if u16be(b, p + 2) != 0 {
+                return Err(malformed("gre_checksum", "nonzero reserved field"));
+            }
+            if !partial && wire::internet_checksum(b) != 0 {
+                return Err(Error::new(
+                    pcap_evidence::ErrorCode::Checksum,
+                    0,
                     "gre_checksum",
-                    "invalid checksum or reserved field",
+                    "invalid GRE checksum",
                 ));
             }
             p += 4;
@@ -591,6 +596,7 @@ pub(crate) fn snapped_tcp(
     raw: &EvidenceBytes,
     scope: Scope,
     max_depth: usize,
+    policy: wire::ChecksumPolicy,
 ) -> Option<(
     Scope,
     Vec<String>,
@@ -600,13 +606,20 @@ pub(crate) fn snapped_tcp(
     let Decoded::Ip(datagram, context) = decode_extent(link, raw, scope, true).ok()? else {
         return None;
     };
-    tcp_prefix_path(&datagram, context, max_depth)
+    tcp_prefix_path(&datagram, context, max_depth, HeaderUse::Loss(policy))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HeaderUse {
+    Loss(wire::ChecksumPolicy),
+    Resolve,
 }
 
 pub(crate) fn tcp_prefix_path(
     first: &Datagram,
     mut path: Vec<String>,
     max_depth: usize,
+    purpose: HeaderUse,
 ) -> Option<(
     Scope,
     Vec<String>,
@@ -616,8 +629,17 @@ pub(crate) fn tcp_prefix_path(
     let mut next;
     let mut datagram = first;
     for depth in 0..=max_depth {
-        if let Some((header, packet)) = wire::tcp_loss_witness(datagram) {
-            return Some((datagram.scope.clone(), path, header, packet));
+        if matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
+            && datagram.ip_checksum == wire::Checksum::Invalid
+        {
+            return None;
+        }
+        if let Some(observation) = wire::tcp_header_observation(datagram) {
+            let header = match purpose {
+                HeaderUse::Loss(policy) => observation.possible_loss(policy)?,
+                HeaderUse::Resolve => observation.header,
+            };
+            return Some((datagram.scope.clone(), path, header, observation.packet));
         }
         if datagram.fragment.as_ref().is_some_and(|f| f.offset != 0) {
             return None;

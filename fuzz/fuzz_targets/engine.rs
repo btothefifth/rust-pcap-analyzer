@@ -65,7 +65,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
         }
-        for app in &analysis.applications {
+        for app in analysis.applications() {
             match &app.data {
                 ApplicationData::Dnp3(d) => dnp_bytes(d, &check),
                 ApplicationData::Modbus(m) => {

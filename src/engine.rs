@@ -125,7 +125,7 @@ pub struct Analysis {
     pub secret_blocks: usize,
     pub packets: Vec<PacketObservation>,
     pub flows: Vec<FlowResult>,
-    pub applications: Vec<ApplicationAnalysis>,
+    applications: Vec<ApplicationAnalysis>,
     pub datagrams: Vec<crate::datagram::DatagramAnalysis>,
     pub fragment_notices: Vec<FragmentNotice>,
     pub transactions: Vec<Transaction>,
@@ -136,6 +136,19 @@ pub struct Analysis {
     pub correlation_error: Option<Error>,
 }
 impl Analysis {
+    /// The application observations used to finalize the snapshot's transactions.
+    /// To correlate an edited collection, copy this slice and call
+    /// [`crate::correlate::transactions`] on the copy.
+    ///
+    /// ```compile_fail
+    /// fn relabel(snapshot: &mut pcap_evidence::engine::Analysis) {
+    ///     snapshot.applications()[0].flow = 2;
+    /// }
+    /// ```
+    pub fn applications(&self) -> &[ApplicationAnalysis] {
+        &self.applications
+    }
+
     /// Reports parse warnings, incomplete reconstruction, and protocol diagnostics.
     pub fn has_diagnostics(&self) -> bool {
         self.datagrams.iter().any(|d| match &d.data {
@@ -283,9 +296,13 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             Ok(d) => d,
             Err(e) => {
                 if metadata.captured_len < metadata.original_len {
-                    if let Some((scope, segment)) =
-                        wire::snapped_tcp(metadata.link_type, data, id, scope)
-                    {
+                    if let Some((scope, segment)) = wire::snapped_tcp_with_policy(
+                        metadata.link_type,
+                        data,
+                        id,
+                        scope,
+                        config.checksum_policy,
+                    ) {
                         tracker.observe_header(
                             scope,
                             id,
@@ -315,7 +332,9 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             continue;
         }
         if network.fragment.as_ref().is_some_and(|f| f.offset == 0) {
-            if let Some(header) = wire::tcp_loss_header(&network) {
+            if let Some(header) = wire::tcp_header_observation(&network)
+                .and_then(|h| h.possible_loss(config.checksum_policy))
+            {
                 tracker.observe_header(
                     network.scope.clone(),
                     id,
@@ -343,9 +362,13 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         let transport = match wire::decode_transport(&datagram, config.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
-                if e.code == ErrorCode::Checksum {
-                    if let Some(header) = wire::tcp_loss_header(&datagram) {
-                        tracker.resolve_reassembly(datagram.scope.clone(), header, &contributors);
+                if wire::is_checksum_rejection(&e) {
+                    if let Some(observation) = wire::tcp_header_observation(&datagram) {
+                        tracker.resolve_reassembly(
+                            datagram.scope.clone(),
+                            observation.header,
+                            &contributors,
+                        );
                     }
                 }
                 each_packet(&mut packets, &contributors, |p| {

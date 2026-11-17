@@ -735,9 +735,9 @@ fn engine_does_not_silently_choose_between_conflicting_protocol_endpoints() {
         ..Config::default()
     };
     let analysis = engine::analyze(&capture, config).unwrap();
-    assert!(!analysis.applications.is_empty());
+    assert!(!analysis.applications().is_empty());
     assert!(analysis
-        .applications
+        .applications()
         .iter()
         .all(|app| app.protocol == "ambiguous" && matches!(app.data, ApplicationData::Failed(_))));
     assert!(analysis.transactions.is_empty());

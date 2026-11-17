@@ -12,6 +12,9 @@ an empty result. Exhaustive `ApplicationData` matches must handle
 `TcpTracker::finish`; they now include the first uncertain payload witness. `wire::Datagram`
 carries `declared_payload_len`, the IP payload length after decoded extensions.
 For a complete datagram constructed by a caller, use the payload's byte length.
+Read finalized snapshot observations through `Analysis::applications()`.
+Callers editing observations can use `applications().to_vec()` and pass the
+edited list to `correlate::transactions`.
 
 The root crate is consumed through path dependencies within this repository and is unpublished.
 The change affects Rust source compatibility. Captures, the v1 semantic report

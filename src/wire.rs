@@ -145,33 +145,64 @@ pub fn snapped_tcp(
     id: PacketId,
     scope: Scope,
 ) -> Option<(Scope, TcpHeader)> {
-    let d = decode_packet_extent(link_type, packet, id, scope, true).ok()?;
-    Some((d.scope.clone(), tcp_loss_header(&d)?))
+    snapped_tcp_with_policy(link_type, packet, id, scope, ChecksumPolicy::Observe)
 }
 
-/// Read a fixed TCP header only for attributing missing data. A noninitial
-/// fragment has no transport header at its payload offset.
-pub fn tcp_loss_header(d: &Datagram) -> Option<TcpHeader> {
-    tcp_loss_witness(d).map(|(header, _)| header)
+pub(crate) fn snapped_tcp_with_policy(
+    link_type: u32,
+    packet: &[u8],
+    id: PacketId,
+    scope: Scope,
+    policy: ChecksumPolicy,
+) -> Option<(Scope, TcpHeader)> {
+    let d = decode_packet_extent(link_type, packet, id, scope, true).ok()?;
+    Some((
+        d.scope.clone(),
+        tcp_header_observation(&d)?.possible_loss(policy)?,
+    ))
 }
-/// Return the packet supplying the first TCP header byte, even after reassembly.
-pub fn tcp_loss_witness(d: &Datagram) -> Option<(TcpHeader, PacketId)> {
+
+/// Read only the fields needed to identify potentially missing TCP data.
+pub fn tcp_loss_header(d: &Datagram) -> Option<TcpHeader> {
+    tcp_header_observation(d)?.possible_loss(ChecksumPolicy::Observe)
+}
+
+/// Capture evidence for TCP identity before transport admission. The ports,
+/// sequence numbers, data offset and flags occupy the first 14 TCP bytes.
+pub struct TcpHeaderObservation {
+    pub header: TcpHeader,
+    pub packet: PacketId,
+    possible_payload: bool,
+    checksum_allowed: bool,
+}
+
+impl TcpHeaderObservation {
+    pub fn possible_loss(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
+        (self.possible_payload && (policy == ChecksumPolicy::Observe || self.checksum_allowed))
+            .then_some(self.header)
+    }
+}
+
+pub fn tcp_header_observation(d: &Datagram) -> Option<TcpHeaderObservation> {
     if d.fragment.as_ref().is_some_and(|f| f.offset != 0) {
         return None;
     }
-    let (protocol, offset, _) = transport_offset(d).ok()?;
+    let (protocol, offset, checksum_context) = transport_offset(d).ok()?;
     if protocol != 6 {
         return None;
     }
-    let (header, header_len) = fixed_tcp_header(d, &d.payload.data()[offset..]).ok()?;
-    if d.fragment.is_none() && d.declared_payload_len <= offset + header_len {
-        return None;
-    }
+    let (header, header_len) = tcp_identity(d, &d.payload.data()[offset..]).ok()?;
     let spans = d.payload.spans();
     let packet = spans
         .get(spans.partition_point(|s| s.end <= offset))?
         .packet;
-    Some((header, packet))
+    Some(TcpHeaderObservation {
+        header,
+        packet,
+        possible_payload: d.fragment.is_some() || d.declared_payload_len > offset + header_len,
+        checksum_allowed: d.ip_checksum != Checksum::Invalid
+            && checksum_context != ChecksumContext::Unsupported,
+    })
 }
 
 /// Read captured network headers for loss attribution. In prefix mode the
@@ -513,8 +544,8 @@ pub fn ipv6_checksum_context(protocol: u8, header: &[u8]) -> Result<ChecksumCont
     Ok(context)
 }
 
-fn fixed_tcp_header(datagram: &Datagram, data: &[u8]) -> Result<(TcpHeader, usize)> {
-    require(data, 20, 0, "tcp")?;
+fn tcp_identity(datagram: &Datagram, data: &[u8]) -> Result<(TcpHeader, usize)> {
+    require(data, 14, 0, "tcp_identity")?;
     let header = usize::from(data[12] >> 4) * 4;
     if header < 20 {
         return Err(bad("tcp_offset", "data offset smaller than fixed header"));
@@ -602,7 +633,8 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
     let data = &all[prefix..];
     match protocol {
         6 => {
-            let (fixed, header) = fixed_tcp_header(datagram, data)?;
+            require(data, 20, 0, "tcp")?;
+            let (fixed, header) = tcp_identity(datagram, data)?;
             require(data, header, 0, "tcp_options")?;
             let checksum = checked_transport_checksum(datagram, checksum_context, 6, data)?;
             require_supported_checksum(checksum, policy)?;
@@ -698,6 +730,13 @@ fn require_supported_checksum(checksum: Checksum, policy: ChecksumPolicy) -> Res
         ));
     }
     Ok(())
+}
+
+/// A complete datagram was rejected by the configured checksum policy.
+pub fn is_checksum_rejection(error: &Error) -> bool {
+    error.code == ErrorCode::Checksum
+        || (error.code == ErrorCode::UnsupportedNetwork
+            && error.field == "transport_checksum_operands")
 }
 
 pub fn internet_checksum(data: &[u8]) -> u16 {

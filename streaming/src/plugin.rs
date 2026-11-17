@@ -108,7 +108,7 @@ pub struct Output<'a> {
     pub remaining: &'a mut usize,
     pub max_message_bytes: usize,
     native: &'a Limits,
-    remaining_modbus: &'a mut usize,
+    modbus_queue: Option<&'a mut Vec<PendingModbus>>,
     sink_failed: bool,
 }
 
@@ -120,6 +120,12 @@ pub struct RegistryOutput<'a> {
     pub records: &'a mut Vec<MessageRecord>,
     pub dnp3_confirmations: &'a mut Vec<Dnp3StreamingConfirmationRecord>,
     pub remaining: &'a mut usize,
+}
+
+struct PendingModbus {
+    raw: EvidenceBytes,
+    offset: i64,
+    boundary: bool,
 }
 
 struct BufferedSink {
@@ -918,6 +924,7 @@ impl Registry {
     ) -> Result<()> {
         struct BufferedAnalysis {
             sink: BufferedSink,
+            context: Context,
             records: Vec<MessageRecord>,
             confirmations: Vec<Dnp3StreamingConfirmationRecord>,
             fallback_frame: u64,
@@ -933,7 +940,10 @@ impl Registry {
         }
 
         let run_id = output.sink.run_id().to_owned();
-        let mut remaining_modbus = c.base.limits.max_protocol_messages;
+        // A frame consumes at least one plugin event. Only defer decoding if
+        // the native allowance can actually exclude a frame in this window.
+        let schedule_modbus = c.base.limits.max_protocol_messages < *output.remaining;
+        let mut pending = Vec::new();
         let mut analyses = Vec::new();
         let mut buffered_bytes = 0usize;
         for (ctx, stream) in inputs {
@@ -950,7 +960,9 @@ impl Registry {
                     .packets()
                     .into_iter()
                     .max_by_key(|packet| (packet.frame, packet.record_offset));
+                let mut frames = Vec::new();
                 let mut analysis = BufferedAnalysis {
+                    context,
                     sink: BufferedSink {
                         run_id: run_id.clone(),
                         events: Vec::new(),
@@ -973,14 +985,14 @@ impl Registry {
                         continue;
                     };
                     let mut out = Output {
-                        context: &context,
+                        context: &analysis.context,
                         sink: &mut analysis.sink,
                         records: &mut analysis.records,
                         dnp3_confirmations: &mut analysis.confirmations,
                         remaining: output.remaining,
                         max_message_bytes: c.max_plugin_bytes,
                         native: &c.base.limits,
-                        remaining_modbus: &mut remaining_modbus,
+                        modbus_queue: schedule_modbus.then_some(&mut frames),
                         sink_failed: false,
                     };
                     let result = analyzer
@@ -988,7 +1000,7 @@ impl Registry {
                             &StreamInput {
                                 offset: chunk.offset,
                                 bytes: &chunk.bytes,
-                                boundary_verified: context.boundary_verified,
+                                boundary_verified: ctx.boundary_verified,
                             },
                             &mut out,
                         )
@@ -1003,7 +1015,8 @@ impl Registry {
                         return Err(Error::limit("plugin_retained_bytes"));
                     }
                 }
-                if !analysis.sink.events.is_empty() {
+                if !frames.is_empty() || !analysis.sink.events.is_empty() {
+                    pending.extend(frames.into_iter().map(|frame| (analyses.len(), frame)));
                     buffered_bytes = buffered_bytes
                         .checked_add(analysis.sink.retained_bytes)
                         .filter(|bytes| *bytes <= c.max_event_bytes)
@@ -1011,6 +1024,47 @@ impl Registry {
                     analyses.push(analysis);
                 }
             }
+        }
+
+        pending.sort_by_cached_key(|(index, frame)| {
+            let completion = frame
+                .raw
+                .spans()
+                .iter()
+                .map(|s| (s.packet.frame, s.packet.record_offset))
+                .max();
+            (
+                completion,
+                frame.offset,
+                analyses[*index].context.direction,
+                *index,
+            )
+        });
+        let native_limit = c.base.limits.max_protocol_messages;
+        let limits = AnalyzerLimits::from_config(c);
+        for (ordinal, (index, frame)) in pending.into_iter().enumerate() {
+            let analysis = &mut analyses[index];
+            let previous = analysis.sink.retained_bytes;
+            analysis.sink.byte_limit = previous + (c.max_event_bytes - buffered_bytes);
+            // The framer reserved this event when it retained the ADU.
+            let mut reserved = 1;
+            let mut out = Output {
+                context: &analysis.context,
+                sink: &mut analysis.sink,
+                records: &mut analysis.records,
+                dnp3_confirmations: &mut analysis.confirmations,
+                remaining: &mut reserved,
+                max_message_bytes: c.max_plugin_bytes,
+                native: &c.base.limits,
+                modbus_queue: None,
+                sink_failed: false,
+            };
+            if ordinal < native_limit {
+                emit_modbus(&frame.raw, frame.offset, frame.boundary, &mut out, &limits)?;
+            } else {
+                out.issue("modbus", "modbus_protocol_messages", &frame.raw)?;
+            }
+            buffered_bytes += analysis.sink.retained_bytes - previous;
         }
 
         let mut scheduled = Vec::new();
@@ -1087,7 +1141,6 @@ impl Registry {
         c: &StreamConfig,
         output: &mut RegistryOutput<'_>,
     ) -> Result<()> {
-        let mut remaining_modbus = c.base.limits.max_protocol_messages;
         let indices = self.selection(ctx, bytes, c, output.sink)?;
         let mut context = ctx.clone();
         context.ambiguous = ctx.ambiguous || indices.len() > 1;
@@ -1105,7 +1158,7 @@ impl Registry {
                 remaining: output.remaining,
                 max_message_bytes: c.max_plugin_bytes,
                 native: &c.base.limits,
-                remaining_modbus: &mut remaining_modbus,
+                modbus_queue: None,
                 sink_failed: false,
             };
             if let Err(e) = analyzer.analyze(&DatagramInput { bytes }, &mut out) {
@@ -1479,7 +1532,23 @@ impl Framer {
             let range = Some((at, at + raw.len() as i64));
             match self.kind {
                 Kind::Dns => emit_dns(&raw, range, out)?,
-                Kind::Modbus => emit_modbus(&raw, at, self.boundary, out, &self.limits)?,
+                Kind::Modbus => {
+                    if raw.len() > out.native.max_application_bytes {
+                        out.issue("modbus", "modbus_application_bytes", &raw)?;
+                    } else if let Some(queue) = &mut out.modbus_queue {
+                        *out.remaining = out
+                            .remaining
+                            .checked_sub(1)
+                            .ok_or_else(|| Error::limit("plugin_events"))?;
+                        queue.push(PendingModbus {
+                            raw,
+                            offset: at,
+                            boundary: self.boundary,
+                        });
+                    } else {
+                        emit_modbus(&raw, at, self.boundary, out, &self.limits)?;
+                    }
+                }
                 Kind::Smb => {
                     out.message(
                         "smb2",
@@ -1651,13 +1720,6 @@ fn emit_modbus(
     out: &mut Output<'_>,
     l: &AnalyzerLimits,
 ) -> Result<()> {
-    if raw.len() > out.native.max_application_bytes {
-        return out.issue("modbus", "modbus_application_bytes", raw);
-    }
-    if *out.remaining_modbus == 0 {
-        return out.issue("modbus", "modbus_protocol_messages", raw);
-    }
-    *out.remaining_modbus -= 1;
     let mut native = out.native.clone();
     native.max_application_bytes = native.max_application_bytes.min(l.max_buffer_bytes);
     native.max_protocol_messages = native.max_protocol_messages.min(l.max_messages);

@@ -128,7 +128,8 @@ Default logical limits: 64 KiB input, 2048 records, 8192 fields, 16384 source-sp
 references, 1,048,576 work units, 4 MiB nested JSON. Parent capture application and
 message budgets can only reduce the derived defaults. In streaming, each Modbus
 ADU must fit the application byte limit. Both directions of a TCP generation
-share the native message allowance within its window. An over-limit ADU
+share the native message allowance within its window. When the allowance binds,
+frames are admitted in order of the last contributing capture record. An over-limit ADU
 produces a scoped issue before field decoding and transaction matching. These are finite logical
 bounds, not OS-enforced RSS or CPU sandbox limits. Output trees and a bounded
 serialized validation copy can coexist. The parent event/report output cap still
@@ -169,7 +170,8 @@ transport data but the captured IP and TCP headers identify a plausible
 generation, the same restriction applies, including when the snapped header precedes
 the first complete segment. Streaming uses the observed tunnel path to distinguish
 otherwise identical connections. Offset-zero fragments and partial TCP options
-can supply a fixed header for loss attribution. A pending first fragment
+can supply a TCP identity for loss attribution once the first 14 TCP bytes
+are captured. The ordinary decoder requires the complete header and options. A pending first fragment
 counts toward the streaming packet window and withholds enrichment for plausible
 generations. When such a header forces a capacity cut, it also applies to the
 closing window. Reassembly resolves its own fragment observations, including
