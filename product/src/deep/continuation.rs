@@ -645,18 +645,26 @@ impl Parser {
             max_json_bytes: d.max_json_bytes.min(self.limits.output_bytes),
         }
     }
+    /// Discard stream and application state, then report the discarded evidence.
+    /// A report error does not undo the cut.
     pub fn cut(&mut self, reason: &'static str) -> Result<Report> {
         let pending = self.buffer.gap();
+        let cotp = self.cotp.take();
+        let dnp = std::mem::take(&mut self.dnp);
+        let ua = std::mem::take(&mut self.ua);
+        self.ua_last.clear();
+        self.requires_cut = false;
+
         let mut r = Report::new("application.boundary", &pending, &self.limits)?;
         let mut states = Vec::new();
-        if let Some(pending) = &self.cotp {
-            states.push(pcap_evidence_stream::events::Evidence::bytes(pending).json());
+        if let Some(pending) = cotp {
+            states.push(pcap_evidence_stream::events::Evidence::bytes(&pending).json());
         }
-        for s in self.dnp.values() {
+        for s in dnp.into_values() {
             states.push(pcap_evidence_stream::events::Evidence::bytes(&s.pending).json());
             states.push(pcap_evidence_stream::events::Evidence::bytes(&s.wire).json());
         }
-        for s in self.ua.values() {
+        for s in ua.into_values() {
             states.push(pcap_evidence_stream::events::Evidence::bytes(&s.pending).json());
         }
         r.add(
@@ -665,11 +673,6 @@ impl Parser {
             0..0,
             "explicit_application_state_boundary",
         )?;
-        self.cotp = None;
-        self.dnp.clear();
-        self.requires_cut = false;
-        self.ua.clear();
-        self.ua_last.clear();
         r.note(Status::Incomplete, reason, 0, pending.len())?;
         Ok(r)
     }

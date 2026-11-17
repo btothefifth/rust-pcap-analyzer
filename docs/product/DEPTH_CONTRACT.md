@@ -160,9 +160,10 @@ The following events cut state explicitly:
 Every rejected feed poisons the parser until an explicit caller cut, including
 token changes, discontinuities, framing failures and budget errors. COTP and OPC
 UA rejected-feed cleanup immediately discards their pending assemblies; an error
-never leaves an old payload eligible for subsequent assembly. The cut report
-retains state still present at the cut and marks the result incomplete.
-It does not pretend the preceding or following page is contiguous. Duplicate
+never leaves an old payload eligible for subsequent assembly. A successful
+cut report marks the result incomplete and includes the evidence discarded at
+the cut. Stream and application state are discarded even if the output budget
+prevents building that report. Duplicate
 segments are observed without appending them; conflicting duplicates poison the
 scope until the caller cuts it. This is the intended conservative behavior for
 TCP replay bugs, retransmission ambiguity, timing/order anomalies, and history

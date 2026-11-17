@@ -154,6 +154,42 @@ fn cotp_expedited_data_does_not_complete_an_ordinary_pending_tsdu() {
     }
 }
 
+#[test]
+fn cotp_failed_cut_report_discards_pending_state() {
+    for payload in [&[][..], &[5][..]] {
+        for finish in [false, true] {
+            let mut parser = Parser::new(
+                "iso_cotp",
+                Limits {
+                    output_bytes: 64,
+                    ..Limits::default()
+                },
+                Context::default(),
+            )
+            .unwrap();
+            let (mut at, mut output) = (0, Vec::new());
+            feed(&mut parser, &mut at, &cotp(payload, false), &mut output).unwrap();
+            assert!(output.is_empty());
+
+            let error = if finish {
+                parser.finish().unwrap_err()
+            } else {
+                parser.cut("test_transport_boundary").unwrap_err()
+            };
+            assert_eq!(error.code, ErrorCode::LimitExceeded);
+            assert_eq!(error.field, "report_bytes");
+            // The cut applies even when its evidence cannot fit in the report.
+            assert!(parser.finish().unwrap().is_none());
+            at = 100;
+            feed(&mut parser, &mut at, &cotp(&[0xff], true), &mut output).unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].report.evidence.data(), &[0xff]);
+            assert_eq!(output[0].report.evidence.packets().len(), 1);
+            assert_eq!(output[0].report.evidence.packets()[0].frame, 101);
+        }
+    }
+}
+
 fn ua(channel: u32, request: u32, token: u32, sequence: u32, flag: u8, part: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::from(*b"MSG");
     bytes.push(flag);

@@ -34,6 +34,13 @@ cut, rejection and recovery. Capture-to-history tests also check incomplete and
 aborted output through the actual consumer. The earlier clean reviews missed
 this state because their connection-boundary witnesses all had nonempty payloads.
 
+Independent review also reproduced a failed cut under a small report budget.
+The stream offset reset before report construction, but a report error left
+the old application assembly in memory. A later feed could join payloads across
+the cut. The parser now discards both states before building the report. A
+regression checks that a report error leaves no pending TSDU and that a later
+message carries only its own evidence.
+
 COTP handling follows RFC 1006's transport boundaries. HTTP target validation
 follows RFC 9112 section 3.2. CIP handling preserves the embedded-service-error
 table described by the implementation vendor's MultipleReq documentation.
