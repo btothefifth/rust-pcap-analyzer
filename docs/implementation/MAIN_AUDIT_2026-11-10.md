@@ -12,7 +12,7 @@ and FFI boundaries. An independent reviewer examined the same frozen baseline.
 | --- | --- | --- |
 | An unfinished COTP TSDU survived a connection control and joined later data | Continuation rejects the boundary and requires an explicit cut. `CotpSession` discards only the affected scope on connection controls or malformed TPDUs | Both consumers exercise old-fragment/control/new-fragment sequences. Independent scopes, ordinary fragmentation, expedited data and retryable capacity rejection retain their contracts |
 | A rejected CIP Multiple Service Packet response required a success body and appeared truncated | Decode the service table for requests, successful responses and embedded-service-error responses. Preserve other error bodies as opaque data | Empty rejection and additional status reach ENIP/CPF decoding. Success and embedded failures retain their child table. Truncated success bodies reject |
-| HTTP accepted an empty request target or target containing whitespace/control bytes | Validate the target before constructing metadata | Invalid targets reject. Origin, absolute, authority and asterisk forms remain accepted |
+| HTTP accepted an empty request target or target containing spaces, controls or raw non-ASCII bytes | Require a nonempty target of ASCII graphic bytes before constructing metadata | Invalid target bytes reject. The four target forms and percent-encoded octets remain accepted |
 | A non-ASCII desktop Authorization header raised an uncaught `TypeError` | Reject non-ASCII input before the constant-time comparison | A real loopback request returns 403, followed by a successful authorized request |
 | Malformed interpretation objects raised `TypeError` during hash validation or set membership | Validate source/hash/status/coverage types at their schema boundary | Malformed JSON types raise `ValueError`. Research import returns 400, followed by successful valid import |
 
@@ -41,11 +41,13 @@ the cut. The parser now discards both states before building the report. A
 regression checks that a report error leaves no pending TSDU and that a later
 message carries only its own evidence.
 
-COTP handling follows RFC 1006's transport boundaries. HTTP target validation
-follows RFC 9112 section 3.2. CIP handling preserves the embedded-service-error
-table described by the implementation vendor's MultipleReq documentation.
+COTP handling follows RFC 1006's transport boundaries. The HTTP byte check
+follows the request-target and URI syntax in RFC 9112 and RFC 3986. It leaves
+the target's form and escaping uninterpreted. CIP handling preserves the
+embedded-service-error table described in the vendor's MultipleReq documentation.
 [RFC 1006](https://www.rfc-editor.org/rfc/rfc1006),
 [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112.html#section-3.2),
+[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html#section-2),
 [MultipleReq](https://www.automation-pros.com/enip1/javadoc/com/automation_pros/odva/cip/requests/MultipleReq.html)
 
 ## Architecture and next work
