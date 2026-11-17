@@ -1,4 +1,4 @@
-//! Small generated packet witnesses shared by history regression consumers.
+//! Small generated packet witnesses for streaming and history regression tests.
 #![allow(dead_code)]
 use std::{
     fs,

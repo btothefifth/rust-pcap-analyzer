@@ -1,5 +1,5 @@
 //! Tiny capture -> sealed history -> actual application consumer regressions.
-#[path = "../../history/tests/support/tiny_capture.rs"]
+#[path = "../../tests/support/tiny_capture.rs"]
 mod tiny_capture;
 use pcap_evidence_history::{analyze_file, query::History, Cancellation, Config};
 use pcap_evidence_history_app::{analyze, Request};

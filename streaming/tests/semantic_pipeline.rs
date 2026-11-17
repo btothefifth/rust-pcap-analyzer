@@ -432,7 +432,7 @@ fn device_competitors_and_echo_disagreements_reach_both_correlators() {
     assert_eq!(blockers.len(), 1);
 }
 
-#[path = "../../history/tests/support/tiny_capture.rs"]
+#[path = "../../tests/support/tiny_capture.rs"]
 mod tiny_capture;
 
 #[test]

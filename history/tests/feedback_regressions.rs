@@ -1,6 +1,5 @@
-mod support {
-    pub mod tiny_capture;
-}
+#[path = "../../tests/support/tiny_capture.rs"]
+mod tiny_capture;
 use pcap_evidence_history::{
     analyze_file,
     journal::{self, Reader, Writer},
@@ -8,7 +7,7 @@ use pcap_evidence_history::{
     recover_file, verify_file, Cancellation, Config, ErrorCode,
 };
 use std::fs;
-use support::tiny_capture::{capture, routed_ipv4, sll2, tcp, tunneled, Temp};
+use tiny_capture::{capture, routed_ipv4, sll2, tcp, tunneled, Temp};
 
 #[test]
 fn unsupported_checksum_operands_survive_history_journal_and_query_projection() {
