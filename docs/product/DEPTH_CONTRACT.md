@@ -144,6 +144,12 @@ input limit. Completion, OPC UA abort, explicit cut and rejected-feed cleanup
 release those payloads. OPC UA abort chunks validate and advance the channel
 sequence before discarding the matching request assembly.
 
+COTP pending state is independent of payload length. A non-final DT with an
+empty payload remains pending until EOT, a cut or rejection. Ending the selected
+range reports it as incomplete; a connection control during that pending state
+rejects the feed and requires an explicit cut. Empty final DT payloads remain
+accepted by the constrained decoder.
+
 The following events cut state explicitly:
 
 - a noncontiguous range, conflict, or ambiguous placement;

@@ -17,12 +17,22 @@ and FFI boundaries. An independent reviewer examined the same frozen baseline.
 | Malformed interpretation objects raised `TypeError` during hash validation or set membership | Validate source/hash/status/coverage types at their schema boundary | Malformed JSON types raise `ValueError`. Research import returns 400, followed by successful valid import |
 
 Regressions live in `product/tests/continuation_feedback.rs`,
-`product/tests/deep_nonbgp_feedback.rs`, `streaming/tests/contracts.rs`,
+`product/tests/deep_nonbgp_feedback.rs`,
+`history-app/tests/continuation_feedback.rs`, `streaming/tests/contracts.rs`,
 `tools/tests/test_product_research.py` and `tools/tests/test_desktop_http.py`.
 Each defect produced a failing regression on the baseline before its repair.
 Focused Linux native tests, warnings-denied Clippy and Python/HTTP tests pass
 with the fixes. Broader validation and independent review results belong to the
 PR's exact published revision.
+
+A subsequent personal review found that the COTP continuation guard still
+equated zero payload bytes with no pending message. An accepted empty DT without
+EOT bypassed connection-control rejection and disappeared at range end. The
+repair represents pending state explicitly, including an empty payload. Tests
+cover both protocol entrypoints, every split of the empty frame, completion,
+cut, rejection and recovery. Capture-to-history tests also check incomplete and
+aborted output through the actual consumer. The earlier clean reviews missed
+this state because their connection-boundary witnesses all had nonempty payloads.
 
 COTP handling follows RFC 1006's transport boundaries. HTTP target validation
 follows RFC 9112 section 3.2. CIP handling preserves the embedded-service-error

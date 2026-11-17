@@ -41,29 +41,119 @@ fn cotp(part: &[u8], final_part: bool) -> Vec<u8> {
 }
 #[test]
 fn cotp_connection_controls_require_a_cut_during_an_unfinished_tsdu() {
-    for kind in [0xe0, 0xd0, 0x80, 0xc0] {
-        let control = [3, 0, 0, 11, 6, kind, 0, 0, 0, 1, 0];
-        let mut parser = Parser::new("iso_cotp", Limits::default(), Context::default()).unwrap();
-        let (mut at, mut output) = (0, Vec::new());
-        feed(&mut parser, &mut at, &control, &mut output).unwrap();
-        assert_eq!(output.len(), 1);
-        output.clear();
-        feed(&mut parser, &mut at, &cotp(&[5], false), &mut output).unwrap();
-        let error = feed(&mut parser, &mut at, &control, &mut output).unwrap_err();
-        assert_eq!(error.field, "cotp_connection_boundary");
-        assert!(output.is_empty());
-        assert_eq!(
-            feed(&mut parser, &mut at, &cotp(&[0], true), &mut output)
-                .unwrap_err()
-                .field,
-            "continuation_requires_cut"
-        );
-        parser.cut("connection_changed").unwrap();
-        feed(&mut parser, &mut at, &cotp(&[5, 0], true), &mut output).unwrap();
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0].report.evidence.data(), &[5, 0]);
+    for payload in [&[][..], &[5][..]] {
+        for kind in [0xe0, 0xd0, 0x80, 0xc0] {
+            let control = [3, 0, 0, 11, 6, kind, 0, 0, 0, 1, 0];
+            let mut parser =
+                Parser::new("iso_cotp", Limits::default(), Context::default()).unwrap();
+            let (mut at, mut output) = (0, Vec::new());
+            feed(&mut parser, &mut at, &control, &mut output).unwrap();
+            assert_eq!(output.len(), 1);
+            output.clear();
+            feed(&mut parser, &mut at, &cotp(payload, false), &mut output).unwrap();
+            let error = feed(&mut parser, &mut at, &control, &mut output).unwrap_err();
+            assert_eq!(error.field, "cotp_connection_boundary");
+            assert!(output.is_empty());
+            assert_eq!(
+                feed(&mut parser, &mut at, &cotp(&[0], true), &mut output)
+                    .unwrap_err()
+                    .field,
+                "continuation_requires_cut"
+            );
+            parser.cut("connection_changed").unwrap();
+            feed(&mut parser, &mut at, &cotp(&[5, 0], true), &mut output).unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].report.evidence.data(), &[5, 0]);
+        }
     }
 }
+
+#[test]
+fn cotp_empty_nonfinal_fragment_remains_pending_across_every_page_split() {
+    let fragment = cotp(&[], false);
+    for protocol in ["iso_cotp", "s7"] {
+        for split in 0..=fragment.len() {
+            let mut parser = Parser::new(protocol, Limits::default(), Context::default()).unwrap();
+            let (mut at, mut output) = (0, Vec::new());
+            feed(&mut parser, &mut at, &fragment[..split], &mut output).unwrap();
+            feed(&mut parser, &mut at, &fragment[split..], &mut output).unwrap();
+            assert!(output.is_empty());
+            let incomplete = parser.finish().unwrap().expect("EOT has not been observed");
+            assert!(incomplete
+                .json()
+                .encode()
+                .contains("incomplete_application_at_selected_range_end"));
+            assert!(parser.finish().unwrap().is_none());
+            // Finishing releases the old state so a new complete TSDU can proceed.
+            feed(&mut parser, &mut at, &cotp(&[5, 0], true), &mut output).unwrap();
+            assert_eq!(output.len(), 1);
+            assert!(parser.finish().unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn cotp_empty_pending_state_completes_cuts_and_recovers_from_rejection() {
+    for final_payload in [&[][..], &[5, 0][..]] {
+        let mut parser = Parser::new("iso_cotp", Limits::default(), Context::default()).unwrap();
+        let (mut at, mut output) = (0, Vec::new());
+        feed(&mut parser, &mut at, &cotp(&[], false), &mut output).unwrap();
+        feed(
+            &mut parser,
+            &mut at,
+            &cotp(final_payload, true),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].report.evidence.data(), final_payload);
+        assert!(parser.finish().unwrap().is_none());
+
+        feed(&mut parser, &mut at, &cotp(&[], false), &mut output).unwrap();
+        parser.cut("test_transport_boundary").unwrap();
+        assert!(parser.finish().unwrap().is_none());
+        feed(&mut parser, &mut at, &cotp(&[], false), &mut output).unwrap();
+        let malformed = [3, 0, 0, 7, 2, 0x70, 0];
+        assert!(feed(&mut parser, &mut at, &malformed, &mut output).is_err());
+        assert_eq!(
+            feed(
+                &mut parser,
+                &mut at,
+                &cotp(final_payload, true),
+                &mut output
+            )
+            .unwrap_err()
+            .field,
+            "continuation_requires_cut"
+        );
+        parser.cut("test_rejected_fragment").unwrap();
+        feed(
+            &mut parser,
+            &mut at,
+            &cotp(final_payload, true),
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output.len(), 2);
+        assert!(parser.finish().unwrap().is_none());
+    }
+}
+
+#[test]
+fn cotp_expedited_data_does_not_complete_an_ordinary_pending_tsdu() {
+    for payload in [&[][..], &[5][..]] {
+        let mut parser = Parser::new("iso_cotp", Limits::default(), Context::default()).unwrap();
+        let (mut at, mut output) = (0, Vec::new());
+        feed(&mut parser, &mut at, &cotp(payload, false), &mut output).unwrap();
+        let expedited = [3, 0, 0, 9, 2, 0x10, 0x80, 5, 0];
+        feed(&mut parser, &mut at, &expedited, &mut output).unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].report.protocol, "iso_cotp");
+        assert!(parser.finish().unwrap().is_some());
+        assert!(parser.finish().unwrap().is_none());
+    }
+}
+
 fn ua(channel: u32, request: u32, token: u32, sequence: u32, flag: u8, part: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::from(*b"MSG");
     bytes.push(flag);

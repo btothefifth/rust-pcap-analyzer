@@ -85,6 +85,44 @@ fn cotp_completion_survives_history_pages_and_releases_payload_budget() {
 }
 
 #[test]
+fn empty_cotp_fragment_is_incomplete_until_eot_in_actual_history_consumer() {
+    for page_bytes in [1, 7, 64] {
+        let mut payload = vec![3, 0, 0, 7, 2, 0xf0, 0];
+        let (result, output) = consume("iso_cotp", &payload, 2, page_bytes);
+        result.unwrap();
+        assert_eq!(
+            output
+                .matches("\"kind\":\"application.incomplete\"")
+                .count(),
+            1
+        );
+        assert!(!output.contains("protocol.message"));
+        assert!(output.contains("analysis.complete"));
+
+        payload.extend_from_slice(&[3, 0, 0, 9, 2, 0xf0, 0x80, 5, 0]);
+        let (result, output) = consume("iso_cotp", &payload, 2, page_bytes);
+        result.unwrap();
+        assert_eq!(output.matches("\"kind\":\"protocol.message\"").count(), 1);
+        assert!(!output.contains("application.incomplete"));
+        assert!(output.contains("analysis.complete"));
+    }
+}
+
+#[test]
+fn cotp_connection_change_aborts_actual_history_consumer_with_empty_pending_data() {
+    for kind in [0xe0, 0xd0, 0x80, 0xc0] {
+        for page_bytes in [1, 64] {
+            let payload = [3, 0, 0, 7, 2, 0xf0, 0, 3, 0, 0, 11, 6, kind, 0, 0, 0, 1, 0];
+            let (result, output) = consume("iso_cotp", &payload, 2, page_bytes);
+            assert_eq!(result.unwrap_err().field, "cotp_connection_boundary");
+            assert!(output.contains("analysis.aborted"));
+            assert!(!output.contains("analysis.complete"));
+            assert!(!output.contains("protocol.message"));
+        }
+    }
+}
+
+#[test]
 fn ua_abort_advances_channel_and_allows_new_message_through_history_pages() {
     let mut payload = ua(1, 1, b'C', &[0]);
     payload.extend_from_slice(&ua(1, 2, b'A', &[]));
