@@ -92,7 +92,9 @@ causality or endpoint success.
 FC20 and FC21 expose ordered file records. FC22 exposes the address and both
 masks. FC23 distinguishes read and write ranges and FC24 exposes FIFO counts
 and words. FC43/14 returns one page of device-identification objects with value
-lengths, hashes and byte spans. The unknown-direction decoder retains both
+lengths, hashes and byte spans. For nonempty values, the unsigned
+`object_value_octet_count` covers the value bytes. Its v1 field evidence
+contains their SHA-256 digest and packet spans. The unknown-direction decoder retains both
 role interpretations. Other MEI types remain opaque.
 
 A partial MBAP blocks candidate pairs sharing the captured transaction-ID,
@@ -193,7 +195,9 @@ the specified word layout and the worked example, whose subresponse length
 is 5 even though the table lists 7 as its minimum. It accepts a one-word
 subresponse of length 3. A malformed record or outer byte count yields a
 rejected PDU. Complete preceding records retain their witnesses within the
-declared count, the available bytes and the function's size limit. FC43/14 accepts a restart at object 0
+declared count, the available bytes and the function's size limit. For the
+extended functions, missing fields inside a complete MBAP extent reject the
+PDU. A capture ending before the declared ADU length is incomplete. FC43/14 accepts a restart at object 0
 only if the requested ID is optional and absent from the observed page.
 Role alternatives share the caller's record, field, span and work budgets.
 Undecoded tails count toward the span budget. If the remaining allowance cannot

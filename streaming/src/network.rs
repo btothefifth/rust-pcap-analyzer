@@ -652,6 +652,17 @@ pub(crate) fn tcp_prefix_path(
         let mut outer = datagram.clone();
         outer.fragment = None;
         let outer = normalize(outer).ok()?;
+        if outer.protocol == 17
+            && matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
+        {
+            let header = outer.payload.data().get(..8)?;
+            if matches!(
+                wire::udp_header_checksum(&outer, outer.checksum_context, u16be(header, 6)),
+                Some(wire::Checksum::Invalid | wire::Checksum::NotChecked)
+            ) {
+                return None;
+            }
+        }
         let (inner, hop) = peel_extent(&outer, true).ok()??;
         let Decoded::Ip(inner, context) = inner else {
             return None;

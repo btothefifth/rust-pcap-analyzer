@@ -707,6 +707,28 @@ fn window_cut_accounts_for_pending_and_omitted_tcp_headers() {
             count == 0
         );
     }
+    config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+    for valid in [true, false] {
+        let mut segment = tail.clone();
+        if !valid {
+            segment[50] ^= 1;
+        }
+        let mut whole = pair.clone();
+        whole.push(segment.clone());
+        let mut fragmented = pair.clone();
+        fragmented.push(ipv4_fragment(&segment, 24..32, false));
+        fragmented.push(ipv4_fragment(&segment, 0..24, true));
+        for frames in [whole, fragmented] {
+            let events = run(&capture(&frames), config.clone()).events;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e.data.encode().contains("read_mapping"))
+                    .count(),
+                1
+            );
+        }
+    }
     let mut frames = pair.clone();
     frames.push(tail[..54].to_vec());
     let mut raw = capture(&frames);
@@ -922,5 +944,103 @@ fn gre_checksum_rejection_resolves_only_completed_fragment_sets() {
                 .any(|e| e.data.encode().contains("read_mapping")),
             paired
         );
+    }
+}
+
+#[test]
+fn snapped_opening_syn_uses_the_observed_initial_sequence_number() {
+    use tiny_capture::{capture, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let prior = [
+        tcp(false, 100, 0, 2, &[]),
+        tcp(true, 500, 101, 0x12, &[]),
+        tcp(false, 101, 501, 0x18, &req),
+        tcp(true, 501, 113, 0x18, &rsp),
+    ];
+    for (syn, prior_eligible) in [(100, false), (110, true)] {
+        let mut frames = prior.to_vec();
+        let opening = tcp(false, syn, 0, 2, &req);
+        frames.push(opening[..54].to_vec());
+        let mut raw = capture(&frames);
+        let record = capture(&prior).len();
+        raw[record + 12..record + 16].copy_from_slice(&(opening.len() as u32).to_le_bytes());
+        let mut config = StreamConfig::default();
+        config.base.modbus_ports = vec![2000];
+        let root = pcap_evidence::engine::analyze(&raw, config.base.clone()).unwrap();
+        assert_eq!(
+            pcap_evidence::report::analysis(&root, false)
+                .encode()
+                .contains("read_mapping"),
+            prior_eligible
+        );
+        assert_eq!(
+            run(&raw, config)
+                .events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            prior_eligible
+        );
+    }
+}
+
+#[test]
+fn snapped_vxlan_respects_the_outer_ipv6_udp_checksum_policy() {
+    use pcap_evidence::wire::{internet_checksum, ChecksumPolicy};
+    use tiny_capture::{capture, tcp, tunneled};
+    let wrap = |reverse, inner: Vec<u8>| {
+        let outer = tunneled("vxlan", 7, reverse, &inner);
+        let mut udp = outer[34..].to_vec();
+        let mut ip = vec![0; 40];
+        ip[0] = 0x60;
+        ip[4..6].copy_from_slice(&(udp.len() as u16).to_be_bytes());
+        ip[6] = 17;
+        ip[7] = 64;
+        ip[23] = if reverse { 2 } else { 1 };
+        ip[39] = if reverse { 1 } else { 2 };
+        let mut pseudo = ip[8..].to_vec();
+        pseudo.extend_from_slice(&(udp.len() as u32).to_be_bytes());
+        pseudo.extend_from_slice(&[0, 0, 0, 17]);
+        pseudo.extend_from_slice(&udp);
+        let sum = internet_checksum(&pseudo);
+        udp[6..8].copy_from_slice(&(if sum == 0 { u16::MAX } else { sum }).to_be_bytes());
+        let mut frame = vec![0; 12];
+        frame.extend_from_slice(&[0x86, 0xdd]);
+        frame.extend(ip);
+        frame.extend(udp);
+        frame
+    };
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let pair = [
+        wrap(false, tcp(false, 100, 0, 2, &[])),
+        wrap(true, tcp(true, 500, 101, 0x12, &[])),
+        wrap(false, tcp(false, 101, 501, 0x18, &req)),
+        wrap(true, tcp(true, 501, 113, 0x18, &rsp)),
+    ];
+    for zero in [true, false] {
+        let mut tail = wrap(false, tcp(false, 113, 512, 0x18, &req));
+        if zero {
+            tail[60..62].fill(0);
+        }
+        let full = tail.len() as u32;
+        tail.truncate(tail.len() - req.len());
+        let mut frames = pair.to_vec();
+        frames.push(tail);
+        let mut raw = capture(&frames);
+        let at = capture(&pair).len();
+        raw[at + 12..at + 16].copy_from_slice(&full.to_le_bytes());
+        for policy in [ChecksumPolicy::Observe, ChecksumPolicy::RequireValid] {
+            let mut config = StreamConfig::default();
+            config.base.modbus_ports = vec![2000];
+            config.base.checksum_policy = policy;
+            let events = run(&raw, config).events;
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|e| e.data.encode().contains("read_mapping")),
+                zero && policy == ChecksumPolicy::RequireValid
+            );
+        }
     }
 }

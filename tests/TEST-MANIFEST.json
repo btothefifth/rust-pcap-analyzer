@@ -289,6 +289,7 @@
     "semantic_subset::modbus_file_read_limits_and_a_malformed_second_record",
     "semantic_subset::device_pages_keep_valid_objects_before_a_rejected_suffix",
     "semantic_subset::unresolved_role_tail_witnesses_share_the_span_limit",
+    "semantic_subset::complete_malformed_modbus_records_preserve_their_witnessed_prefix",
     "streaming_handoff::repeated_and_csv_ports_share_transactional_semantics",
     "streaming_handoff::invalid_port_does_not_partially_update",
     "streaming_handoff::empty_port_list_is_usage_error",

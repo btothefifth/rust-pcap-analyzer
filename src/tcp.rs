@@ -407,6 +407,7 @@ struct UnretainedHeader {
     direction: usize,
     sequence: u32,
     ack: Option<u32>,
+    opening_isn: Option<u32>,
     // Generations below this ID were already considered at packet admission.
     first_future_id: usize,
 }
@@ -415,6 +416,10 @@ impl UnretainedHeader {
         flow.packets
             .first()
             .is_some_and(|p| p.capture == self.packet.capture)
+            && self
+                .opening_isn
+                .zip(flow.syn[self.direction])
+                .is_none_or(|(observed, assigned)| observed == assigned)
             && flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span)
     }
 }
@@ -549,6 +554,29 @@ impl TcpTracker {
         Ok(())
     }
 
+    fn opening_syn_owner(
+        &self,
+        history: &[usize],
+        direction: usize,
+        sequence: u32,
+        when: Option<i128>,
+    ) -> Option<usize> {
+        let same_syn = history.iter().rev().copied().find(|id| {
+            let f = &self.flows[*id];
+            !f.closed && self.active_at(f, when) && f.syn[direction] == Some(sequence)
+        });
+        let simultaneous = history.last().copied().filter(|id| {
+            let f = &self.flows[*id];
+            !f.closed
+                && self.active_at(f, when)
+                && !f.midstream
+                && !f.has_payload
+                && f.syn[direction].is_none()
+                && f.syn[1 - direction].is_some()
+        });
+        same_syn.or(simultaneous)
+    }
+
     fn match_header(
         &mut self,
         key: &FlowKey,
@@ -566,6 +594,7 @@ impl TcpTracker {
                 .sequence
                 .wrapping_add(u32::from(segment.flags & 2 != 0)),
             ack: (segment.flags & 0x10 != 0).then_some(segment.acknowledgement),
+            opening_isn: (segment.flags & 0x12 == 0x02).then_some(segment.sequence),
             first_future_id: self.flows.len(),
             existing: Vec::new(),
             disposition,
@@ -576,6 +605,18 @@ impl TcpTracker {
             .remaining_loss_checks
             .checked_sub(ids.len())
             .ok_or_else(|| Error::limit("unretained_tcp_generation_checks"))?;
+        if let Some(isn) = header.opening_isn {
+            if let Some(id) = self.opening_syn_owner(ids, direction, isn, when) {
+                if self.flows[id]
+                    .packets
+                    .first()
+                    .is_some_and(|p| p.capture == packet.capture)
+                {
+                    header.existing.push(id);
+                }
+            }
+            return Ok(header);
+        }
         let mut open = false;
         for &id in ids {
             let flow = &self.flows[id];
@@ -716,23 +757,11 @@ impl TcpTracker {
             return Err(Error::limit("tcp_retained_payload"));
         }
         let history = self.keys.get(key).cloned().unwrap_or_default();
-        let current = history.last().copied();
         let selected;
         if segment.syn() && !segment.ack() {
-            let same_syn = history.iter().rev().copied().find(|id| {
-                let f = &self.flows[*id];
-                !f.closed && self.active_at(f, when) && f.syn[direction] == Some(segment.sequence)
-            });
-            let simultaneous = current.filter(|id| {
-                let f = &self.flows[*id];
-                !f.closed
-                    && self.active_at(f, when)
-                    && !f.midstream
-                    && !f.has_payload
-                    && f.syn[direction].is_none()
-                    && f.syn[1 - direction].is_some()
-            });
-            selected = if let Some(id) = same_syn.or(simultaneous) {
+            selected = if let Some(id) =
+                self.opening_syn_owner(&history, direction, segment.sequence, when)
+            {
                 id
             } else {
                 self.create(key.clone(), false)?
@@ -860,6 +889,9 @@ impl TcpTracker {
             for header in headers.into_values() {
                 for &id in &header.existing {
                     self.flows[id].note_uncertain(header.packet);
+                }
+                if header.opening_isn.is_some() && !header.existing.is_empty() {
+                    continue; // An observed opening SYN already owned this retransmission.
                 }
                 let first = ids.partition_point(|&id| id < header.first_future_id);
                 for &id in &ids[first..] {

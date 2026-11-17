@@ -138,8 +138,13 @@
                             "ieee754_binary32_bits",
                             "ieee754_binary64_bits",
                             "wire_milliseconds_48",
-                            "relative_milliseconds_16_unresolved",
-                            "octets_sha256"
+                            "relative_milliseconds_16_unresolved"
+                          ]
+                        },
+                        "value": {
+                          "type": [
+                            "string",
+                            "boolean"
                           ]
                         },
                         "range": {
@@ -220,46 +225,6 @@
                               },
                               "maxItems": 1048576
                             }
-                          }
-                        },
-                        "value": {}
-                      },
-                      "if": {
-                        "properties": {
-                          "type": {
-                            "const": "octets_sha256"
-                          }
-                        }
-                      },
-                      "then": {
-                        "properties": {
-                          "value": {
-                            "type": "object",
-                            "required": [
-                              "length",
-                              "sha256"
-                            ],
-                            "additionalProperties": false,
-                            "properties": {
-                              "length": {
-                                "type": "string",
-                                "pattern": "^(0|[1-9][0-9]*)$"
-                              },
-                              "sha256": {
-                                "type": "string",
-                                "pattern": "^[0-9a-f]{64}$"
-                              }
-                            }
-                          }
-                        }
-                      },
-                      "else": {
-                        "properties": {
-                          "value": {
-                            "type": [
-                              "string",
-                              "boolean"
-                            ]
                           }
                         }
                       }

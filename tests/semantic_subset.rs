@@ -1602,8 +1602,8 @@ fn modbus_device_pages_exceptions_and_legacy_short_writes() {
         (
             &[43],
             Role::Request,
-            Status::Incomplete,
-            "modbus_pdu_truncated",
+            Status::Rejected,
+            "modbus_pdu_missing_field",
         ),
         (
             &[0x96, 8],
@@ -1737,5 +1737,27 @@ fn unresolved_role_tail_witnesses_share_the_span_limit() {
             assert_eq!(spans(&output), 16);
             assert_eq!(output.encode().matches("decoded_subset").count(), 2);
         }
+    }
+}
+
+#[test]
+fn complete_malformed_modbus_records_preserve_their_witnessed_prefix() {
+    for (pdu, consumed, field) in [
+        (&[20, 5, 3, 6, 0x12, 0x34, 3][..], 13, "register_u16"),
+        (
+            &[43, 14, 1, 1, 0, 0, 3, 0, 1, 65, 1][..],
+            17,
+            "object_value_octet_count",
+        ),
+    ] {
+        let wire = adu(pdu);
+        let report = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+        assert_eq!(report.status(), Status::Rejected);
+        assert_eq!(report.consumed(), consumed);
+        assert_eq!(values(&report, field).len(), 1);
+        let short = wire.slice(0..wire.len() - 1).unwrap();
+        let incomplete = modbus::decode(&short, Role::Response, Limits::default()).unwrap();
+        assert_eq!(incomplete.status(), Status::Incomplete);
+        assert_eq!(incomplete.consumed(), 0);
     }
 }

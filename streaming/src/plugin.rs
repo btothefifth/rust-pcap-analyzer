@@ -240,6 +240,24 @@ impl Output<'_> {
         hint: Option<CorrelationHint>,
         complete: bool,
     ) -> Result<u64> {
+        let status = if complete {
+            EvidenceStatus::Candidate
+        } else {
+            EvidenceStatus::Incomplete
+        };
+        self.emit_message(protocol, bytes, range, data, hint, status)
+    }
+
+    fn emit_message(
+        &mut self,
+        protocol: &'static str,
+        bytes: &EvidenceBytes,
+        range: Option<(i64, i64)>,
+        data: Json,
+        hint: Option<CorrelationHint>,
+        status: EvidenceStatus,
+    ) -> Result<u64> {
+        let complete = status == EvidenceStatus::Candidate;
         if *self.remaining == 0 {
             return Err(Error::limit("plugin_events"));
         }
@@ -249,10 +267,8 @@ impl Output<'_> {
         *self.remaining -= 1;
         let status = if self.context.ambiguous {
             EvidenceStatus::Ambiguous
-        } else if !complete {
-            EvidenceStatus::Incomplete
         } else {
-            EvidenceStatus::Candidate
+            status
         };
         let mut e = Event::new(EventKind::Message, status, data);
         e.session = Some(self.context.session);
@@ -1774,7 +1790,14 @@ fn emit_modbus(
             compatibility: String::new(),
         })
     };
-    out.message(
+    let status = if valid {
+        EvidenceStatus::Candidate
+    } else if supported && matches!(function & 0x7f, 20..=24 | 43) {
+        EvidenceStatus::Rejected
+    } else {
+        EvidenceStatus::Incomplete
+    };
+    out.emit_message(
         "modbus",
         raw,
         Some((at, at + raw.len() as i64)),
@@ -1797,7 +1820,7 @@ fn emit_modbus(
             ),
         ]),
         hint,
-        valid,
+        status,
     )?;
     Ok(())
 }

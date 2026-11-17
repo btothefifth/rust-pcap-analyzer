@@ -575,13 +575,20 @@ impl State<'_> {
                 return Ok(());
             }
         }
-        if d.fragment.as_ref().is_some_and(|f| f.offset == 0) {
-            if let Some(header) = network::tcp_prefix_path(
+        let fragmented = d.fragment.is_some();
+        let header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
+            network::tcp_prefix_path(
                 &d,
                 path.clone(),
                 self.c.max_tunnel_depth.saturating_sub(depth),
                 network::HeaderUse::Loss(self.c.base.checksum_policy),
-            ) {
+            )
+        });
+        let Some((datagram, mut contributors)) = self.reassemble(d, &path, frame, ancestors)?
+        else {
+            // The offset-zero fragment can arrive last. Only publish a loss
+            // observation if this record did not deliver a complete datagram.
+            if let Some(header) = header {
                 self.observe_tcp_header(
                     header,
                     frame,
@@ -589,10 +596,6 @@ impl State<'_> {
                     HeaderDisposition::AwaitingReassembly,
                 )?;
             }
-        }
-        let fragmented = d.fragment.is_some();
-        let Some((datagram, mut contributors)) = self.reassemble(d, &path, frame, ancestors)?
-        else {
             return Ok(());
         };
         if contributors.is_empty() {

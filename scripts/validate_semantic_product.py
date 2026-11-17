@@ -119,10 +119,10 @@ def verify_device_objects(events, capture):
         for report in subset.get("interpretations", []):
             for record in report["records"]:
                 for field in record["fields"]:
-                    if field["name"] == "object_value":
+                    if field["name"] == "object_value_octet_count":
                         raw = field_bytes(field, packets)
-                        expected = {"length": str(len(raw)), "sha256": hashlib.sha256(raw).hexdigest()}
-                        if field["type"] != "octets_sha256" or field["value"] != expected:
+                        if (field["type"] != "unsigned" or field["value"] != str(len(raw))
+                                or field["evidence"]["sha256"] != hashlib.sha256(raw).hexdigest()):
                             raise AssertionError("FC43 device object differs from its wire bytes")
                         objects += 1
     if not objects:

@@ -335,13 +335,11 @@ fn decode_body(
                     num("object_length", object.value_len as u64, at + 1, at + 2),
                 ];
                 if object.value_len != 0 {
-                    fields.push(Field::new(
-                        "object_value",
-                        Value::OctetsSha256 {
-                            length: object.value_len,
-                            digest: crate::sha256::digest(&b[at + 2..end]),
-                        },
+                    fields.push(Field::derived(
+                        "object_value_octet_count",
+                        object.value_len as u64,
                         at + 2..end,
+                        "byte_range_length",
                     ));
                 }
                 out.add(Record::new("device_id_object", at..end, fields))?;

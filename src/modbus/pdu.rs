@@ -66,14 +66,9 @@ fn invalid(at: usize, field: &'static str) -> Error {
     )
 }
 fn byte(b: &[u8], at: usize) -> Result<u8> {
-    b.get(at).copied().ok_or_else(|| {
-        Error::new(
-            ErrorCode::Truncated,
-            (7 + at) as u64,
-            "modbus_pdu_truncated",
-            "missing PDU field",
-        )
-    })
+    b.get(at)
+        .copied()
+        .ok_or_else(|| invalid(at, "modbus_pdu_missing_field"))
 }
 fn word(b: &[u8], at: usize) -> Result<u16> {
     Ok(u16::from_be_bytes([byte(b, at)?, byte(b, at + 1)?]))
@@ -146,6 +141,9 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu> {
         }
         1..=4 | 23 if !request => {
             let n = usize::from(*b.get(1).ok_or_else(|| {
+                if f == 23 {
+                    return invalid(1, "modbus_pdu_missing_field");
+                }
                 Error::new(
                     ErrorCode::Truncated,
                     8,

@@ -666,14 +666,10 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
                 ));
             }
             require(data, len, 0, "udp_payload")?;
-            let checksum = if be16(&data[6..8]) == 0 {
-                if datagram.ipv6 {
-                    Checksum::Invalid
-                } else {
-                    Checksum::NotPresent
-                }
-            } else {
-                checked_transport_checksum(datagram, checksum_context, 17, &data[..len])?
+            let checksum = match udp_header_checksum(datagram, checksum_context, be16(&data[6..8]))
+            {
+                Some(verdict) => verdict,
+                None => checked_transport_checksum(datagram, checksum_context, 17, &data[..len])?,
             };
             require_supported_checksum(checksum, policy)?;
             if policy == ChecksumPolicy::RequireValid && checksum == Checksum::Invalid {
@@ -703,6 +699,26 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
             "ip_protocol",
             format!("protocol {protocol} is not decoded"),
         )),
+    }
+}
+
+/// A UDP checksum verdict determined by the header alone. The caller supplies
+/// the transmitted checksum and the effective pseudo-header context.
+pub fn udp_header_checksum(
+    datagram: &Datagram,
+    context: ChecksumContext,
+    transmitted: u16,
+) -> Option<Checksum> {
+    if transmitted == 0 {
+        Some(if datagram.ipv6 {
+            Checksum::Invalid
+        } else {
+            Checksum::NotPresent
+        })
+    } else if context == ChecksumContext::Unsupported {
+        Some(Checksum::NotChecked)
+    } else {
+        None
     }
 }
 
