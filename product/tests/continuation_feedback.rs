@@ -726,3 +726,68 @@ fn modbus_coalesced_and_fragmented_input_preserve_values_and_packet_offsets() {
         }
     }
 }
+
+#[test]
+fn modbus_many_packet_spans_survive_batch_and_byte_feeds() {
+    let adu = [0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1];
+    for count in [16, 32, 64] {
+        let mut wire = EvidenceBytes::default();
+        for (i, byte) in adu.iter().cycle().take(count * adu.len()).enumerate() {
+            let packet = PacketId {
+                capture: [7; 32],
+                frame: i as u64 + 1,
+                record_offset: 64 * i as u64,
+            };
+            wire.append(&EvidenceBytes::from_packet(&[*byte], packet, 42), 2048)
+                .unwrap();
+        }
+        let mut expected = None;
+        for pass in ["first", "repeat"] {
+            for stride in [wire.len(), 1] {
+                let mut parser = Parser::new(
+                    "modbus",
+                    Limits {
+                        input_bytes: 2048,
+                        elements: 128,
+                        spans: 2048,
+                        output_bytes: 65536,
+                        ..Limits::default()
+                    },
+                    Context::default(),
+                )
+                .unwrap();
+                let started = std::time::Instant::now();
+                let mut hashes = Vec::new();
+                let mut emitted_spans = 0;
+                for start in (0..wire.len()).step_by(stride) {
+                    parser
+                        .feed(
+                            start as i64,
+                            &wire.slice(start..start + stride).unwrap(),
+                            &mut |item| {
+                                assert_eq!(item.report.evidence.data(), adu);
+                                for s in item.report.evidence.spans() {
+                                    assert_eq!(s.packet.frame, emitted_spans + 1);
+                                    assert_eq!((s.end - s.start, s.packet_start), (1, 42));
+                                    emitted_spans += 1;
+                                }
+                                let encoded = item.report.encode().unwrap();
+                                assert!(encoded.contains("and_mask"));
+                                hashes.push(pcap_evidence::sha256::digest(encoded.as_bytes()));
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                }
+                assert!(parser.finish().unwrap().is_none());
+                assert_eq!((hashes.len(), emitted_spans), (count, wire.len() as u64));
+                if let Some(previous) = &expected {
+                    assert_eq!(&hashes, previous)
+                } else {
+                    expected = Some(hashes)
+                }
+                eprintln!("pass={pass} count={count} stride={stride} emitted_spans={emitted_spans} elapsed_us={}",started.elapsed().as_micros());
+            }
+        }
+    }
+}

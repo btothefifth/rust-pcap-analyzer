@@ -70,6 +70,12 @@ impl EvidenceBytes {
     }
 
     pub fn slice(&self, range: Range<usize>) -> Result<Self> {
+        self.slice_from(range, &mut 0)
+    }
+
+    /// Slice in stream order with a reusable span index. A random seek or a
+    /// cursor from a different buffer falls back to a binary search.
+    pub fn slice_from(&self, range: Range<usize>, cursor: &mut usize) -> Result<Self> {
         if !self.layout_valid {
             return Err(invalid("invalid source-span layout"));
         }
@@ -83,12 +89,24 @@ impl EvidenceBytes {
         }
         // Spans are contiguous and sorted by construction. Do not walk unrelated
         // prefix spans for every small protocol field extracted from a stream.
-        let first = self.spans.partition_point(|span| span.end <= range.start);
+        let first = if self
+            .spans
+            .get(*cursor)
+            .is_some_and(|span| span.start <= range.start && range.start < span.end)
+        {
+            *cursor
+        } else {
+            self.spans.partition_point(|span| span.end <= range.start)
+        };
+        *cursor = first;
         let mut spans = Vec::new();
         for s in self.spans[first..]
             .iter()
             .take_while(|s| s.start < range.end)
         {
+            if s.end <= range.end {
+                *cursor += 1;
+            }
             let a = s.start.max(range.start);
             let b = s.end.min(range.end);
             if a < b {

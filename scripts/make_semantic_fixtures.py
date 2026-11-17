@@ -71,6 +71,22 @@ def fixtures():
             tcp(response[5:],5006,1001+len(request),0x18,reverse=True),
             tcp(response[:5],5001,1001+len(request),0x18,reverse=True)]
         result[name+'.pcap']=pcap(packets)
+    # One complete read followed by a partial ADU, either in its group or a sibling.
+    request = adu(bytes.fromhex('0300090001'))
+    response = adu(bytes.fromhex('03021234'))
+    for name, tail in [('same', request[:8]), ('sibling', request[:7] + bytes([4]))]:
+        result[f'modbus_partial_{name}.pcap'] = pcap(handshake(502) + [
+            tcp(request, 1001, 5001, 0x18),
+            tcp(response, 5001, 1001 + len(request), 0x18, reverse=True),
+            tcp(tail, 1001 + len(request), 5001 + len(response), 0x18),
+        ])
+    device = adu(bytes.fromhex('2b0e0100'))
+    opaque = adu(bytes.fromhex('2b0d'))
+    result['modbus_mei_exception_reuse.pcap'] = pcap(handshake(502) + [
+        tcp(opaque, 1001, 5001, 0x18),
+        tcp(device, 1001 + len(opaque), 5001, 0x18),
+        tcp(adu(bytes.fromhex('ab01')), 5001, 1001 + len(opaque) + len(device), 0x18, reverse=True),
+    ])
     req=link(bytes.fromhex('c0c0010101000009'))
     rsp=link(bytes.fromhex('c0c081000001010000094d03'),True)
     base=handshake(20000)+[tcp(req,1001,5001,0x18,port=20000)]
@@ -116,7 +132,9 @@ def cases():
         ('modbus-bit-response','modbus','response','0102ffff','decoded_subset',
          [('packed_lsb_first',0,'255')],['value','address_zero_based']),
         ('modbus-exception','modbus','response','8302','decoded_subset',[('exception_code',0,'2')],[]),
-        ('modbus-unsupported','modbus','request','16000100ff0100','unsupported',[],[]),
+        ('modbus-mask-write','modbus','request','16000100ff0100','decoded_subset',
+         [('address_zero_based',0,'1'),('and_mask',0,'255'),('or_mask',0,'256')],[]),
+        ('modbus-unsupported','modbus','request','0700','unsupported',[],[]),
     ]
     out=[]
     for ident,protocol,context,hex_data,status,fields,absent in raw:

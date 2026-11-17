@@ -95,6 +95,19 @@ and words. FC43/14 returns one page of device-identification objects with value
 lengths, hashes and byte spans. The unknown-direction decoder retains both
 role interpretations. Other MEI types remain opaque.
 
+A partial MBAP blocks candidate pairs sharing the captured transaction-ID,
+unit and function prefix. Lost framing leaves the whole connection in doubt.
+An exception to FC43 omits the MEI type, so a competing opaque MEI request
+with the same identifiers also prevents a unique pair. A capture clock
+reversal alone preserves snapshot pairs when transport evidence is contiguous.
+Streaming retains its window-wide ambiguity policy for clock diagnostics.
+
+For FC43/14 stream access, basic object IDs 0 through 2 are mandatory. A page
+starting within that sequence must return consecutive IDs up to object 2
+or identify the next mandatory object on a subsequent page. Extended function
+exceptions accept file parity error 08 only for FC20/21. Legacy function
+exception decoding preserves its original code set.
+
 Finalized compatible FC1–4 and FC23 reads carry a compact `read_mapping`.
 Value index zero corresponds to the starting address. The quantity bounds the
 meaningful response values, including the final packed octet of a bit read.

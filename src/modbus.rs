@@ -39,7 +39,55 @@ pub struct ModbusMessage {
 pub struct ModbusResult {
     pub messages: Vec<ModbusMessage>,
     pub issues: Vec<ProtocolIssue>,
+    pub(crate) unfinished: Vec<([u8; 32], String)>,
 }
+/// Captured portion of a transaction key. Unreadable MBAP framing leaves the
+/// entire connection in scope; a known function narrows it to one group.
+pub fn transaction_prefix(header: &[u8]) -> String {
+    if header.get(2).is_some_and(|v| *v != 0)
+        || header.get(3).is_some_and(|v| *v != 0)
+        || header.get(4).is_some_and(|v| *v != 0)
+        || header.get(5).is_some_and(|n| !(2..=254).contains(n))
+    {
+        return String::new();
+    }
+    match header {
+        [] => String::new(),
+        [hi] => format!("hi-{hi}"),
+        [hi, lo, ..] => {
+            let tx = u16::from_be_bytes([*hi, *lo]);
+            match (header.get(6), header.get(7)) {
+                (Some(unit), Some(function)) => format!("{tx}:{unit}:{}", function & 0x7f),
+                (Some(unit), None) => format!("{tx}:{unit}"),
+                _ => tx.to_string(),
+            }
+        }
+    }
+}
+
+/// Check only the five possible levels of MBAP evidence for this group.
+pub fn competing_prefix(key: &str, mut contains: impl FnMut(&str) -> bool) -> bool {
+    let Some((tx_unit, _)) = key.rsplit_once(':') else {
+        return false;
+    };
+    let Some((tx, _)) = tx_unit.split_once(':') else {
+        return false;
+    };
+    let Ok(id) = tx.parse::<u16>() else {
+        return false;
+    };
+    contains(key)
+        || contains(tx_unit)
+        || contains(tx)
+        || contains(&format!("hi-{}", id >> 8))
+        || contains("")
+}
+
+/// An exception to an encapsulated interface request omits its MEI type.
+pub fn other_mei(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&43) && bytes.get(1).is_some_and(|mei| *mei != 14)
+}
+
 fn be16(b: &[u8]) -> u16 {
     u16::from_be_bytes([b[0], b[1]])
 }
@@ -71,6 +119,19 @@ fn add_issue(
     limits: &Limits,
 ) -> Result<()> {
     capacity(out, 1, limits)?;
+    if matches!(
+        code,
+        "modbus_framing_lost" | "truncated_modbus_mbap" | "truncated_modbus_adu"
+    ) {
+        if let Some(span) = bytes.spans().first() {
+            let prefix = if code == "modbus_framing_lost" {
+                String::new()
+            } else {
+                transaction_prefix(bytes.data())
+            };
+            out.unfinished.push((span.packet.capture, prefix));
+        }
+    }
     out.issues.push(ProtocolIssue {
         code,
         packets: bytes.packets(),
@@ -185,6 +246,13 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
 /// causality. Requires valid framed messages; unknown functions return false.
 /// Identifier reuse, capture ordering, and device semantics remain caller-owned.
 pub fn response_matches(request: &ModbusMessage, response: &ModbusMessage) -> bool {
+    pair_summaries(request, response).is_some_and(|(a, b)| a.agrees(&b))
+}
+
+pub(crate) fn pair_summaries(
+    request: &ModbusMessage,
+    response: &ModbusMessage,
+) -> Option<(transaction::Summary, transaction::Summary)> {
     if !pdu::supported(request.raw.data().get(7..).unwrap_or_default())
         || !request.raw.validate()
         || !response.raw.validate()
@@ -198,7 +266,7 @@ pub fn response_matches(request: &ModbusMessage, response: &ModbusMessage) -> bo
         || request.unit != response.unit
         || request.function != (response.function & 0x7f)
     {
-        return false;
+        return None;
     }
     fn metadata_agrees(message: &ModbusMessage) -> bool {
         let raw = message.raw.data();
@@ -210,15 +278,12 @@ pub fn response_matches(request: &ModbusMessage, response: &ModbusMessage) -> bo
             && message.function == raw[7]
     }
     if !metadata_agrees(request) || !metadata_agrees(response) {
-        return false;
+        return None;
     }
     let req = request.raw.data();
     let rsp = response.raw.data();
-    match (
-        transaction::Summary::parse(&req[7..], Role::Request),
-        transaction::Summary::parse(&rsp[7..], Role::Response),
-    ) {
-        (Some(a), Some(b)) => a.agrees(&b),
-        _ => false,
-    }
+    Some((
+        transaction::Summary::parse(&req[7..], Role::Request)?,
+        transaction::Summary::parse(&rsp[7..], Role::Response)?,
+    ))
 }

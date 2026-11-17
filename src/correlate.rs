@@ -28,6 +28,7 @@ pub struct Transaction {
     pub responses: Vec<MessageRef>,
     pub status: &'static str,
     pub reason: &'static str,
+    pub(crate) modbus_tokens: Option<(String, String)>,
 }
 #[derive(Default)]
 struct Group {
@@ -65,6 +66,9 @@ pub(crate) fn transactions_with_flows(
     // Protocol, capture, flow, controller address/unit, outstation address, sequence/tx ID, function.
     type Key = (&'static str, [u8; 32], usize, u16, u16, u16, u8);
     let mut groups: BTreeMap<Key, Group> = BTreeMap::new();
+    let mut incomplete: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
+    let mut other_mei = BTreeSet::new();
+    let mut failed_modbus_flows = BTreeSet::new();
     let mut output = Vec::new();
     let mut count = 0usize;
     let mut dnp_work = 0usize;
@@ -134,6 +138,7 @@ pub(crate) fn transactions_with_flows(
                             }
                         };
                         output.push(Transaction {
+                            modbus_tokens: None,
                             protocol: "dnp3",
                             flow: application.flow,
                             requests: if message.class == MessageClass::Request {
@@ -175,9 +180,18 @@ pub(crate) fn transactions_with_flows(
                 }
             }
             ApplicationData::Modbus(result) => {
+                count = count
+                    .checked_add(result.unfinished.len())
+                    .filter(|n| *n <= limits.max_protocol_messages)
+                    .ok_or_else(|| Error::limit("correlation_messages"))?;
+                for (capture, prefix) in &result.unfinished {
+                    incomplete
+                        .entry((*capture, application.flow))
+                        .or_default()
+                        .insert(prefix.clone());
+                }
                 let discontinuous = flows.get(application.flow).is_some_and(|flow| {
                     !flow.reconstruction_errors.is_empty()
-                        || !flow.anomalies.is_empty()
                         || flow
                             .streams
                             .iter()
@@ -207,7 +221,27 @@ pub(crate) fn transactions_with_flows(
                         || message.role == Role::Unknown
                         || capture.is_none()
                     {
+                        if let Some(capture) = capture {
+                            let key = (
+                                capture,
+                                application.flow,
+                                crate::modbus::transaction_prefix(message.raw.data()),
+                            );
+                            if message.role == Role::Request
+                                && crate::modbus::other_mei(
+                                    message.raw.data().get(7..).unwrap_or_default(),
+                                )
+                            {
+                                other_mei.insert(key);
+                            } else {
+                                incomplete
+                                    .entry((capture, application.flow))
+                                    .or_default()
+                                    .insert(key.2);
+                            }
+                        }
                         output.push(Transaction {
+                            modbus_tokens: None,
                             protocol: "modbus",
                             flow: application.flow,
                             requests: if message.role == Role::Request {
@@ -250,10 +284,33 @@ pub(crate) fn transactions_with_flows(
                     }
                 }
             }
-            ApplicationData::Failed(_) => {}
+            ApplicationData::Failed(_) => {
+                if application.protocol == "modbus" {
+                    failed_modbus_flows.insert(application.flow);
+                }
+            }
         }
     }
-    for ((protocol, _, flow, _, _, _, _), group) in groups {
+    for ((protocol, capture, flow, unit, _, transaction, function), group) in groups {
+        let competing = protocol == "modbus" && {
+            let key = format!("{transaction}:{unit}:{function}");
+            let exception =
+                group
+                    .responses
+                    .iter()
+                    .any(|r| match &applications[r.application].data {
+                        ApplicationData::Modbus(result) => {
+                            result.messages[r.message].function & 0x80 != 0
+                        }
+                        _ => false,
+                    });
+            failed_modbus_flows.contains(&flow)
+                || incomplete
+                    .get(&(capture, flow))
+                    .is_some_and(|keys| crate::modbus::competing_prefix(&key, |p| keys.contains(p)))
+                || (exception && other_mei.contains(&(capture, flow, key)))
+        };
+        let mut tokens = None;
         let inconsistent_modbus =
             if protocol == "modbus" && group.requests.len() == 1 && group.responses.len() == 1 {
                 let request = &group.requests[0];
@@ -263,10 +320,17 @@ pub(crate) fn transactions_with_flows(
                     &applications[response.application].data,
                 ) {
                     (ApplicationData::Modbus(a), ApplicationData::Modbus(b)) => {
-                        !crate::modbus::response_matches(
+                        match crate::modbus::pair_summaries(
                             &a.messages[request.message],
                             &b.messages[response.message],
-                        )
+                        ) {
+                            Some((a, b)) => {
+                                let agrees = a.agrees(&b);
+                                tokens = Some((a.token(), b.token()));
+                                !agrees
+                            }
+                            None => true,
+                        }
                     }
                     _ => false,
                 }
@@ -278,6 +342,11 @@ pub(crate) fn transactions_with_flows(
             && applications[group.requests[0].application].direction
                 == applications[group.responses[0].application].direction;
         let (status, reason) = match (group.requests.len(), group.responses.len()) {
+            _ if competing => ("ambiguous", "competing_modbus_observation"),
+            (2.., _) | (_, 2..) if protocol == "modbus" => (
+                "ambiguous",
+                "identifier_reuse_or_duplicate_application_messages",
+            ),
             (1, 1) if same_direction => (
                 "ambiguous",
                 if protocol == "dnp3" {
@@ -306,6 +375,7 @@ pub(crate) fn transactions_with_flows(
             ),
         };
         output.push(Transaction {
+            modbus_tokens: tokens,
             protocol,
             flow,
             requests: group.requests,

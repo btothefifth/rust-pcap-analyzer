@@ -13,6 +13,23 @@ fn consume(
     retained_bytes: usize,
     page_bytes: usize,
 ) -> (pcap_evidence::Result<()>, String) {
+    consume_with_limits(
+        protocol,
+        payload,
+        page_bytes,
+        Limits {
+            retained_bytes,
+            ..Limits::default()
+        },
+    )
+}
+
+fn consume_with_limits(
+    protocol: &str,
+    payload: &[u8],
+    page_bytes: usize,
+    limits: Limits,
+) -> (pcap_evidence::Result<()>, String) {
     let temp = Temp::new();
     let source = temp.source(&[
         tcp(false, 100, 0, 2, &[]),
@@ -42,10 +59,7 @@ fn consume(
     let result = analyze(
         &mut history,
         &request,
-        Limits {
-            retained_bytes,
-            ..Limits::default()
-        },
+        limits,
         &mut output,
         &AtomicBool::new(false),
     );
@@ -246,4 +260,24 @@ fn modbus_mask_write_keeps_both_echo_roles_across_history_pages() {
         assert_eq!(output.matches("and_mask").count(), 2);
         assert!(output.contains("analysis.complete"));
     }
+}
+
+#[test]
+fn history_modbus_nested_interpretations_obey_field_budget() {
+    let adu = [0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1];
+    let (result, output) = consume_with_limits(
+        "modbus",
+        &adu,
+        adu.len(),
+        Limits {
+            fields: 1,
+            elements: 1,
+            spans: 1,
+            ..Limits::default()
+        },
+    );
+    result.unwrap();
+    assert!(output.contains("analysis.complete"));
+    assert!(output.contains("limit_exceeded"));
+    assert!(!output.contains("and_mask"));
 }

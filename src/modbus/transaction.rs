@@ -7,7 +7,7 @@ use super::{
 use crate::{json::Json, sha256};
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Summary {
+pub(crate) enum Summary {
     Read {
         function: u8,
         start: u16,
@@ -19,6 +19,7 @@ pub(super) enum Summary {
         last: u8,
     },
     Echo([u8; 32]),
+    Mask(u16, u16, u16),
     FileLengths(Vec<u16>),
     DeviceRequest(u8, u8),
     DevicePage(u8, u8),
@@ -32,18 +33,27 @@ impl Summary {
             return None;
         }
         let pdu = pdu::parse(bytes, role).ok()?;
+        Self::from_pdu(bytes, &pdu)
+    }
+
+    pub(crate) fn from_pdu(bytes: &[u8], pdu: &Pdu<'_>) -> Option<Self> {
         Some(match pdu {
             Pdu::Read { start, count } | Pdu::ReadWrite { start, count, .. } => Self::Read {
                 function: bytes[0],
-                start,
-                count,
+                start: *start,
+                count: *count,
             },
             Pdu::ReadData(data) => Self::Data {
                 function: bytes[0],
                 bytes: data.len() as u16,
                 last: if bytes[0] <= 2 { *data.last()? } else { 0 },
             },
-            Pdu::Single | Pdu::Mask => Self::Echo(sha256::digest(bytes)),
+            Pdu::Mask => Self::Mask(
+                super::be16(&bytes[1..3]),
+                super::be16(&bytes[3..5]),
+                super::be16(&bytes[5..7]),
+            ),
+            Pdu::Single => Self::Echo(sha256::digest(bytes)),
             Pdu::Multiple { .. } | Pdu::WriteAck { .. } => Self::Echo(sha256::digest(&bytes[..5])),
             Pdu::FifoRequest | Pdu::FifoData(_) => Self::Fifo,
             Pdu::Files(records) if bytes[0] == 20 => {
@@ -57,7 +67,7 @@ impl Summary {
         })
     }
 
-    pub(super) fn agrees(&self, response: &Self) -> bool {
+    pub(crate) fn agrees(&self, response: &Self) -> bool {
         match (self, response) {
             (_, Self::Exception) => true,
             (
@@ -80,13 +90,15 @@ impl Summary {
             (Self::DeviceRequest(category, id), Self::DevicePage(c, i)) => {
                 c == category && (id == i || (*category != 4 && *i == 0))
             }
-            (Self::Echo(_) | Self::FileLengths(_) | Self::Fifo, _) => self == response,
+            (Self::Mask(..) | Self::Echo(_) | Self::FileLengths(_) | Self::Fifo, _) => {
+                self == response
+            }
             _ => false,
         }
     }
 
-    fn token(self) -> String {
-        match self {
+    pub(crate) fn token(self) -> String {
+        let value = match self {
             Self::Read {
                 function,
                 start,
@@ -99,6 +111,7 @@ impl Summary {
             } => format!("data:{function}:{bytes}:{last}"),
             Self::DeviceRequest(c, id) => format!("id-request:{c}:{id}"),
             Self::DevicePage(c, id) => format!("id-page:{c}:{id}"),
+            Self::Mask(a, m, o) => format!("mask:{a}:{m}:{o}"),
             Self::Echo(hash) => format!("echo:{}", sha256::hex(&hash)),
             Self::FileLengths(counts) => format!(
                 "file:{}",
@@ -110,7 +123,8 @@ impl Summary {
             ),
             Self::Fifo => "fifo".into(),
             Self::Exception => String::new(),
-        }
+        };
+        format!("modbus-pdu-v2:{value}")
     }
 }
 pub fn correlation_token(bytes: &[u8], role: Role) -> Option<String> {
@@ -134,6 +148,23 @@ pub(crate) fn matches(request: &str, response: &str) -> bool {
     if request.is_empty() || response.is_empty() {
         return true;
     }
+    if let (Some(request), Some(response)) = (
+        request.strip_prefix("modbus-pdu-v2:"),
+        response.strip_prefix("modbus-pdu-v2:"),
+    ) {
+        return response.is_empty() || matches_v2(request, response);
+    }
+    if request.starts_with("modbus-pdu-v2:") || response.starts_with("modbus-pdu-v2:") {
+        return false;
+    }
+    if request.starts_with("modbus-bits-v1:") || response.starts_with("modbus-bits-v1:") {
+        return parts(request, "modbus-bits-v1:quantity:")
+            .zip(parts(response, "modbus-bits-v1:response:"))
+            .is_some_and(|([q], [n, last])| bits_match(q, n, last));
+    }
+    request == response
+}
+fn matches_v2(request: &str, response: &str) -> bool {
     if let Some([f, _, count]) = parts(request, "read:") {
         let Some([g, n, last]) = parts(response, "data:") else {
             return false;
@@ -168,11 +199,6 @@ pub(crate) fn matches(request: &str, response: &str) -> bool {
         };
         return Summary::DeviceRequest(category, id).agrees(&Summary::DevicePage(c, i));
     }
-    if request.starts_with("modbus-bits-v1:") || response.starts_with("modbus-bits-v1:") {
-        return parts(request, "modbus-bits-v1:quantity:")
-            .zip(parts(response, "modbus-bits-v1:response:"))
-            .is_some_and(|([q], [n, last])| bits_match(q, n, last));
-    }
     request == response
 }
 
@@ -185,8 +211,8 @@ pub fn pair_projection(
     request_ref: Json,
     response_ref: Json,
 ) -> Option<Json> {
-    let [function, start, count] = parts(request, "read:")?;
-    if response.is_empty() || !matches(request, response) {
+    let [function, start, count] = parts(request, "modbus-pdu-v2:read:")?;
+    if !response.starts_with("modbus-pdu-v2:data:") || !matches(request, response) {
         return None;
     }
     let bits = function <= 2;
@@ -220,6 +246,17 @@ pub fn pair_projection(
 pub fn mismatch_fields(request: &str, response: &str) -> Option<Json> {
     if matches(request, response) {
         return None;
+    }
+    let request = request.strip_prefix("modbus-pdu-v2:")?;
+    let response = response.strip_prefix("modbus-pdu-v2:")?;
+    if let (Some(a), Some(b)) = (parts::<3>(request, "mask:"), parts::<3>(response, "mask:")) {
+        return Some(Json::array(
+            ["address_zero_based", "and_mask", "or_mask"]
+                .into_iter()
+                .zip(a)
+                .zip(b)
+                .filter_map(|((name, x), y)| (x != y).then_some(Json::from(name))),
+        ));
     }
     let fields: &[&str] = if let (Some([f, _, count]), Some([_, n, _])) =
         (parts(request, "read:"), parts(response, "data:"))

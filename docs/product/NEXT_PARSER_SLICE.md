@@ -90,3 +90,11 @@ Elapsed time including report serialization for coalesced input was 13, 25 and
 46 ms before and 13, 22 and 44 ms after in this run. The largest input was 896
 bytes. Use these measurements to assess copying in this fixture. Process-wide
 allocation totals and representative capture throughput remain unmeasured.
+
+A second fixture gives every byte a different packet ID. The same 16, 32 and
+64 ADUs emitted 224, 448 and 896 source spans in both coalesced and one-byte
+feeds. The frame slicer carries the next span index through a batch. Tests
+compare each packet offset and the serialized report hashes across segmentations.
+Coalesced first runs took 17, 31 and 61 ms, and repeated runs in the same
+process took 16, 32 and 61 ms on the same debug build. These timings include
+report hashing and serialization.

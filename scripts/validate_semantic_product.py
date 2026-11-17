@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -21,6 +22,9 @@ FIXTURES = (
     "dnp3_split_valid.pcap",
     "modbus_bits_bad_padding.pcap",
     "modbus_bits_valid.pcap",
+    "modbus_partial_same.pcap",
+    "modbus_partial_sibling.pcap",
+    "modbus_mei_exception_reuse.pcap",
 )
 
 
@@ -32,6 +36,9 @@ def run_product(binary: Path, capture: Path, output: Path, output_format: str, r
             str(capture),
             "--profile",
             "ics-full",
+            "--max-packets", "32",
+            "--max-output-bytes", "1048576",
+            "--window-bytes", "4096",
             "--format",
             output_format,
             "-o",
@@ -108,6 +115,10 @@ def main() -> int:
                 if left != right:
                     raise AssertionError(f"{capture.name}: event {index} differs between NDJSON and TLV")
             raise AssertionError(f"{capture.name}: event counts differ")
+        if not ndjson or ndjson[-1].get("kind") != "capture.complete":
+            raise AssertionError(f"{capture.name}: missing terminal capture event")
+        if ndjson[-1]["data"].get("source_sha256") != hashlib.sha256(capture.read_bytes()).hexdigest():
+            raise AssertionError(f"{capture.name}: incorrect source hash")
         results.append(
             {
                 "fixture": fixture_name,

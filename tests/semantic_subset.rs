@@ -394,6 +394,7 @@ fn streaming_padding_tokens_match_root_policy() {
         "modbus-bits-v1:response:2:129"
     ));
     assert!(modbus::compatibility_matches("count:4", "count:4"));
+    assert!(modbus::compatibility_matches("read:3:10:1", "read:3:10:1"));
     assert!(modbus::compatibility_matches(
         "modbus-bits-v1:quantity:9",
         ""
@@ -1571,5 +1572,86 @@ fn modbus_rejects_disagreeing_extended_replies_but_allows_device_stream_restart(
         &[43, 14, 4, 1],
         &[43, 14, 4, 0x81, 0, 0, 1, 0, 1, 65]
     ));
-    assert!(paired(&[43, 14, 1, 7], &[43, 14, 1, 1, 0, 0, 1, 0, 1, 65]));
+    assert!(paired(
+        &[43, 14, 1, 7],
+        &[43, 14, 1, 1, 0, 0, 3, 0, 1, 65, 1, 1, 66, 2, 1, 67]
+    ));
+}
+
+#[test]
+fn modbus_device_pages_exceptions_and_legacy_short_writes() {
+    for (bytes, role, status, issue) in [
+        (
+            &[16, 0, 1][..],
+            Role::Request,
+            Status::Incomplete,
+            "modbus_write_header_truncated",
+        ),
+        (
+            &[16, 0, 1],
+            Role::Response,
+            Status::Rejected,
+            "modbus_pdu_shape",
+        ),
+        (
+            &[3],
+            Role::Response,
+            Status::Incomplete,
+            "modbus_byte_count_truncated",
+        ),
+        (
+            &[43],
+            Role::Request,
+            Status::Incomplete,
+            "modbus_pdu_truncated",
+        ),
+        (
+            &[0x96, 8],
+            Role::Response,
+            Status::Rejected,
+            "modbus_exception_role_or_code",
+        ),
+    ] {
+        let raw = adu(bytes);
+        let report = modbus::decode(&raw, role, Limits::default()).unwrap();
+        assert_eq!(report.status(), status);
+        assert_eq!(report.issues()[0].code, issue);
+    }
+    for bytes in [[0x94, 8], [0x95, 8], [0x83, 8]] {
+        assert_eq!(
+            modbus::decode(&adu(&bytes), Role::Response, Limits::default())
+                .unwrap()
+                .status(),
+            Status::DecodedSubset
+        );
+    }
+    for category in 1..=3 {
+        for (more, next, ids, expected) in [
+            (0, 0, &[0][..], Status::Rejected),
+            (0, 0, &[0, 2], Status::Rejected),
+            (255, 2, &[0], Status::Rejected),
+            (255, 1, &[0], Status::DecodedSubset),
+            (0, 0, &[2], Status::DecodedSubset),
+        ] {
+            let mut pdu = vec![43, 14, category, 3, more, next, ids.len() as u8];
+            for &id in ids {
+                pdu.extend([id, 1, b'A']);
+            }
+            assert_eq!(
+                modbus::decode(&adu(&pdu), Role::Response, Limits::default())
+                    .unwrap()
+                    .status(),
+                expected
+            );
+        }
+    }
+    let token = |mask, role| {
+        pcap_evidence::modbus::correlation_token(&[22, 0, 1, 0, mask, 0, 0], role).unwrap()
+    };
+    assert_eq!(
+        pcap_evidence::modbus::mismatch_fields(&token(8, Role::Request), &token(7, Role::Response))
+            .unwrap()
+            .encode(),
+        r#"["and_mask"]"#
+    );
 }

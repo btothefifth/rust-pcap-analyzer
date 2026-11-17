@@ -18,7 +18,7 @@ use pcap_evidence::{
     wire::Endpoint,
     Limits,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod dnp_workflow;
 
@@ -287,6 +287,13 @@ impl Output<'_> {
         }
         *self.remaining -= 1;
         let code: String = code.into();
+        let prefix = (protocol == "modbus").then(|| {
+            if code == "incomplete_application_at_gap_or_window_end" {
+                modbus::transaction_prefix(bytes.data())
+            } else {
+                String::new()
+            }
+        });
         let mut e = Event::new(
             EventKind::ProtocolIssue,
             EvidenceStatus::Incomplete,
@@ -297,7 +304,25 @@ impl Output<'_> {
         e.protocol = Some(protocol.into());
         e.evidence = Evidence::bytes(bytes);
         match self.sink.emit(&e) {
-            Ok(_) => Ok(()),
+            Ok(event) => {
+                if let Some(key) = prefix {
+                    self.records.push(MessageRecord {
+                        event,
+                        session: self.context.session,
+                        direction: self.context.direction,
+                        protocol,
+                        hint: CorrelationHint {
+                            key,
+                            role: Role::Unknown,
+                            compatibility: String::new(),
+                        },
+                        complete: false,
+                        ambiguous: self.context.ambiguous,
+                        boundary_verified: false,
+                    });
+                }
+                Ok(())
+            }
             Err(error) => {
                 self.sink_failed = true;
                 Err(error)
@@ -348,7 +373,19 @@ impl TransactionCorrelator for IdentifierCorrelator {
         }
         let mut groups: BTreeMap<(u64, &'static str, String), Vec<&MessageRecord>> =
             BTreeMap::new();
+        let mut incomplete = BTreeSet::new();
+        let mut other_mei = BTreeSet::new();
         for r in records {
+            if r.protocol == "modbus"
+                && (!r.complete || r.hint.role == Role::Unknown || r.ambiguous)
+            {
+                let item = (r.session, r.hint.key.as_str());
+                if r.hint.compatibility == "other-mei-request" {
+                    other_mei.insert(item);
+                } else {
+                    incomplete.insert(item);
+                }
+            }
             if r.complete && !r.ambiguous && r.hint.role != Role::Unknown {
                 groups
                     .entry((r.session, r.protocol, r.hint.key.clone()))
@@ -377,7 +414,19 @@ impl TransactionCorrelator for IdentifierCorrelator {
                         || rsp[0].hint.compatibility.is_empty()
                         || req[0].hint.compatibility == rsp[0].hint.compatibility
                 };
-            let (status, reason) = if req.is_empty() {
+            let competing = protocol == "modbus"
+                && (modbus::competing_prefix(&key, |prefix| {
+                    incomplete.contains(&(session, prefix))
+                }) || (rsp.iter().any(|r| r.hint.compatibility == "modbus-pdu-v2:")
+                    && other_mei.contains(&(session, key.as_str()))));
+            let (status, reason) = if competing {
+                (EvidenceStatus::Ambiguous, "competing_modbus_observation")
+            } else if protocol == "modbus" && (req.len() > 1 || rsp.len() > 1) {
+                (
+                    EvidenceStatus::Ambiguous,
+                    "identifier_reuse_or_direction_conflict",
+                )
+            } else if req.is_empty() {
                 (EvidenceStatus::Incomplete, "orphan_response")
             } else if rsp.is_empty() {
                 (EvidenceStatus::Incomplete, "unanswered_in_window")
@@ -1575,18 +1624,13 @@ fn emit_modbus(
     out: &mut Output<'_>,
     l: &AnalyzerLimits,
 ) -> Result<()> {
-    let stream = one_stream(raw, at, boundary);
-    let limits = native_limits(l);
-    let request = modbus::decode(&stream, modbus::Role::Request, &limits)?;
-    let response = modbus::decode(&stream, modbus::Role::Response, &limits)?;
-    let a = request
-        .messages
-        .first()
-        .ok_or_else(|| malformed("modbus", "no framed request interpretation"))?;
-    let b = response
-        .messages
-        .first()
-        .ok_or_else(|| malformed("modbus", "no framed response interpretation"))?;
+    let parsed = pcap_evidence::semantics::modbus::FramedAdu::new(raw)?;
+    let (request_valid, response_valid) = parsed.shapes();
+    let supported = parsed.supported();
+    let bytes = raw.data();
+    let transaction = protocols::be16(bytes, 0);
+    let unit = bytes[6];
+    let function = bytes[7];
     let source_server = out.context.modbus_ports.contains(&out.context.source.port);
     let destination_server = out
         .context
@@ -1600,56 +1644,58 @@ fn emit_modbus(
             Role::Request
         }
     } else {
-        match (a.shape_valid, b.shape_valid) {
+        match (request_valid, response_valid) {
             (true, false) => Role::Request,
             (false, true) => Role::Response,
             _ => Role::Unknown,
         }
     };
-    let chosen = if role == Role::Response { b } else { a };
     let valid = match role {
-        Role::Request => a.shape_valid,
-        Role::Response => b.shape_valid,
-        Role::Unknown => a.shape_valid || b.shape_valid,
+        Role::Request => request_valid,
+        Role::Response => response_valid,
+        Role::Unknown => request_valid || response_valid,
     };
     let decoded_role = match role {
         Role::Request => modbus::Role::Request,
         Role::Response => modbus::Role::Response,
         Role::Unknown => modbus::Role::Unknown,
     };
-    let hint = if valid && chosen.semantics_supported && role != Role::Unknown {
+    let hint = if valid && supported && role != Role::Unknown {
         Some(CorrelationHint {
-            key: format!(
-                "{}:{}:{}",
-                chosen.transaction,
-                chosen.unit,
-                chosen.function & 0x7f
-            ),
+            key: format!("{}:{}:{}", transaction, unit, function & 0x7f),
             role,
-            compatibility: modbus::correlation_token(&raw.data()[7..], decoded_role)
+            compatibility: parsed
+                .token(decoded_role)
                 .ok_or_else(|| malformed("modbus", "missing compatibility summary"))?,
         })
     } else {
-        None
+        Some(CorrelationHint {
+            key: modbus::transaction_prefix(raw.data()),
+            role: Role::Unknown,
+            compatibility: if role == Role::Request && modbus::other_mei(&raw.data()[7..]) {
+                "other-mei-request".into()
+            } else {
+                String::new()
+            },
+        })
     };
     out.message(
         "modbus",
         raw,
         Some((at, at + raw.len() as i64)),
         Json::object([
-            ("transaction_id", chosen.transaction.into()),
-            ("unit", chosen.unit.into()),
-            ("function", chosen.function.into()),
+            ("transaction_id", transaction.into()),
+            ("unit", unit.into()),
+            ("function", function.into()),
             ("role", format!("{role:?}").to_ascii_lowercase().into()),
             ("role_from_configuration", configured.into()),
-            ("request_shape_valid", a.shape_valid.into()),
-            ("response_shape_valid", b.shape_valid.into()),
-            ("semantics_supported", chosen.semantics_supported.into()),
+            ("request_shape_valid", request_valid.into()),
+            ("response_shape_valid", response_valid.into()),
+            ("semantics_supported", supported.into()),
             ("boundary_verified", boundary.into()),
             (
                 "semantic_subset",
-                pcap_evidence::semantics::modbus::alternatives_json(
-                    raw,
+                parsed.fields(
                     decoded_role,
                     pcap_evidence::semantics::Limits::from_capture(&native_limits(l)),
                 ),

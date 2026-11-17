@@ -41,7 +41,12 @@ fn registers(
     }
     Ok(())
 }
-fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
+use crate::modbus::{
+    pdu::{self, Pdu},
+    transaction::Summary,
+};
+
+fn envelope(b: &[u8]) -> Result<()> {
     need(b, 0, 8, "modbus_mbap_truncated")?;
     let len = uint(b, 4, 2, false) as usize;
     if uint(b, 2, 2, false) != 0 || !(2..=254).contains(&len) {
@@ -53,6 +58,17 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
     if b.len() != len + 6 {
         return Err(invalid(4, "modbus_exactly_one_adu_required"));
     }
+    Ok(())
+}
+
+fn decode_body<'a>(
+    b: &'a [u8],
+    role: Role,
+    out: &mut Report<'_>,
+    parse: impl FnOnce() -> Result<Pdu<'a>>,
+) -> Result<()> {
+    envelope(b)?;
+    let len = b.len() - 6;
     let function = b[7];
     out.add(Record::new(
         "mbap",
@@ -73,7 +89,6 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
             "modbus_role_not_supplied",
         ));
     }
-    use crate::modbus::pdu::{self, Pdu};
     if !pdu::supported(&b[7..]) {
         return Err(fail(
             ErrorCode::UnsupportedTransport,
@@ -81,7 +96,7 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
             "modbus_function_outside_field_subset",
         ));
     }
-    match pdu::parse(&b[7..], role)? {
+    match parse()? {
         Pdu::Exception(code) => {
             out.add(Record::new(
                 "exception_response",
@@ -339,8 +354,18 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
     Ok(())
 }
 pub fn decode(source: &EvidenceBytes, role: Role, limits: Limits) -> Result<Report<'_>> {
+    decode_with(source, role, limits, || {
+        pdu::parse(&source.data()[7..], role)
+    })
+}
+fn decode_with<'a>(
+    source: &'a EvidenceBytes,
+    role: Role,
+    limits: Limits,
+    parse: impl FnOnce() -> Result<Pdu<'a>>,
+) -> Result<Report<'a>> {
     let mut out = Report::new(source, "modbus", role.as_str(), limits)?;
-    if let Err(e) = decode_body(source.data(), role, &mut out) {
+    if let Err(e) = decode_body(source.data(), role, &mut out, parse) {
         let at = out.consumed();
         out.stop(e, at);
     }
@@ -349,10 +374,66 @@ pub fn decode(source: &EvidenceBytes, role: Role, limits: Limits) -> Result<Repo
 /// Unknown direction yields two explicitly attributed interpretations, including
 /// rejected alternatives. No array element is silently selected as authoritative.
 pub fn alternatives_json(source: &EvidenceBytes, role: Role, limits: Limits) -> Json {
-    let roles: &[Role] = if role == Role::Unknown {
-        &[Role::Request, Role::Response]
-    } else {
-        std::slice::from_ref(&role)
+    render(
+        role,
+        &limits,
+        || super::as_json(decode(source, Role::Request, limits.clone())),
+        || super::as_json(decode(source, Role::Response, limits.clone())),
+    )
+}
+
+/// A framed ADU received without a known direction. Keep both grammar results
+/// until the caller selects a role, so correlation and fields use the same PDU.
+pub struct FramedAdu<'a> {
+    source: &'a EvidenceBytes,
+    request: Result<Pdu<'a>>,
+    response: Result<Pdu<'a>>,
+}
+impl<'a> FramedAdu<'a> {
+    pub fn new(source: &'a EvidenceBytes) -> Result<Self> {
+        envelope(source.data())?;
+        let bytes = &source.data()[7..];
+        Ok(Self {
+            source,
+            request: pdu::parse(bytes, Role::Request),
+            response: pdu::parse(bytes, Role::Response),
+        })
+    }
+    pub fn shapes(&self) -> (bool, bool) {
+        (self.request.is_ok(), self.response.is_ok())
+    }
+    pub fn supported(&self) -> bool {
+        pdu::supported(&self.source.data()[7..])
+    }
+    pub fn token(&self, role: Role) -> Option<String> {
+        let parsed = match role {
+            Role::Request => &self.request,
+            Role::Response => &self.response,
+            Role::Unknown => return None,
+        };
+        Some(Summary::from_pdu(&self.source.data()[7..], parsed.as_ref().ok()?)?.token())
+    }
+    pub fn fields(self, role: Role, limits: Limits) -> Json {
+        let project =
+            |r, result| super::as_json(decode_with(self.source, r, limits.clone(), || result));
+        render(
+            role,
+            &limits,
+            || project(Role::Request, self.request),
+            || project(Role::Response, self.response),
+        )
+    }
+}
+fn render(
+    role: Role,
+    limits: &Limits,
+    request: impl FnOnce() -> Json,
+    response: impl FnOnce() -> Json,
+) -> Json {
+    let interpretations = match role {
+        Role::Request => vec![request()],
+        Role::Response => vec![response()],
+        Role::Unknown => vec![request(), response()],
     };
     let result = Json::object([
         ("schema", "pcap-evidence.modbus-alternatives.v1".into()),
@@ -365,17 +446,10 @@ pub fn alternatives_json(source: &EvidenceBytes, role: Role, limits: Limits) -> 
             }
             .into(),
         ),
-        (
-            "interpretations",
-            Json::array(
-                roles
-                    .iter()
-                    .map(|r| super::as_json(decode(source, *r, limits.clone()))),
-            ),
-        ),
+        ("interpretations", Json::Array(interpretations)),
         ("device_effect_established", false.into()),
     ]);
-    match result.encode_bounded(limits.max_json_bytes) {
+    match result.encoded_len_bounded(limits.max_json_bytes) {
         Ok(_) => result,
         Err(e) => Json::object([
             ("schema", "pcap-evidence.modbus-alternatives.v1".into()),

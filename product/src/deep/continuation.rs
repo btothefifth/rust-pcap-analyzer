@@ -201,6 +201,7 @@ impl Parser {
         messages: &mut usize,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
+        let mut span_cursor = 0;
         while let Some(n) = self.length(*consumed)? {
             *messages += 1;
             if *messages > self.limits.elements {
@@ -208,11 +209,18 @@ impl Parser {
             }
             let at = self.buffer.offset() + *consumed as i64;
             let end = *consumed + n;
-            let raw = self.buffer.bytes().slice(*consumed..end)?;
+            let raw = self
+                .buffer
+                .bytes()
+                .slice_from(*consumed..end, &mut span_cursor)?;
             *consumed = end;
-            self.last_frame = self
-                .last_frame
-                .max(raw.packets().iter().map(|p| p.frame).max().unwrap_or(0));
+            self.last_frame = self.last_frame.max(
+                raw.spans()
+                    .iter()
+                    .map(|s| s.packet.frame)
+                    .max()
+                    .unwrap_or(0),
+            );
             let report = match self.unit(&raw) {
                 Ok(report) => report,
                 Err(e) => {
@@ -265,7 +273,7 @@ impl Parser {
                 let value = pcap_evidence::semantics::modbus::alternatives_json(
                     raw,
                     pcap_evidence::modbus::Role::Unknown,
-                    pcap_evidence::semantics::Limits::default(),
+                    self.semantic_limits(),
                 );
                 r.add(
                     "wire_semantic_alternatives",
@@ -298,7 +306,7 @@ impl Parser {
                         pcap_evidence::semantics::as_json(
                             pcap_evidence::semantics::dnp3_workflow::link(
                                 raw,
-                                self.dnp_semantic_limits(),
+                                self.semantic_limits(),
                             ),
                         ),
                         0..raw.len(),
@@ -432,7 +440,7 @@ impl Parser {
                 };
                 let root = pcap_evidence::semantics::dnp3_workflow::application(
                     &state.pending,
-                    self.dnp_semantic_limits(),
+                    self.semantic_limits(),
                 )?;
                 let status = match root.status() {
                     pcap_evidence::semantics::Status::DecodedSubset => Status::Observed,
@@ -642,7 +650,7 @@ impl Parser {
         }
         Ok(())
     }
-    fn dnp_semantic_limits(&self) -> pcap_evidence::semantics::Limits {
+    fn semantic_limits(&self) -> pcap_evidence::semantics::Limits {
         let d = pcap_evidence::semantics::Limits::default();
         pcap_evidence::semantics::Limits {
             max_input_bytes: d.max_input_bytes.min(self.limits.input_bytes),

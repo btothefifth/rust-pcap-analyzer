@@ -191,3 +191,129 @@ fn modbus_read_mapping_retains_conditional_boundary_and_both_witnesses() {
         assert!(json.contains("\"padding_checked\":true"));
     }
 }
+
+#[test]
+fn competing_modbus_observations_withhold_only_the_affected_group() {
+    for (fixture, paired) in [
+        ("modbus_partial_same.pcap", false),
+        ("modbus_partial_sibling.pcap", true),
+        ("modbus_mei_exception_reuse.pcap", false),
+    ] {
+        let bytes = capture(fixture);
+        let root = pcap_evidence::engine::analyze(&bytes, Default::default()).unwrap();
+        assert!(
+            root.transactions.iter().any(|tx| if paired {
+                tx.status == "candidate_pair"
+            } else {
+                tx.reason == "competing_modbus_observation"
+            }),
+            "{fixture}"
+        );
+        let stream = run(&bytes, StreamConfig::default());
+        let tx = stream
+            .events
+            .iter()
+            .find(|e| e.kind == EventKind::Transaction)
+            .unwrap();
+        assert_eq!(
+            tx.status,
+            if paired {
+                EvidenceStatus::Candidate
+            } else {
+                EvidenceStatus::Ambiguous
+            },
+            "{fixture}"
+        );
+        assert_eq!(tx.data.encode().contains("read_mapping"), paired);
+        assert_eq!(
+            pcap_evidence::report::analysis(&root, false)
+                .encode()
+                .contains("read_mapping"),
+            paired
+        );
+    }
+}
+
+fn field<'a>(value: &'a Json, name: &str) -> &'a Json {
+    let Json::Object(fields) = value else {
+        panic!("expected object with {name}")
+    };
+    &fields.iter().find(|(key, _)| *key == name).unwrap().1
+}
+
+#[test]
+fn modbus_mapping_references_resolve_to_both_wire_values() {
+    use pcap_evidence::{
+        capture::{CaptureIter, ParseMode},
+        engine::{self, ApplicationData},
+        provenance::SourceSpan,
+    };
+    let bytes = capture("modbus_bits_valid.pcap");
+    let mut packets = std::collections::BTreeMap::new();
+    for record in CaptureIter::new(&bytes, Default::default(), ParseMode::Strict).unwrap() {
+        let record = record.unwrap();
+        if let Some((m, data)) = record.packet() {
+            packets.insert(m.frame, data.to_vec());
+        }
+    }
+    let snapshot = engine::analyze(&bytes, Default::default()).unwrap();
+    let report = pcap_evidence::report::analysis(&snapshot, false);
+    let Json::Array(transactions) = field(&report, "transaction_candidates") else {
+        panic!("missing transactions")
+    };
+    let streaming = run(&bytes, Default::default());
+    let tx = &streaming
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::Transaction)
+        .unwrap()
+        .data;
+    for (mapping, stream) in [
+        (field(&transactions[0], "read_mapping"), false),
+        (field(tx, "read_mapping"), true),
+    ] {
+        for (role, offset_key, expected) in [
+            ("request", "request_address_adu_offset", &[0, 0][..]),
+            ("request", "request_quantity_adu_offset", &[0, 9]),
+            ("response", "response_values_adu_offset", &[255, 1]),
+        ] {
+            let reference = field(mapping, role);
+            let spans: &[SourceSpan] = if stream {
+                let Json::String(sequence) = reference else {
+                    panic!("missing event id")
+                };
+                let event = &streaming.events[sequence.parse::<usize>().unwrap() - 1];
+                assert_eq!(event.kind, EventKind::Message);
+                assert_eq!(field(&event.data, "role"), &Json::from(role));
+                &event.evidence.spans
+            } else {
+                let Json::Number(app) = field(reference, "application") else {
+                    panic!("missing application")
+                };
+                let Json::Number(index) = field(reference, "message") else {
+                    panic!("missing message")
+                };
+                let ApplicationData::Modbus(data) = &snapshot.applications[*app as usize].data
+                else {
+                    panic!("wrong protocol")
+                };
+                let message = &data.messages[*index as usize];
+                assert_eq!(message.role.as_str(), role);
+                message.raw.spans()
+            };
+            let reconstructed: Vec<_> = spans
+                .iter()
+                .flat_map(|s| {
+                    packets[&s.packet.frame][s.packet_start..s.packet_start + s.end - s.start]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let Json::Number(offset) = field(mapping, offset_key) else {
+                panic!("missing wire offset")
+            };
+            let start = *offset as usize;
+            assert_eq!(&reconstructed[start..start + expected.len()], expected);
+        }
+    }
+}

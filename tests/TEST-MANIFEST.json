@@ -280,6 +280,7 @@
     "semantic_subset::modbus_extended_role_and_pair_vectors",
     "semantic_subset::modbus_extended_boundaries",
     "semantic_subset::modbus_rejects_disagreeing_extended_replies_but_allows_device_stream_restart",
+    "semantic_subset::modbus_device_pages_exceptions_and_legacy_short_writes",
     "streaming_handoff::repeated_and_csv_ports_share_transactional_semantics",
     "streaming_handoff::invalid_port_does_not_partially_update",
     "streaming_handoff::empty_port_list_is_usage_error",

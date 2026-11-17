@@ -506,25 +506,14 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                     )
                 {
                     if let ([req], [rsp]) = (t.requests.as_slice(), t.responses.as_slice()) {
-                        let token = |r: &MessageRef| {
-                            let crate::engine::ApplicationData::Modbus(result) =
-                                &value.applications.get(r.application)?.data
-                            else {
-                                return None;
-                            };
-                            let m = result.messages.get(r.message)?;
-                            crate::modbus::correlation_token(m.raw.data().get(7..)?, m.role)
-                        };
-                        if let (Some(a), Some(b), J::Object(fields)) =
-                            (token(req), token(rsp), &mut entry)
-                        {
+                        if let (Some((a, b)), J::Object(fields)) = (&t.modbus_tokens, &mut entry) {
                             if t.status == "inconsistent_response" {
-                                if let Some(names) = crate::modbus::mismatch_fields(&a, &b) {
+                                if let Some(names) = crate::modbus::mismatch_fields(a, b) {
                                     fields.push(("disagreeing_fields", names));
                                 }
                             } else if let Some(mapping) = crate::modbus::pair_projection(
-                                &a,
-                                &b,
+                                a,
+                                b,
                                 t.status,
                                 reference(req),
                                 reference(rsp),

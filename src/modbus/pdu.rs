@@ -81,7 +81,16 @@ fn require(ok: bool, at: usize, field: &'static str) -> Result<()> {
     }
 }
 fn exact(b: &[u8], len: usize) -> Result<()> {
-    require(b.len() == len, 0, "modbus_pdu_shape")
+    if b.len() == len {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::InvalidLength,
+            0,
+            "modbus_pdu_shape",
+            "unexpected PDU length",
+        ))
+    }
 }
 fn range(b: &[u8], at: usize, limit: u16) -> Result<(u16, u16)> {
     let start = word(b, at)?;
@@ -95,7 +104,7 @@ fn range(b: &[u8], at: usize, limit: u16) -> Result<(u16, u16)> {
 }
 pub(crate) fn supported(b: &[u8]) -> bool {
     matches!(b.first().map(|f| f & 0x7f), Some(1..=6 | 15 | 16 | 20..=24))
-        || matches!(b, [43, 14, ..] | [0xab, ..])
+        || matches!(b, [43] | [43, 14, ..] | [0xab, ..])
 }
 pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
     let f = byte(b, 0)?;
@@ -107,7 +116,12 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
     if f & 0x80 != 0 {
         exact(b, 2)?;
         require(
-            role == Role::Response && matches!(b[1], 1..=6 | 8 | 10 | 11),
+            role == Role::Response
+                && match f & 0x7f {
+                    20 | 21 => matches!(b[1], 1..=4 | 8 | 10 | 11),
+                    22..=24 | 43 => matches!(b[1], 1..=4 | 10 | 11),
+                    _ => matches!(b[1], 1..=6 | 8 | 10 | 11),
+                },
             1,
             "modbus_exception_role_or_code",
         )?;
@@ -121,7 +135,14 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
             Ok(Pdu::Read { start, count })
         }
         1..=4 | 23 if !request => {
-            let n = usize::from(byte(b, 1)?);
+            let n = usize::from(*b.get(1).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Truncated,
+                    8,
+                    "modbus_byte_count_truncated",
+                    "missing byte count",
+                )
+            })?);
             require(
                 (1..=250).contains(&n) && b.len() == 2 + n && (f <= 2 || n % 2 == 0),
                 1,
@@ -139,9 +160,18 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
             Ok(Pdu::Single)
         }
         15 | 16 => {
-            let (start, count) = range(b, 1, if f == 15 { 1968 } else { 123 })?;
             if !request {
                 exact(b, 5)?;
+            } else if b.len() < 6 {
+                return Err(Error::new(
+                    ErrorCode::Truncated,
+                    8,
+                    "modbus_write_header_truncated",
+                    "missing write header",
+                ));
+            }
+            let (start, count) = range(b, 1, if f == 15 { 1968 } else { 123 })?;
+            if !request {
                 return Ok(Pdu::WriteAck { start, count });
             }
             let bytes = if f == 15 {
@@ -299,7 +329,10 @@ fn device(b: &[u8], request: bool) -> Result<Pdu<'_>> {
     for _ in 0..count {
         let id = byte(b, at)?;
         require(
-            permitted(id) && objects.last().is_none_or(|o| o.id < id),
+            permitted(id)
+                && objects
+                    .last()
+                    .is_none_or(|o| o.id < id && (o.id >= 2 || id == o.id + 1)),
             at,
             "modbus_device_object_id",
         )?;
@@ -326,5 +359,14 @@ fn device(b: &[u8], request: bool) -> Result<Pdu<'_>> {
         5,
         "modbus_device_next_id",
     )?;
+    if category != 4 {
+        if let Some(last) = objects.last().filter(|o| o.id < 2) {
+            require(
+                more == 255 && next == last.id + 1,
+                5,
+                "modbus_missing_basic_object",
+            )?;
+        }
+    }
     Ok(Pdu::DevicePage(objects))
 }
