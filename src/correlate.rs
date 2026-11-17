@@ -54,6 +54,14 @@ pub fn transactions(
     applications: &[ApplicationAnalysis],
     limits: &Limits,
 ) -> Result<Vec<Transaction>> {
+    transactions_with_flows(applications, limits, &[])
+}
+
+pub(crate) fn transactions_with_flows(
+    applications: &[ApplicationAnalysis],
+    limits: &Limits,
+    flows: &[crate::tcp::FlowResult],
+) -> Result<Vec<Transaction>> {
     // Protocol, capture, flow, controller address/unit, outstation address, sequence/tx ID, function.
     type Key = (&'static str, [u8; 32], usize, u16, u16, u16, u8);
     let mut groups: BTreeMap<Key, Group> = BTreeMap::new();
@@ -167,6 +175,15 @@ pub fn transactions(
                 }
             }
             ApplicationData::Modbus(result) => {
+                let discontinuous = flows.get(application.flow).is_some_and(|flow| {
+                    !flow.reconstruction_errors.is_empty()
+                        || !flow.anomalies.is_empty()
+                        || flow
+                            .streams
+                            .iter()
+                            .flatten()
+                            .any(|s| !s.gaps.is_empty() || !s.conflicts.is_empty())
+                });
                 for (mi, message) in result.messages.iter().enumerate() {
                     count += 1;
                     if count > limits.max_protocol_messages {
@@ -182,7 +199,8 @@ pub fn transactions(
                         .filter(|work| *work <= limits.max_correlation_checks)
                         .ok_or_else(|| Error::limit("transaction_capture_scope_work"))?;
                     let capture = capture_scope(&message.raw);
-                    if application.direction > 1
+                    if discontinuous
+                        || application.direction > 1
                         || application.protocol != "modbus"
                         || !message.shape_valid
                         || !message.semantics_supported
@@ -203,7 +221,9 @@ pub fn transactions(
                                 Vec::new()
                             },
                             status: "unclassified",
-                            reason: if capture.is_none() {
+                            reason: if discontinuous {
+                                "modbus_transport_discontinuity"
+                            } else if capture.is_none() {
                                 "modbus_transaction_capture_scope_invalid"
                             } else {
                                 "invalid_or_unsupported_pdu_shape_or_endpoint_role"

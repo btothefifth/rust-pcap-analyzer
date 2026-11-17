@@ -345,13 +345,24 @@ impl StreamBuffer {
             return Err(bad("stream_buffer", 0, "invalid consumed extent"));
         }
         let out = self.pending.slice(0..count)?;
-        let rest = self.pending.slice(count..self.pending.len())?;
+        self.discard_prefix(count)?;
+        Ok(out)
+    }
+    pub(super) fn discard_prefix(&mut self, count: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let rest = if count == self.pending.len() {
+            EvidenceBytes::default()
+        } else {
+            self.pending.slice(count..self.pending.len())?
+        };
         self.base = self
             .base
             .checked_add(count as i64)
             .ok_or_else(|| Error::limit("stream_offset"))?;
         self.pending = rest;
-        Ok(out)
+        Ok(())
     }
     pub fn gap(&mut self) -> EvidenceBytes {
         self.next = None;

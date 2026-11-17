@@ -164,3 +164,30 @@ fn streaming_window_cut_remains_explicit_no_cross_cut_semantic_values() {
                 && e.data.encode().contains("lsb_zero_bit_position"))
     );
 }
+
+#[test]
+fn modbus_read_mapping_retains_conditional_boundary_and_both_witnesses() {
+    let full = capture("modbus_bits_valid.pcap");
+    // Omit the three handshake records and restore capture order by sequence
+    // for the two response fragments, so midstream alignment is observable.
+    let mut mid = [&full[..24], &full[234..316], &full[392..], &full[316..392]].concat();
+    // Keep the original monotonic record timestamps after the permutation.
+    mid[106..114].copy_from_slice(&full[316..324]);
+    mid[181..189].copy_from_slice(&full[392..400]);
+    for (bytes, status) in [
+        (&full, "candidate_pair"),
+        (&mid, "candidate_unverified_boundary"),
+    ] {
+        let out = run(bytes, StreamConfig::default());
+        let tx = out
+            .events
+            .iter()
+            .find(|e| e.kind == EventKind::Transaction && e.status == EvidenceStatus::Candidate)
+            .unwrap();
+        assert_eq!(tx.related_events.len(), 2);
+        let json = tx.data.encode();
+        assert!(json.contains(&format!("\"read_mapping\":{{\"status\":\"{status}\"")));
+        assert!(json.contains("\"quantity\":9"));
+        assert!(json.contains("\"padding_checked\":true"));
+    }
+}

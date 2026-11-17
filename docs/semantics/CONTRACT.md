@@ -89,6 +89,20 @@ not a newly invented mandatory rejection. Exceptions retain the existing
 compatibility wildcard. Neither matching identifiers nor valid padding proves
 causality or endpoint success.
 
+FC20 and FC21 expose ordered file records. FC22 exposes the address and both
+masks. FC23 distinguishes read and write ranges and FC24 exposes FIFO counts
+and words. FC43/14 returns one page of device-identification objects with value
+lengths, hashes and byte spans. The unknown-direction decoder retains both
+role interpretations. Other MEI types remain opaque.
+
+Finalized compatible FC1–4 and FC23 reads carry a compact `read_mapping`.
+Value index zero corresponds to the starting address. The quantity bounds the
+meaningful response values, including the final packed octet of a bit read.
+The mapping names both observations and their ADU offsets. Midstream pairs
+carry `candidate_unverified_boundary` on the mapping itself. Exceptions and
+ambiguous groups have no read mapping. History queries retain standalone
+interpretations because a query selects one TCP direction.
+
 ## Status and limits
 
 `decoded_subset` means the selected field decoder consumed this input under its

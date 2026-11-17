@@ -125,6 +125,9 @@ pub fn tpkt(bytes: &EvidenceBytes, l: &Limits) -> Result<Report> {
 }
 /// Reassembles only already-ordered, gap-free class-0 DT payloads, per explicit
 /// transport generation/direction. A complete TSDU is not a complete association.
+/// Malformed TPDUs and connection controls discard the affected scope's partial
+/// TSDU. Capacity rejections leave it available for retry. Expedited data is
+/// rejected without changing the independent ordinary-data assembly.
 pub struct CotpSession {
     parts: Segments,
     ordinals: BTreeMap<String, u64>,
@@ -137,7 +140,16 @@ impl CotpSession {
         })
     }
     pub fn push(&mut self, scope: &str, bytes: &EvidenceBytes, frame: u64) -> Result<Outcome> {
-        let c = cotp(bytes.data())?;
+        let c = match cotp(bytes.data()) {
+            Ok(c) => c,
+            Err(error) => {
+                self.gap(scope);
+                return Err(error);
+            }
+        };
+        if matches!(c.kind, 0xe0 | 0xd0 | 0x80 | 0xc0) {
+            self.gap(scope);
+        }
         if c.kind != 0xf0 {
             return Err(bad("cotp_session", 0, "not ordinary DT"));
         }

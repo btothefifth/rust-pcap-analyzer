@@ -412,6 +412,8 @@ pub fn http_header(b: &[u8]) -> Result<(Json, usize)> {
         if parts.len() != 3
             || parts[0].is_empty()
             || !parts[0].bytes().all(token)
+            || parts[1].is_empty()
+            || !parts[1].bytes().all(|c| c.is_ascii_graphic())
             || !["HTTP/1.0", "HTTP/1.1"].contains(&parts[2])
         {
             return Err(malformed("http", "invalid request line"));

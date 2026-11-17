@@ -413,6 +413,32 @@ impl TransactionCorrelator for IdentifierCorrelator {
                     ("scope", "bounded_analysis_window".into()),
                 ]),
             );
+            if protocol == "modbus" && status == EvidenceStatus::Candidate {
+                let boundary = if reason == "candidate_unverified_boundary" {
+                    reason
+                } else {
+                    "candidate_pair"
+                };
+                if let Some(mapping) = modbus::pair_projection(
+                    &req[0].hint.compatibility,
+                    &rsp[0].hint.compatibility,
+                    boundary,
+                    req[0].event.to_string().into(),
+                    rsp[0].event.to_string().into(),
+                ) {
+                    if let Json::Object(fields) = &mut e.data {
+                        fields.push(("read_mapping", mapping));
+                    }
+                }
+            }
+            if protocol == "modbus" && reason == "inconsistent_response" {
+                if let (Some(names), Json::Object(fields)) = (
+                    modbus::mismatch_fields(&req[0].hint.compatibility, &rsp[0].hint.compatibility),
+                    &mut e.data,
+                ) {
+                    fields.push(("disagreeing_fields", names));
+                }
+            }
             e.session = Some(session);
             e.protocol = Some(protocol.into());
             e.related_events = group.iter().map(|r| r.event).collect();
@@ -1586,28 +1612,10 @@ fn emit_modbus(
         Role::Response => b.shape_valid,
         Role::Unknown => a.shape_valid || b.shape_valid,
     };
-    let bytes = raw.data();
-    let compatibility = match (chosen.function & 0x7f, role) {
-        (1 | 2, Role::Request) if bytes.len() == 12 => {
-            format!("modbus-bits-v1:quantity:{}", protocols::be16(bytes, 10))
-        }
-        (3 | 4, Role::Request) if bytes.len() == 12 => {
-            format!("count:{}", 2 * usize::from(protocols::be16(bytes, 10)))
-        }
-        (1 | 2, Role::Response) if bytes.len() >= 10 && chosen.function & 0x80 == 0 => {
-            format!(
-                "modbus-bits-v1:response:{}:{}",
-                bytes[8],
-                bytes[bytes.len() - 1]
-            )
-        }
-        (3 | 4, Role::Response) if bytes.len() >= 9 && chosen.function & 0x80 == 0 => {
-            format!("count:{}", bytes[8])
-        }
-        (5 | 6 | 15 | 16, _) if bytes.len() >= 12 && chosen.function & 0x80 == 0 => {
-            format!("echo:{}", pcap_evidence::sha256::hex(&bytes[8..12]))
-        }
-        _ => String::new(),
+    let decoded_role = match role {
+        Role::Request => modbus::Role::Request,
+        Role::Response => modbus::Role::Response,
+        Role::Unknown => modbus::Role::Unknown,
     };
     let hint = if valid && chosen.semantics_supported && role != Role::Unknown {
         Some(CorrelationHint {
@@ -1618,7 +1626,8 @@ fn emit_modbus(
                 chosen.function & 0x7f
             ),
             role,
-            compatibility,
+            compatibility: modbus::correlation_token(&raw.data()[7..], decoded_role)
+                .ok_or_else(|| malformed("modbus", "missing compatibility summary"))?,
         })
     } else {
         None
@@ -1641,11 +1650,7 @@ fn emit_modbus(
                 "semantic_subset",
                 pcap_evidence::semantics::modbus::alternatives_json(
                     raw,
-                    match role {
-                        Role::Request => modbus::Role::Request,
-                        Role::Response => modbus::Role::Response,
-                        Role::Unknown => modbus::Role::Unknown,
-                    },
+                    decoded_role,
                     pcap_evidence::semantics::Limits::from_capture(&native_limits(l)),
                 ),
             ),

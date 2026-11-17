@@ -135,7 +135,9 @@ pub fn message(b: &[u8], base: usize, l: &Limits) -> Result<Json> {
         fields.push(("path", path(&b[2..2 + n], base + 2, l)?));
         2 + n
     };
-    if service == 0x0a {
+    // Ordinary service rejections need no MSP body. Embedded-service errors
+    // still carry the offset table and individual responses.
+    if service == 0x0a && (!response || matches!(b[2], 0 | 0x1e)) {
         let body = &b[at..];
         let count = usize::from(le16(body, 0)?);
         if count > l.elements {

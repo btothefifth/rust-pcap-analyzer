@@ -469,7 +469,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         }
     }
     let (transactions, correlation_error) =
-        match crate::correlate::transactions(&applications, &config.limits) {
+        match crate::correlate::transactions_with_flows(&applications, &config.limits, &flows) {
             Ok(t) => (t, None),
             Err(e) => (Vec::new(), Some(e)),
         };

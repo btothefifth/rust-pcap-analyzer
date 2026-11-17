@@ -2965,6 +2965,10 @@
         {
           "path": "product/tests/research_properties.rs",
           "selector": "all_protocol_mutations_are_deterministic"
+        },
+        {
+          "path": "tests/semantic_subset.rs",
+          "selector": "modbus_extended_role_and_pair_vectors"
         }
       ],
       "fuzz": [

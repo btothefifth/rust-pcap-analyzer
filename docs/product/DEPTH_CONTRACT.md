@@ -144,6 +144,12 @@ input limit. Completion, OPC UA abort, explicit cut and rejected-feed cleanup
 release those payloads. OPC UA abort chunks validate and advance the channel
 sequence before discarding the matching request assembly.
 
+COTP pending state is independent of payload length. A non-final DT with an
+empty payload remains pending until EOT, a cut or rejection. Ending the selected
+range reports it as incomplete; a connection control during that pending state
+rejects the feed and requires an explicit cut. Empty final DT payloads remain
+accepted by the constrained decoder.
+
 The following events cut state explicitly:
 
 - a noncontiguous range, conflict, or ambiguous placement;
@@ -154,9 +160,10 @@ The following events cut state explicitly:
 Every rejected feed poisons the parser until an explicit caller cut, including
 token changes, discontinuities, framing failures and budget errors. COTP and OPC
 UA rejected-feed cleanup immediately discards their pending assemblies; an error
-never leaves an old payload eligible for subsequent assembly. The cut report
-retains state still present at the cut and marks the result incomplete.
-It does not pretend the preceding or following page is contiguous. Duplicate
+never leaves an old payload eligible for subsequent assembly. A successful
+cut report marks the result incomplete and includes the evidence discarded at
+the cut. Stream and application state are discarded even if the output budget
+prevents building that report. Duplicate
 segments are observed without appending them; conflicting duplicates poison the
 scope until the caller cuts it. This is the intended conservative behavior for
 TCP replay bugs, retransmission ambiguity, timing/order anomalies, and history

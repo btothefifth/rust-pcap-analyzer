@@ -489,14 +489,52 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
         (
             "transaction_candidates",
             J::array(value.transactions.iter().map(|t| {
-                J::object([
+                let mut entry = J::object([
                     ("protocol", t.protocol.into()),
                     ("flow", t.flow.into()),
                     ("requests", J::array(t.requests.iter().map(reference))),
                     ("responses", J::array(t.responses.iter().map(reference))),
                     ("status", t.status.into()),
                     ("reason", t.reason.into()),
-                ])
+                ]);
+                if t.protocol == "modbus"
+                    && matches!(
+                        t.status,
+                        "candidate_pair"
+                            | "candidate_unverified_boundary"
+                            | "inconsistent_response"
+                    )
+                {
+                    if let ([req], [rsp]) = (t.requests.as_slice(), t.responses.as_slice()) {
+                        let token = |r: &MessageRef| {
+                            let crate::engine::ApplicationData::Modbus(result) =
+                                &value.applications.get(r.application)?.data
+                            else {
+                                return None;
+                            };
+                            let m = result.messages.get(r.message)?;
+                            crate::modbus::correlation_token(m.raw.data().get(7..)?, m.role)
+                        };
+                        if let (Some(a), Some(b), J::Object(fields)) =
+                            (token(req), token(rsp), &mut entry)
+                        {
+                            if t.status == "inconsistent_response" {
+                                if let Some(names) = crate::modbus::mismatch_fields(&a, &b) {
+                                    fields.push(("disagreeing_fields", names));
+                                }
+                            } else if let Some(mapping) = crate::modbus::pair_projection(
+                                &a,
+                                &b,
+                                t.status,
+                                reference(req),
+                                reference(rsp),
+                            ) {
+                                fields.push(("read_mapping", mapping));
+                            }
+                        }
+                    }
+                }
+                entry
             })),
         ),
         (

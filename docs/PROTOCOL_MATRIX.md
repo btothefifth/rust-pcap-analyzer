@@ -5,3 +5,5 @@ The deeper opt-in subset and history semantics are in
 [product/DEPTH_CONTRACT.md](product/DEPTH_CONTRACT.md). Both matrices retain
 explicit partial and unsupported boundaries.
 Keep the existing root and streaming support boundaries in their owning contracts.
+
+The [Modbus/TCP profile](product/NEXT_PARSER_SLICE.md) lists supported functions, fields and transaction scope.

@@ -1422,3 +1422,154 @@ fn dnp_group4_event_variations_decode_all_double_bit_states_and_align_sibling() 
         );
     }
 }
+
+#[test]
+fn modbus_extended_role_and_pair_vectors() {
+    // V1.1b3 §§6.14–6.18, 6.21. Each tuple names an independently expected
+    // numeric field from the response, including its contributing wire bytes.
+    type Case<'a> = (&'a [u8], &'a [u8], &'a str, u64, std::ops::Range<usize>);
+    let cases: &[Case<'_>] = &[
+        (
+            &[20, 7, 6, 0, 4, 0, 1, 0, 2],
+            &[20, 6, 5, 6, 0x0d, 0xfe, 0, 0x20],
+            "register_u16",
+            0xdfe,
+            11..13,
+        ),
+        (
+            &[21, 9, 6, 0, 3, 0, 4, 0, 1, 0x12, 0x34],
+            &[21, 9, 6, 0, 3, 0, 4, 0, 1, 0x12, 0x34],
+            "record_number",
+            4,
+            12..14,
+        ),
+        (
+            &[22, 0, 4, 0, 0xf2, 0, 0x25],
+            &[22, 0, 4, 0, 0xf2, 0, 0x25],
+            "or_mask",
+            0x25,
+            12..14,
+        ),
+        (
+            &[23, 0, 3, 0, 2, 0, 7, 0, 1, 2, 0xfa, 0xce],
+            &[23, 4, 0, 12, 0, 13],
+            "register_u16",
+            12,
+            9..11,
+        ),
+        (
+            &[24, 4, 0xde],
+            &[24, 0, 6, 0, 2, 1, 2, 3, 4],
+            "fifo_count",
+            2,
+            10..12,
+        ),
+        (
+            &[43, 14, 4, 1],
+            &[43, 14, 4, 0x81, 0, 0, 1, 1, 2, b'A', b'B'],
+            "object_id",
+            1,
+            14..15,
+        ),
+    ];
+    for (req, rsp, name, value, range) in cases {
+        let request = root_message(&adu(req), Role::Request);
+        let response = root_message(&adu(rsp), Role::Response);
+        assert!(
+            pcap_evidence::modbus::response_matches(&request, &response),
+            "{req:?}"
+        );
+        let report = modbus::decode(&response.raw, Role::Response, Limits::default()).unwrap();
+        assert!(report
+            .records()
+            .iter()
+            .flat_map(|r| r.fields())
+            .any(|f| f.name() == *name
+                && f.value() == &Value::Unsigned(*value)
+                && &f.range() == range));
+        let exception = root_message(&adu(&[req[0] | 0x80, 2]), Role::Response);
+        assert!(pcap_evidence::modbus::response_matches(
+            &request, &exception
+        ));
+        for (data, role) in [(*req, Role::Request), (*rsp, Role::Response)] {
+            for end in 0..data.len() {
+                let partial = adu(&data[..end]);
+                assert_ne!(
+                    modbus::decode(&partial, role, Limits::default())
+                        .unwrap()
+                        .status(),
+                    Status::DecodedSubset
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn modbus_extended_boundaries() {
+    let valid = |bytes: &[u8], role| {
+        modbus::decode(&adu(bytes), role, Limits::default())
+            .unwrap()
+            .status()
+            == Status::DecodedSubset
+    };
+    for (count, ok) in [(0, true), (31, true), (32, false)] {
+        let mut p = vec![24, 0, 2 + count * 2, 0, count];
+        p.resize(5 + 2 * count as usize, 0);
+        assert_eq!(valid(&p, Role::Response), ok);
+    }
+    for (count, ok) in [(1, true), (121, true), (122, false)] {
+        let mut p = vec![23, 0, 1, 0, 125, 0, 0, 0, count, 2 * count];
+        p.resize(10 + 2 * usize::from(count), 0);
+        assert_eq!(valid(&p, Role::Request), ok);
+    }
+    assert!(valid(&[20, 7, 6, 0, 1, 0x27, 0x0f, 0, 1], Role::Request));
+    assert!(!valid(&[20, 7, 6, 0, 1, 0x27, 0x0f, 0, 2], Role::Request));
+    assert!(!valid(&[20, 7, 6, 0, 1, 0, 0, 0, 125], Role::Request));
+    assert!(!valid(&[21, 9, 6, 0, 0, 0, 4, 0, 1, 1, 2], Role::Request));
+    assert!(!valid(
+        &[43, 14, 4, 0x81, 255, 2, 1, 1, 1, 65],
+        Role::Response
+    ));
+    assert!(!valid(
+        &[43, 14, 1, 1, 0, 0, 2, 1, 1, 65, 1, 1, 66],
+        Role::Response
+    ));
+    assert_eq!(
+        modbus::decode(&adu(&[43, 13, 0]), Role::Request, Limits::default())
+            .unwrap()
+            .status(),
+        Status::Unsupported
+    );
+}
+
+#[test]
+fn modbus_rejects_disagreeing_extended_replies_but_allows_device_stream_restart() {
+    let paired = |req: &[u8], rsp: &[u8]| {
+        let req = root_message(&adu(req), Role::Request);
+        let rsp = root_message(&adu(rsp), Role::Response);
+        assert!(req.shape_valid && rsp.shape_valid);
+        pcap_evidence::modbus::response_matches(&req, &rsp)
+    };
+    assert!(!paired(
+        &[20, 14, 6, 0, 1, 0, 3, 0, 2, 6, 0, 1, 0, 8, 0, 1],
+        &[20, 10, 3, 6, 0, 1, 5, 6, 0, 2, 0, 3]
+    ));
+    assert!(!paired(
+        &[21, 9, 6, 0, 1, 0, 3, 0, 1, 0, 10],
+        &[21, 9, 6, 0, 1, 0, 3, 0, 1, 0, 11]
+    ));
+    assert!(!paired(
+        &[22, 0, 5, 0, 255, 0, 0],
+        &[22, 0, 5, 0, 254, 0, 0]
+    ));
+    assert!(!paired(
+        &[23, 0, 1, 0, 2, 0, 2, 0, 1, 2, 0, 9],
+        &[23, 2, 0, 1]
+    ));
+    assert!(!paired(
+        &[43, 14, 4, 1],
+        &[43, 14, 4, 0x81, 0, 0, 1, 0, 1, 65]
+    ));
+    assert!(paired(&[43, 14, 1, 7], &[43, 14, 1, 1, 0, 0, 1, 0, 1, 65]));
+}

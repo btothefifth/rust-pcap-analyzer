@@ -10,28 +10,11 @@ fn num(name: &'static str, value: u64, start: usize, end: usize) -> Field {
 fn invalid(at: usize, code: &'static str) -> crate::Error {
     fail(ErrorCode::InvalidLength, at, code)
 }
-fn quantity(b: &[u8], max: u64) -> Result<(u64, u64)> {
-    need(b, 8, 4, "modbus_address_quantity_truncated")?;
-    let first = uint(b, 8, 2, false);
-    let count = uint(b, 10, 2, false);
-    if count == 0 || count > max || first + count > 65_536 {
-        return Err(invalid(8, "modbus_address_quantity_range"));
-    }
-    Ok((first, count))
-}
-fn exact(b: &[u8], expected: usize) -> Result<()> {
-    if b.len() != expected {
-        Err(invalid(0, "modbus_pdu_shape"))
-    } else {
-        Ok(())
-    }
-}
-fn address_fields(b: &[u8], max: u64) -> Result<Vec<Field>> {
-    let (first, count) = quantity(b, max)?;
-    Ok(vec![
-        num("starting_address_zero_based", first, 8, 10),
-        num("quantity", count, 10, 12),
-    ])
+fn address_fields(first: u16, count: u16) -> Vec<Field> {
+    vec![
+        num("starting_address_zero_based", first.into(), 8, 10),
+        num("quantity", count.into(), 10, 12),
+    ]
 }
 fn registers(
     out: &mut Report<'_>,
@@ -90,42 +73,29 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
             "modbus_role_not_supplied",
         ));
     }
-    if !matches!(function & 0x7f, 1..=6 | 15 | 16) {
+    use crate::modbus::pdu::{self, Pdu};
+    if !pdu::supported(&b[7..]) {
         return Err(fail(
             ErrorCode::UnsupportedTransport,
             7,
             "modbus_function_outside_field_subset",
         ));
     }
-    if function & 0x80 != 0 {
-        exact(b, 9)?;
-        if role != Role::Response || !matches!(b[8], 1..=6 | 8 | 10 | 11) {
-            return Err(invalid(8, "modbus_exception_role_or_code"));
+    match pdu::parse(&b[7..], role)? {
+        Pdu::Exception(code) => {
+            out.add(Record::new(
+                "exception_response",
+                8..9,
+                vec![num("exception_code", code.into(), 8, 9)],
+            ))?;
+            out.advance(9);
         }
-        out.add(Record::new(
-            "exception_response",
-            8..9,
-            vec![num("exception_code", b[8].into(), 8, 9)],
-        ))?;
-        out.advance(9);
-        return Ok(());
-    }
-    match (function, role) {
-        (1..=4, Role::Request) => {
-            exact(b, 12)?;
-            let fields = address_fields(b, if function <= 2 { 2000 } else { 125 })?;
+        Pdu::Read { start, count } => {
+            let fields = address_fields(start, count);
             out.add(Record::new("read_request", 8..12, fields))?;
         }
-        (1..=4, Role::Response) => {
-            need(b, 8, 1, "modbus_byte_count_truncated")?;
-            let count = usize::from(b[8]);
-            if count == 0
-                || count > 250
-                || b.len() != 9 + count
-                || (function >= 3 && count % 2 != 0)
-            {
-                return Err(invalid(8, "modbus_read_response_byte_count"));
-            }
+        Pdu::ReadData(data) => {
+            let count = data.len();
             out.add(Record::new(
                 "read_response",
                 8..9,
@@ -151,12 +121,8 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
                 );
             }
         }
-        (5 | 6, _) => {
-            exact(b, 12)?;
+        Pdu::Single => {
             let value = uint(b, 10, 2, false);
-            if function == 5 && !matches!(value, 0 | 0xff00) {
-                return Err(invalid(10, "modbus_single_coil_encoding"));
-            }
             let mut fields = vec![
                 num("address_zero_based", uint(b, 8, 2, false), 8, 10),
                 num("wire_value", value, 10, 12),
@@ -178,27 +144,18 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
                 fields,
             ))?;
         }
-        (15 | 16, Role::Response) => {
-            exact(b, 12)?;
+        Pdu::WriteAck { start, count } => {
             out.add(Record::new(
                 "write_echo_response",
                 8..12,
-                address_fields(b, if function == 15 { 1968 } else { 123 })?,
+                address_fields(start, count),
             ))?;
         }
-        (15 | 16, Role::Request) => {
-            need(b, 8, 5, "modbus_write_header_truncated")?;
-            let (first, count) = quantity(b, if function == 15 { 1968 } else { 123 })?;
-            let count = count as usize;
-            let expected = if function == 15 {
-                count.div_ceil(8)
-            } else {
-                count * 2
-            };
-            if usize::from(b[12]) != expected || b.len() != 13 + expected {
-                return Err(invalid(12, "modbus_write_byte_count"));
-            }
-            let mut fields = address_fields(b, if function == 15 { 1968 } else { 123 })?;
+        Pdu::Multiple { start, count, data } => {
+            let mut fields = address_fields(start, count);
+            let first = u64::from(start);
+            let count = usize::from(count);
+            let expected = data.len();
             fields.push(num("byte_count", expected as u64, 12, 13));
             out.add(Record::new("write_multiple_request", 8..13, fields))?;
             out.advance(13);
@@ -238,11 +195,143 @@ fn decode_body(b: &[u8], role: Role, out: &mut Report<'_>) -> Result<()> {
                 }
             }
         }
-        _ => {
+        Pdu::Mask => {
+            out.add(Record::new(
+                "mask_write_register",
+                8..14,
+                vec![
+                    num("address_zero_based", uint(b, 8, 2, false), 8, 10),
+                    num("and_mask", uint(b, 10, 2, false), 10, 12),
+                    num("or_mask", uint(b, 12, 2, false), 12, 14),
+                ],
+            ))?;
+        }
+        Pdu::ReadWrite {
+            start,
+            count,
+            write_start,
+            write_count,
+            data,
+        } => {
+            out.add(Record::new(
+                "read_write_registers",
+                8..17,
+                vec![
+                    num("read_start_zero_based", start.into(), 8, 10),
+                    num("read_quantity", count.into(), 10, 12),
+                    num("write_start_zero_based", write_start.into(), 12, 14),
+                    num("write_quantity", write_count.into(), 14, 16),
+                    num("byte_count", data.len() as u64, 16, 17),
+                ],
+            ))?;
+            out.advance(17);
+            registers(
+                out,
+                b,
+                17,
+                usize::from(write_count),
+                Some(write_start.into()),
+                12..14,
+            )?;
+        }
+        Pdu::FifoRequest => out.add(Record::new(
+            "fifo_request",
+            8..10,
+            vec![num("fifo_pointer_address", uint(b, 8, 2, false), 8, 10)],
+        ))?,
+        Pdu::FifoData(data) => {
+            out.add(Record::new(
+                "fifo_response",
+                8..12,
+                vec![
+                    num("byte_count", (data.len() + 2) as u64, 8, 10),
+                    num("fifo_count", (data.len() / 2) as u64, 10, 12),
+                ],
+            ))?;
+            out.advance(12);
+            registers(out, b, 12, data.len() / 2, None, 0..0)?;
+        }
+        Pdu::Files(records) => {
+            out.add(Record::new(
+                "file_record_list",
+                8..9,
+                vec![num("byte_count", b[8].into(), 8, 9)],
+            ))?;
+            out.advance(9);
+            for record in records {
+                let at = 7 + record.offset;
+                let (width, fields) = match record.address {
+                    Some((file, index)) => (
+                        7,
+                        vec![
+                            num("reference_type", 6, at, at + 1),
+                            num("file_number", file.into(), at + 1, at + 3),
+                            num("record_number", index.into(), at + 3, at + 5),
+                            num("record_words", record.words.into(), at + 5, at + 7),
+                        ],
+                    ),
+                    None => (
+                        2,
+                        vec![
+                            num("response_length", b[at].into(), at, at + 1),
+                            num("reference_type", 6, at + 1, at + 2),
+                        ],
+                    ),
+                };
+                out.add(Record::new("file_record", at..at + width, fields))?;
+                out.advance(at + width);
+                registers(out, b, at + width, record.data.len() / 2, None, 0..0)?;
+            }
+        }
+        Pdu::DeviceRequest => out.add(Record::new(
+            "device_id_request",
+            8..11,
+            vec![
+                num("mei_type", 14, 8, 9),
+                num("read_category", b[9].into(), 9, 10),
+                num("object_id", b[10].into(), 10, 11),
+            ],
+        ))?,
+        Pdu::DevicePage(objects) => {
+            out.add(Record::new(
+                "device_id_page",
+                8..14,
+                vec![
+                    num("mei_type", 14, 8, 9),
+                    num("read_category", b[9].into(), 9, 10),
+                    num("conformity_level", b[10].into(), 10, 11),
+                    num("more_follows", b[11].into(), 11, 12),
+                    num("next_object_id", b[12].into(), 12, 13),
+                    num("object_count", b[13].into(), 13, 14),
+                ],
+            ))?;
+            out.advance(14);
+            for object in objects {
+                let at = 7 + object.offset;
+                let end = at + 2 + object.value.len();
+                let mut fields = vec![
+                    num("object_id", object.id.into(), at, at + 1),
+                    num("object_length", object.value.len() as u64, at + 1, at + 2),
+                ];
+                if !object.value.is_empty() {
+                    fields.push(Field::new(
+                        "object_value",
+                        Value::OctetsSha256 {
+                            length: object.value.len(),
+                            digest: crate::sha256::digest(object.value),
+                        },
+                        at + 2..end,
+                    ));
+                }
+                out.add(Record::new("device_id_object", at..end, fields))?;
+                out.advance(end);
+            }
+        }
+        Pdu::Opaque => {
             return Err(fail(
                 ErrorCode::UnsupportedTransport,
-                8,
-                "modbus_role_outside_subset",
+                7,
+                "modbus_function_outside_field_subset",
             ))
         }
     }
@@ -343,32 +432,7 @@ pub fn check_pair(
 
 /// Versioned correlation metadata emitted by the trusted streaming adapter. This
 /// preserves request count and response padding without retaining payload bytes.
-/// Other common-function compatibility tokens keep their existing equality rule.
+/// Legacy tokens remain accepted at the public plugin boundary.
 pub fn compatibility_matches(request: &str, response: &str) -> bool {
-    const PREFIX: &str = "modbus-bits-v1:";
-    if request.is_empty() || response.is_empty() {
-        return true;
-    } // Existing exception-response wildcard.
-    if !request.starts_with(PREFIX) && !response.starts_with(PREFIX) {
-        return request == response;
-    }
-    let Some(q) = request
-        .strip_prefix("modbus-bits-v1:quantity:")
-        .and_then(|n| n.parse::<u16>().ok())
-    else {
-        return false;
-    };
-    let Some(body) = response.strip_prefix("modbus-bits-v1:response:") else {
-        return false;
-    };
-    let Some((count, last)) = body.split_once(':') else {
-        return false;
-    };
-    let (Ok(count), Ok(last)) = (count.parse::<usize>(), last.parse::<u8>()) else {
-        return false;
-    };
-    if q == 0 || q > 2000 || count != usize::from(q).div_ceil(8) {
-        return false;
-    }
-    q % 8 == 0 || last & (0xffu8 << (q % 8)) == 0
+    crate::modbus::transaction::matches(request, response)
 }

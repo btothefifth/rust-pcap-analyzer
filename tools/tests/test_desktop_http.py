@@ -41,6 +41,23 @@ class HttpTests(unittest.TestCase):
             time.sleep(.02)
         self.assertEqual(data['state'],'complete');return job
     def test_missing_token_denied(self):self.assertEqual(self.request('/api/config',auth=False)[0],403)
+    def test_non_ascii_token_denied_and_valid_request_still_works(self):
+        status, data = self.request('/api/config', headers={'Authorization': 'Bearer \xff'})
+        self.assertEqual(status, 403)
+        self.assertEqual(data, {'error': 'session authorization required'})
+        self.assertEqual(self.request('/api/config')[0], 200)
+
+    def test_malformed_interpretation_returns_400_before_valid_import(self):
+        job = self.job()
+        valid = container_normalize(self.source)
+        malformed = copy.deepcopy(valid)
+        malformed['source'] = None
+        status, data = self.request('/api/research/import', dict(job=job, interpretation=malformed))
+        self.assertEqual(status, 400)
+        self.assertEqual(data, {'error': 'source identity required'})
+        status, data = self.request('/api/research/import', dict(job=job, interpretation=valid))
+        self.assertEqual(status, 200)
+        self.assertEqual(data['status'], 'IMPORTED_UNTRUSTED_INTERPRETATION')
     def test_wrong_host_denied(self):self.assertEqual(self.request('/api/config',headers={'Host':'attacker.invalid'})[0],403)
     def test_cross_origin_denied(self):self.assertEqual(self.request('/api/config',headers={'Origin':'https://attacker.invalid'})[0],403)
     def test_local_config(self):status,v=self.request('/api/config');self.assertEqual(status,200);self.assertFalse(v['engine_available'])

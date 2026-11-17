@@ -57,3 +57,28 @@ fn snapshot_semantic_extension_output_is_deterministic() {
     let c = engine::analyze(&b, Config::default()).unwrap();
     assert_eq!(report::analysis(&a, false), report::analysis(&c, false));
 }
+
+#[test]
+fn modbus_read_mapping_retains_conditional_boundary_and_both_witnesses() {
+    let full = capture("modbus_bits_valid.pcap");
+    // Omit the three handshake records and restore capture order by sequence
+    // for the two response fragments, so midstream alignment is observable.
+    let mut mid = [&full[..24], &full[234..316], &full[392..], &full[316..392]].concat();
+    // Keep the original monotonic record timestamps after the permutation.
+    mid[106..114].copy_from_slice(&full[316..324]);
+    mid[181..189].copy_from_slice(&full[392..400]);
+    for (bytes, status) in [
+        (&full, "candidate_pair"),
+        (&mid, "candidate_unverified_boundary"),
+    ] {
+        let analysis = engine::analyze(bytes, Config::default()).unwrap();
+        assert!(
+            analysis.transactions.iter().any(|t| t.status == status),
+            "{status}"
+        );
+        let json = report::analysis(&analysis, false).encode();
+        assert!(json.contains(&format!("\"read_mapping\":{{\"status\":\"{status}\"")));
+        assert!(json.contains("\"quantity\":9"));
+        assert!(json.contains("\"padding_checked\":true"));
+    }
+}

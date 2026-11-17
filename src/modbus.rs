@@ -1,9 +1,12 @@
 //! Modbus/TCP MBAP framing with bounded common-function validation.
 //! Roles are explicit configuration, not guesses based on TCP initiator.
+pub(crate) mod pdu;
+pub(crate) mod transaction;
 use crate::dnp3::ProtocolIssue;
 use crate::provenance::EvidenceBytes;
 use crate::tcp::StreamResult;
 use crate::{Error, ErrorCode, Limits, Result};
+pub use transaction::{correlation_token, mismatch_fields, pair_projection};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -40,57 +43,12 @@ pub struct ModbusResult {
 fn be16(b: &[u8]) -> u16 {
     u16::from_be_bytes([b[0], b[1]])
 }
-fn quantity(pdu: &[u8], max: u16) -> bool {
-    if pdu.len() < 5 {
-        return false;
-    }
-    let start = u32::from(be16(&pdu[1..3]));
-    let count = be16(&pdu[3..5]);
-    (1..=max).contains(&count) && start + u32::from(count) <= 65_536
-}
-
-fn pdu_shape(pdu: &[u8], role: Role) -> bool {
-    let Some(&f) = pdu.first() else {
-        return false;
-    };
-    if f & 0x7f == 0 {
-        return false;
-    }
-    if role == Role::Unknown {
-        return pdu_shape(pdu, Role::Request) || pdu_shape(pdu, Role::Response);
-    }
-    if f & 0x80 != 0 {
-        return role == Role::Response && pdu.len() == 2 && matches!(pdu[1], 1..=6 | 8 | 10 | 11);
-    }
-    match (f, role) {
-        (1 | 2, Role::Request) => pdu.len() == 5 && quantity(pdu, 2000),
-        (3 | 4, Role::Request) => pdu.len() == 5 && quantity(pdu, 125),
-        (1 | 2, Role::Response) => {
-            pdu.len() >= 3 && pdu[1] <= 250 && usize::from(pdu[1]) == pdu.len() - 2
-        }
-        (3 | 4, Role::Response) => {
-            pdu.len() >= 4
-                && pdu[1] <= 250
-                && pdu[1] % 2 == 0
-                && usize::from(pdu[1]) == pdu.len() - 2
-        }
-        (5, _) => pdu.len() == 5 && matches!(be16(&pdu[3..5]), 0x0000 | 0xff00),
-        (6, _) => pdu.len() == 5,
-        (15, Role::Request) => {
-            pdu.len() >= 7
-                && quantity(pdu, 1968)
-                && usize::from(pdu[5]) == usize::from(be16(&pdu[3..5])).div_ceil(8)
-                && usize::from(pdu[5]) == pdu.len() - 6
-        }
-        (16, Role::Request) => {
-            pdu.len() >= 8
-                && quantity(pdu, 123)
-                && usize::from(pdu[5]) == 2 * usize::from(be16(&pdu[3..5]))
-                && usize::from(pdu[5]) == pdu.len() - 6
-        }
-        (15, Role::Response) => pdu.len() == 5 && quantity(pdu, 1968),
-        (16, Role::Response) => pdu.len() == 5 && quantity(pdu, 123),
-        _ => true, // Framed unknown functions stay opaque and are not paired.
+fn pdu_shape(bytes: &[u8], role: Role) -> bool {
+    match role {
+        Role::Unknown => [Role::Request, Role::Response]
+            .into_iter()
+            .any(|r| pdu::parse(bytes, r).is_ok()),
+        _ => pdu::parse(bytes, role).is_ok(),
     }
 }
 fn capacity(out: &ModbusResult, additions: usize, limits: &Limits) -> Result<()> {
@@ -187,7 +145,7 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
                 break;
             }
             let valid = pdu_shape(&bytes[7..total], role);
-            let supported = matches!(bytes[7] & 0x7f, 1..=6 | 15 | 16) && role != Role::Unknown;
+            let supported = pdu::supported(&bytes[7..total]) && role != Role::Unknown;
             capacity(
                 &out,
                 1 + usize::from(!supported) + usize::from(!valid),
@@ -227,7 +185,7 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
 /// causality. Requires valid framed messages; unknown functions return false.
 /// Identifier reuse, capture ordering, and device semantics remain caller-owned.
 pub fn response_matches(request: &ModbusMessage, response: &ModbusMessage) -> bool {
-    if !matches!(request.function, 1..=6 | 15 | 16)
+    if !pdu::supported(request.raw.data().get(7..).unwrap_or_default())
         || !request.raw.validate()
         || !response.raw.validate()
         || request.role != Role::Request
@@ -256,27 +214,11 @@ pub fn response_matches(request: &ModbusMessage, response: &ModbusMessage) -> bo
     }
     let req = request.raw.data();
     let rsp = response.raw.data();
-    // The fields are public, so do not trust shape_valid as a bounds check.
-    if req.len() < 8 || rsp.len() < 8 {
-        return false;
-    }
-    if !pdu_shape(&req[7..], Role::Request) || !pdu_shape(&rsp[7..], Role::Response) {
-        return false;
-    }
-    if response.function & 0x80 != 0 {
-        return true;
-    }
-    match request.function {
-        1 | 2 if req.len() == 12 && rsp.len() >= 9 => {
-            // The request supplies the meaningful bit count. Unused high-order
-            // response bits must be zero (Modbus V1.1b3 sections 6.1 and 6.2).
-            usize::from(rsp[8]) == usize::from(be16(&req[10..12])).div_ceil(8)
-                && crate::semantics::modbus::padding_is_zero(be16(&req[10..12]), &rsp[9..])
-        }
-        3 | 4 if req.len() == 12 && rsp.len() >= 9 => {
-            usize::from(rsp[8]) == 2 * usize::from(be16(&req[10..12]))
-        }
-        5 | 6 | 15 | 16 if req.len() >= 12 && rsp.len() == 12 => req[8..12] == rsp[8..12],
+    match (
+        transaction::Summary::parse(&req[7..], Role::Request),
+        transaction::Summary::parse(&rsp[7..], Role::Response),
+    ) {
+        (Some(a), Some(b)) => a.agrees(&b),
         _ => false,
     }
 }

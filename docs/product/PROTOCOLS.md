@@ -70,7 +70,7 @@ deeper observer is documented in
 [DEPTH_CONTRACT.md](DEPTH_CONTRACT.md) and is opt-in; it does not upgrade these
 rows to full protocol support.
 
-The inherited engine provides its own DNP3/Modbus and IT/network capabilities under its existing contracts; this matrix does not relabel or replace them.
+The inherited engine provides the [Modbus/TCP profile](NEXT_PARSER_SLICE.md), DNP3 and IT/network decoding.
 
 The current DNP3 semantic subset covers CRC-validated framing, transport and
 application evidence plus direction/PRM/FCB/FCV/DFC link-control fields,
