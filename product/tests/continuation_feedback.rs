@@ -743,11 +743,16 @@ fn modbus_many_packet_spans_survive_batch_and_byte_feeds() {
         }
         let mut expected = None;
         for pass in ["first", "repeat"] {
-            for stride in [wire.len(), 1] {
+            for (stride, input_bytes) in [
+                (wire.len(), 2048),
+                (wire.len(), adu.len() + 1),
+                (wire.len(), adu.len()),
+                (1, 2048),
+            ] {
                 let mut parser = Parser::new(
                     "modbus",
                     Limits {
-                        input_bytes: 2048,
+                        input_bytes,
                         elements: 128,
                         spans: 2048,
                         output_bytes: 65536,
@@ -786,7 +791,7 @@ fn modbus_many_packet_spans_survive_batch_and_byte_feeds() {
                 } else {
                     expected = Some(hashes)
                 }
-                eprintln!("pass={pass} count={count} stride={stride} emitted_spans={emitted_spans} elapsed_us={}",started.elapsed().as_micros());
+                eprintln!("pass={pass} count={count} stride={stride} input_bytes={input_bytes} emitted_spans={emitted_spans} elapsed_us={}",started.elapsed().as_micros());
             }
         }
     }

@@ -116,6 +116,19 @@ pub fn tcp(
     segment[16..18].copy_from_slice(&sum.to_be_bytes());
     ethernet(&ipv4(source, destination, 6, &segment))
 }
+pub fn ipv4_fragment(frame: &[u8], range: std::ops::Range<usize>, more: bool) -> Vec<u8> {
+    assert_eq!(range.start % 8, 0);
+    let mut header = frame[..34].to_vec();
+    let length = u16::try_from(20 + range.len()).unwrap();
+    header[16..18].copy_from_slice(&length.to_be_bytes());
+    let flags_offset = (u16::from(more) << 13) | (range.start / 8) as u16;
+    header[20..22].copy_from_slice(&flags_offset.to_be_bytes());
+    header[24..26].fill(0);
+    let sum = checksum(&header[14..34]);
+    header[24..26].copy_from_slice(&sum.to_be_bytes());
+    header.extend_from_slice(&frame[34 + range.start..34 + range.end]);
+    header
+}
 pub fn tunneled(kind: &str, identity: u32, reverse: bool, inner: &[u8]) -> Vec<u8> {
     let (source, destination) = if reverse {
         ([192, 0, 2, 2], [192, 0, 2, 1])

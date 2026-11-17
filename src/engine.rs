@@ -6,7 +6,7 @@ use crate::fragment::{FragmentNotice, FragmentOutcome, FragmentReassembler};
 use crate::modbus::{self, ModbusResult, Role};
 use crate::provenance::PacketId;
 use crate::sha256;
-use crate::tcp::{Assignment, FlowResult, OverlapPolicy, TcpTracker};
+use crate::tcp::{Assignment, FlowResult, HeaderDisposition, OverlapPolicy, TcpTracker};
 use crate::wire::{self, Checksum, ChecksumPolicy, Endpoint, Scope, Transport};
 use crate::{Error, ErrorCode, Limits, Result};
 
@@ -286,7 +286,13 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     if let Some((scope, segment)) =
                         wire::snapped_tcp(metadata.link_type, data, id, scope)
                     {
-                        tracker.observe_snapped(scope, id, time, &segment)?;
+                        tracker.observe_header(
+                            scope,
+                            id,
+                            time,
+                            segment,
+                            HeaderDisposition::Omitted,
+                        )?;
                     }
                 }
                 packets[at].disposition = Disposition::Rejected {
@@ -307,6 +313,17 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                 detail: "IPv4 checksum rejected by configured policy".into(),
             };
             continue;
+        }
+        if network.fragment.as_ref().is_some_and(|f| f.offset == 0) {
+            if let Some(header) = wire::tcp_loss_header(&network) {
+                tracker.observe_header(
+                    network.scope.clone(),
+                    id,
+                    time,
+                    header,
+                    HeaderDisposition::AwaitingReassembly,
+                )?;
+            }
         }
         let (datagram, mut contributors) = match fragments.push(network, metadata.frame)? {
             FragmentOutcome::Pending => {

@@ -9,7 +9,9 @@ frame, `modbus::decode` for a stream, and `correlate::transactions` or
 `engine::analyze` to finalize candidate pairs. `ModbusResult::default()` creates
 an empty result. Exhaustive `ApplicationData` matches must handle
 `ModbusFailed { capture, error }`. Read TCP generation results from
-`TcpTracker::finish`; they now include the first uncertain payload witness.
+`TcpTracker::finish`; they now include the first uncertain payload witness. `wire::Datagram`
+carries `declared_payload_len`, the IP payload length after decoded extensions.
+For a complete datagram constructed by a caller, use the payload's byte length.
 
 The root crate is consumed through path dependencies within this repository and is unpublished.
 The change affects Rust source compatibility. Captures, the v1 semantic report

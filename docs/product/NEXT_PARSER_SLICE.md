@@ -102,8 +102,10 @@ allocation totals and representative capture throughput remain unmeasured.
 
 A second fixture gives every byte a different packet ID. The same 16, 32 and
 64 ADUs emitted 224, 448 and 896 source spans in both coalesced and one-byte
-feeds. The frame slicer carries the next span index through a batch. Tests
-compare each packet offset and the serialized report hashes across segmentations.
+feeds. Both the input slicer and the frame slicer carry the next span index.
+The sequential operation checks that index directly. The 14- and 15-byte
+buffer tests force multiple internal batches and check the same report hashes
+and contributing packet offsets as a single batch.
 Coalesced first runs took 17, 31 and 61 ms, and repeated runs in the same
 process took 16, 32 and 61 ms on the same debug build. These timings include
 report hashing and serialization.

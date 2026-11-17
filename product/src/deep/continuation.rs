@@ -170,6 +170,7 @@ impl Parser {
             return Err(bad("continuation_provenance", 0, "invalid input"));
         }
         let mut p = 0;
+        let mut input_span = 0;
         let mut messages = 0;
         while p < bytes.len() {
             let room = self
@@ -180,7 +181,7 @@ impl Parser {
                 return Err(Error::limit("application_buffer"));
             }
             let n = room.min(bytes.len() - p);
-            let chunk = bytes.slice(p..p + n)?;
+            let chunk = bytes.slice_sequential(p..p + n, &mut input_span)?;
             self.buffer.push(
                 offset
                     .checked_add(p as i64)
@@ -212,7 +213,7 @@ impl Parser {
             let raw = self
                 .buffer
                 .bytes()
-                .slice_from(*consumed..end, &mut span_cursor)?;
+                .slice_sequential(*consumed..end, &mut span_cursor)?;
             *consumed = end;
             self.last_frame = self.last_frame.max(
                 raw.spans()

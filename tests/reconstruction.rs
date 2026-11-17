@@ -266,6 +266,7 @@ fn fragment(start: usize, more: bool, data: &[u8], frame: u64, ipv6: bool) -> Da
         protocol: 17,
         ipv6,
         network_header_len: if ipv6 { 48 } else { 20 },
+        declared_payload_len: data.len(),
         fragment: Some(FragmentInfo {
             id: 7,
             offset: start,

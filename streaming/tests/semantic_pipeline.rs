@@ -504,3 +504,158 @@ fn snapped_headers_follow_their_tunnel_and_later_tcp_generation() {
         }
     }
 }
+
+#[test]
+fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
+    use tiny_capture::{capture, tcp};
+    let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let exchange = |seq, peer| {
+        vec![
+            tcp(false, seq, 0, 2, &[]),
+            tcp(true, peer, seq + 1, 0x12, &[]),
+            tcp(false, seq + 1, peer + 1, 0x18, &request),
+            tcp(true, peer + 1, seq + 13, 0x18, &response),
+        ]
+    };
+    let mut config = StreamConfig::default();
+    config.base.modbus_ports = vec![2000];
+    config.window_payload = 32;
+    for (case, expected) in [
+        ("control", 2),
+        ("future", 1),
+        ("tcp-options", 1),
+        ("ack-options", 2),
+        ("first-fragment", 1),
+        ("noninitial-fragment", 2),
+        ("incomplete-reassembly", 1),
+        ("oversized", 1),
+    ] {
+        let mut frames = exchange(1000, 5000);
+        let index = frames.len();
+        let start = 1_000_000_000;
+        let peer = 2_000_000_000;
+        let mut tail = tcp(false, 1013, 5012, 0x18, &request);
+        let mut snapped_length = None;
+        match case {
+            "incomplete-reassembly" => tail = tiny_capture::ipv4_fragment(&tail, 0..24, true),
+            "future" => tail = tcp(false, start + 13, peer + 12, 0x18, &request),
+            "oversized" => tail = tcp(false, 1013, 5012, 0x18, &request.repeat(3)),
+            "tcp-options" | "ack-options" | "first-fragment" | "noninitial-fragment" => {
+                if case.ends_with("options") {
+                    if case == "ack-options" {
+                        tail = tcp(false, 1013, 5012, 0x10, &[]);
+                    }
+                    tail[46] = 0x60;
+                    tail.splice(54..54, [1; 4]);
+                } else {
+                    tail.truncate(58);
+                    let bits = if case == "first-fragment" {
+                        0x2000u16
+                    } else {
+                        3
+                    };
+                    tail[20..22].copy_from_slice(&bits.to_be_bytes());
+                }
+                let total = (tail.len() - 14) as u16;
+                tail[16..18].copy_from_slice(&total.to_be_bytes());
+                tail[24..26].fill(0);
+                let sum = pcap_evidence::wire::internet_checksum(&tail[14..34]);
+                tail[24..26].copy_from_slice(&sum.to_be_bytes());
+                snapped_length = Some(tail.len() as u32);
+                tail.truncate(54);
+            }
+            _ => {}
+        }
+        if case != "control" {
+            frames.push(tail);
+        }
+        frames.extend(exchange(start, peer));
+        let mut raw = capture(&frames);
+        if let Some(original) = snapped_length {
+            let record = 24 + frames[..index].iter().map(|f| f.len() + 16).sum::<usize>();
+            raw[record + 12..record + 16].copy_from_slice(&original.to_le_bytes());
+        }
+        // Keep each exchange in one window. Only the deliberate oversized
+        // segment exceeds it; the successor starts a fresh window as needed.
+        let mut limits = config.clone();
+        if case != "oversized" {
+            limits.window_payload = 4096;
+        }
+        let snapshot = pcap_evidence::engine::analyze(&raw, limits.base.clone()).unwrap();
+        assert_eq!(
+            pcap_evidence::report::analysis(&snapshot, false)
+                .encode()
+                .matches("read_mapping")
+                .count(),
+            expected,
+            "snapshot {case}"
+        );
+        let events = run(&raw, limits).events;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.data.encode().contains("read_mapping"))
+                .count(),
+            expected,
+            "stream {case}"
+        );
+    }
+}
+
+#[test]
+fn successfully_reassembled_tcp_releases_its_provisional_header() {
+    use tiny_capture::{capture, ipv4_fragment, tcp, tunneled};
+    let request = tcp(false, 101, 501, 0x18, &[0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1]);
+    let response = tcp(
+        true,
+        501,
+        113,
+        0x18,
+        &[0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34],
+    );
+    let mut config = StreamConfig::default();
+    config.base.modbus_ports = vec![2000];
+    for tunnel in [false, true] {
+        let wrap = |p: Vec<u8>, reverse| {
+            if tunnel {
+                tunneled("gre", 7, reverse, &p)
+            } else {
+                p
+            }
+        };
+        let req = wrap(request.clone(), false);
+        let length = req.len() - 34;
+        let start = if tunnel { 48 } else { 24 };
+        let first = ipv4_fragment(&req, 0..start, true);
+        let last = ipv4_fragment(&req, start..length, false);
+        for fragments in [[first.clone(), last.clone()], [last.clone(), first.clone()]] {
+            let bytes = capture(&[
+                wrap(tcp(false, 100, 0, 2, &[]), false),
+                wrap(tcp(true, 500, 101, 0x12, &[]), true),
+                fragments[0].clone(),
+                fragments[1].clone(),
+                wrap(response.clone(), true),
+            ]);
+            if !tunnel {
+                let analysis = pcap_evidence::engine::analyze(&bytes, config.base.clone()).unwrap();
+                assert!(analysis.flows[0].uncertain_payload.is_none());
+                assert_eq!(
+                    pcap_evidence::report::analysis(&analysis, false)
+                        .encode()
+                        .matches("read_mapping")
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(
+                run(&bytes, config.clone())
+                    .events
+                    .iter()
+                    .filter(|e| e.data.encode().contains("read_mapping"))
+                    .count(),
+                1
+            );
+        }
+    }
+}

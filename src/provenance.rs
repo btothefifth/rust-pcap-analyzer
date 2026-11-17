@@ -73,9 +73,22 @@ impl EvidenceBytes {
         self.slice_from(range, &mut 0)
     }
 
-    /// Slice in stream order with a reusable span index. A random seek or a
-    /// cursor from a different buffer falls back to a binary search.
+    /// Use the supplied span index when it covers the requested start;
+    /// otherwise locate that start by binary search.
     pub fn slice_from(&self, range: Range<usize>, cursor: &mut usize) -> Result<Self> {
+        if !self
+            .spans
+            .get(*cursor)
+            .is_some_and(|s| s.start <= range.start && range.start < s.end)
+        {
+            *cursor = self.spans.partition_point(|s| s.end <= range.start);
+        }
+        self.slice_sequential(range, cursor)
+    }
+
+    /// Read consecutive slices with an index initially set to zero. A stale
+    /// index is an error, so a sequential consumer never searches past input.
+    pub fn slice_sequential(&self, range: Range<usize>, cursor: &mut usize) -> Result<Self> {
         if !self.layout_valid {
             return Err(invalid("invalid source-span layout"));
         }
@@ -87,18 +100,16 @@ impl EvidenceBytes {
                 "slice outside retained evidence",
             ));
         }
-        // Spans are contiguous and sorted by construction. Do not walk unrelated
-        // prefix spans for every small protocol field extracted from a stream.
-        let first = if self
-            .spans
-            .get(*cursor)
-            .is_some_and(|span| span.start <= range.start && range.start < span.end)
+        let first = *cursor;
+        if first > self.spans.len()
+            || (!range.is_empty()
+                && !self
+                    .spans
+                    .get(first)
+                    .is_some_and(|span| span.start <= range.start && range.start < span.end))
         {
-            *cursor
-        } else {
-            self.spans.partition_point(|span| span.end <= range.start)
-        };
-        *cursor = first;
+            return Err(invalid("span cursor does not cover requested range"));
+        }
         let mut spans = Vec::new();
         for s in self.spans[first..]
             .iter()

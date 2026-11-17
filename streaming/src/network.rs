@@ -334,6 +334,10 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
         return Err(malformed("ipv6_fragment", "nested fragment header"));
     }
     d.protocol = next;
+    d.declared_payload_len = d
+        .declared_payload_len
+        .checked_sub(p)
+        .ok_or_else(|| malformed("network", "extension exceeds declared IP length"))?;
     d.payload = d.payload.slice(p..d.payload.len())?;
     d.network_header_len = d
         .network_header_len
@@ -586,32 +590,43 @@ pub(crate) fn snapped_tcp(
     raw: &EvidenceBytes,
     scope: Scope,
     max_depth: usize,
-) -> Option<(Scope, Vec<String>, wire::TcpSegment)> {
-    let mut current = decode_extent(link, raw, scope, true).ok()?;
-    let mut path = Vec::new();
+) -> Option<(Scope, Vec<String>, wire::TcpHeader)> {
+    let Decoded::Ip(datagram, context) = decode_extent(link, raw, scope, true).ok()? else {
+        return None;
+    };
+    tcp_prefix_path(&datagram, context, max_depth)
+}
+
+pub(crate) fn tcp_prefix_path(
+    first: &Datagram,
+    mut path: Vec<String>,
+    max_depth: usize,
+) -> Option<(Scope, Vec<String>, wire::TcpHeader)> {
+    let mut next;
+    let mut datagram = first;
     for depth in 0..=max_depth {
-        let Decoded::Ip(datagram, context) = current else {
-            return None;
-        };
-        if datagram.fragment.is_some() {
+        if let Some(header) = wire::tcp_loss_header(datagram) {
+            return Some((datagram.scope.clone(), path, header));
+        }
+        if datagram.fragment.as_ref().is_some_and(|f| f.offset != 0) {
             return None;
         }
-        path.extend(context);
-        let datagram = normalize(datagram).ok()?;
-        if datagram.protocol == 6 {
-            let wire::Transport::Tcp(segment) =
-                wire::decode_transport(&datagram, wire::ChecksumPolicy::Observe).ok()?
-            else {
-                return None;
-            };
-            return Some((datagram.scope, path, segment));
-        }
+        // The captured start of an outer fragment can identify a tunnel.
+        // This is a header walk only; no fragment bytes enter reassembly.
         if depth == max_depth {
             return None;
         }
-        let (inner, hop) = peel_extent(&datagram, true).ok()??;
+        let mut outer = datagram.clone();
+        outer.fragment = None;
+        let outer = normalize(outer).ok()?;
+        let (inner, hop) = peel_extent(&outer, true).ok()??;
+        let Decoded::Ip(inner, context) = inner else {
+            return None;
+        };
         path.push(hop);
-        current = inner;
+        path.extend(context);
+        next = inner;
+        datagram = &next;
     }
     None
 }

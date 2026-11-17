@@ -1,7 +1,7 @@
 //! Offline TCP generations and sequence-space reconstruction. These policies are
 //! explicit interpretations; none claims to emulate every endpoint OS TCP stack.
 use crate::provenance::{EvidenceBytes, PacketId};
-use crate::wire::{Endpoint, Scope, TcpSegment};
+use crate::wire::{Endpoint, Scope, TcpHeader, TcpSegment};
 use crate::{Error, ErrorCode, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -355,7 +355,7 @@ pub struct FlowResult {
     pub streams: [Option<StreamResult>; 2],
     pub reconstruction_errors: Vec<Error>,
     pub anomalies: Vec<&'static str>,
-    /// First unassigned or snapped data packet compatible with this generation.
+    /// Earliest observed packet that could carry unretained data for this generation.
     pub uncertain_payload: Option<PacketId>,
 }
 impl FlowResult {
@@ -393,7 +393,15 @@ impl Flow {
     }
 }
 
-struct SnappedHeader {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum HeaderDisposition {
+    AwaitingReassembly,
+    Omitted,
+}
+
+struct UnretainedHeader {
+    disposition: HeaderDisposition,
+    existing: Vec<usize>,
     packet: PacketId,
     time: Option<i128>,
     direction: usize,
@@ -402,7 +410,7 @@ struct SnappedHeader {
     // Generations below this ID were already considered at packet admission.
     first_future_id: usize,
 }
-impl SnappedHeader {
+impl UnretainedHeader {
     fn matches(&self, flow: &Flow, max_span: i64) -> bool {
         flow.packets
             .first()
@@ -411,9 +419,9 @@ impl SnappedHeader {
     }
 }
 pub struct TcpTracker {
-    snapped: BTreeMap<FlowKey, Vec<SnappedHeader>>,
-    snap_count: usize,
-    remaining_snap_checks: usize,
+    unretained: BTreeMap<FlowKey, BTreeMap<PacketId, UnretainedHeader>>,
+    loss_count: usize,
+    remaining_loss_checks: usize,
     keys: BTreeMap<FlowKey, Vec<usize>>,
     flows: Vec<Flow>,
     retained: usize,
@@ -434,9 +442,9 @@ impl TcpTracker {
         Ok(Self {
             keys: BTreeMap::new(),
             flows: Vec::new(),
-            snapped: BTreeMap::new(),
-            snap_count: 0,
-            remaining_snap_checks: limits.max_correlation_checks,
+            unretained: BTreeMap::new(),
+            loss_count: 0,
+            remaining_loss_checks: limits.max_correlation_checks,
             retained: 0,
             limits,
             idle_ns,
@@ -504,71 +512,72 @@ impl TcpTracker {
             _ => false,
         }
     }
-    /// Retain only the captured TCP identifiers until the window's generation
-    /// anchors are known. A snapped packet never supplies reconstructed bytes.
-    pub fn observe_snapped(
+    /// Keep header evidence until the owning generation is known. Reassembled
+    /// segments release their provisional headers only after successful admission.
+    pub fn observe_header(
         &mut self,
         scope: Scope,
         packet: PacketId,
         when: Option<i128>,
-        segment: &TcpSegment,
+        segment: TcpHeader,
+        disposition: HeaderDisposition,
     ) -> Result<()> {
-        if self.snap_count >= self.limits.max_records {
-            return Err(Error::limit("snapped_tcp_headers"));
-        }
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
-        if !self.snapped.contains_key(&key) && self.snapped.len() >= self.limits.max_flows {
-            return Err(Error::limit("snapped_tcp_keys"));
+        if let Some(previous) = self
+            .unretained
+            .get_mut(&key)
+            .and_then(|set| set.get_mut(&packet))
+        {
+            if disposition == HeaderDisposition::Omitted {
+                previous.disposition = disposition;
+            }
+            return Ok(());
         }
-        let header = SnappedHeader {
+        if self.loss_count >= self.limits.max_records {
+            return Err(Error::limit("unretained_tcp_headers"));
+        }
+        if !self.unretained.contains_key(&key) && self.unretained.len() >= self.limits.max_flows {
+            return Err(Error::limit("unretained_tcp_keys"));
+        }
+        let mut header = UnretainedHeader {
             packet,
             time: when,
             direction,
-            sequence: segment.data_sequence(),
-            ack: segment.ack().then_some(segment.acknowledgement),
+            sequence: segment
+                .sequence
+                .wrapping_add(u32::from(segment.flags & 2 != 0)),
+            ack: (segment.flags & 0x10 != 0).then_some(segment.acknowledgement),
             first_future_id: self.flows.len(),
+            existing: Vec::new(),
+            disposition,
         };
         let max_span = self.limits.max_stream_span as i64;
         let ids = self.keys.get(&key).map_or(&[][..], Vec::as_slice);
-        self.remaining_snap_checks = self
-            .remaining_snap_checks
+        self.remaining_loss_checks = self
+            .remaining_loss_checks
             .checked_sub(ids.len())
-            .ok_or_else(|| Error::limit("snapped_tcp_generation_checks"))?;
-        let mut compatible = Vec::new();
+            .ok_or_else(|| Error::limit("unretained_tcp_generation_checks"))?;
         let mut open = false;
         for &id in ids {
             let flow = &self.flows[id];
             if self.active_at(flow, when) && header.matches(flow, max_span) {
-                compatible.push(id);
+                header.existing.push(id);
                 open |= !flow.closed;
             }
         }
-        let headers = self.snapped.entry(key).or_default();
+        let headers = self.unretained.entry(key).or_default();
         if headers.len() >= self.limits.max_segments_per_flow {
-            return Err(Error::limit("snapped_tcp_headers"));
+            return Err(Error::limit("unretained_tcp_headers"));
         }
-        if open {
-            // With only closed candidates a late data packet is unassigned.
-            // An open competitor makes all compatible generations ambiguous.
-            for id in compatible {
-                self.flows[id].note_uncertain(packet);
-            }
+        // A late data packet with only closed candidates is unassigned.
+        if !open {
+            header.existing.clear();
         }
-        headers.push(header);
-        self.snap_count += 1;
+        headers.insert(packet, header);
+        self.loss_count += 1;
         Ok(())
     }
 
-    fn ambiguous(&mut self, ids: Vec<usize>, segment: &TcpSegment, packet: PacketId) -> Assignment {
-        if !segment.payload.is_empty() {
-            for &id in &ids {
-                self.flows[id].note_uncertain(packet);
-            }
-        }
-        Assignment::Ambiguous {
-            candidate_flow_ids: ids,
-        }
-    }
     pub fn ingest(
         &mut self,
         scope: Scope,
@@ -593,6 +602,45 @@ impl TcpTracker {
                 "TCP segment requires source packets",
             ));
         }
+        let header = segment.header();
+        let has_payload = !segment.payload.is_empty();
+        let (key, direction) = FlowKey::new(scope, header.source, header.destination);
+        let assignment = self.assign(&key, direction, packets, when, segment)?;
+        if matches!(assignment, Assignment::Assigned { .. }) {
+            if let Some(headers) = self.unretained.get_mut(&key) {
+                for id in packets {
+                    if headers
+                        .get(id)
+                        .is_some_and(|h| h.disposition == HeaderDisposition::AwaitingReassembly)
+                    {
+                        headers.remove(id);
+                        self.loss_count -= 1;
+                    }
+                }
+                if headers.is_empty() {
+                    self.unretained.remove(&key);
+                }
+            }
+        } else if has_payload {
+            self.observe_header(
+                key.scope,
+                packets[0],
+                when,
+                header,
+                HeaderDisposition::Omitted,
+            )?;
+        }
+        Ok(assignment)
+    }
+
+    fn assign(
+        &mut self,
+        key: &FlowKey,
+        direction: usize,
+        packets: &[PacketId],
+        when: Option<i128>,
+        segment: TcpSegment,
+    ) -> Result<Assignment> {
         let retained = self
             .retained
             .checked_add(segment.payload.len())
@@ -600,8 +648,7 @@ impl TcpTracker {
         if retained > self.limits.max_retained_payload {
             return Err(Error::limit("tcp_retained_payload"));
         }
-        let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
-        let history = self.keys.get(&key).cloned().unwrap_or_default();
+        let history = self.keys.get(key).cloned().unwrap_or_default();
         let current = history.last().copied();
         let selected;
         if segment.syn() && !segment.ack() {
@@ -621,10 +668,10 @@ impl TcpTracker {
             selected = if let Some(id) = same_syn.or(simultaneous) {
                 id
             } else {
-                self.create(key, false)?
+                self.create(key.clone(), false)?
             };
         } else if history.is_empty() {
-            selected = self.create(key, true)?;
+            selected = self.create(key.clone(), true)?;
         } else {
             let mut candidates = Vec::new();
             let mut closed_candidates = Vec::new();
@@ -656,7 +703,7 @@ impl TcpTracker {
                 if segment.syn() && candidates.is_empty() {
                     // A SYN establishes a new generation even when the initial
                     // SYN was not captured (for example, an observed SYN-ACK).
-                    selected = self.create(key, true)?;
+                    selected = self.create(key.clone(), true)?;
                 } else if candidates.is_empty() {
                     return Ok(Assignment::Unassigned {
                         reason: "closed_generation_requires_syn",
@@ -665,10 +712,14 @@ impl TcpTracker {
                     let mut possible = closed_candidates;
                     possible.extend(candidates);
                     possible.sort_unstable();
-                    return Ok(self.ambiguous(possible, &segment, packets[0]));
+                    return Ok(Assignment::Ambiguous {
+                        candidate_flow_ids: possible,
+                    });
                 }
             } else if candidates.len() > 1 {
-                return Ok(self.ambiguous(candidates, &segment, packets[0]));
+                return Ok(Assignment::Ambiguous {
+                    candidate_flow_ids: candidates,
+                });
             } else if let Some(id) = candidates.first() {
                 selected = *id;
             } else {
@@ -679,7 +730,7 @@ impl TcpTracker {
                         _ => false,
                     });
                 if all_expired || segment.syn() {
-                    selected = self.create(key, true)?;
+                    selected = self.create(key.clone(), true)?;
                 } else {
                     return Ok(Assignment::Unassigned {
                         reason: "sequence_outside_known_generations",
@@ -733,15 +784,40 @@ impl TcpTracker {
             direction,
         })
     }
-    pub fn finish(self, policy: OverlapPolicy) -> Result<Vec<FlowResult>> {
+    pub fn finish(mut self, policy: OverlapPolicy) -> Result<Vec<FlowResult>> {
+        let max_span = self.limits.max_stream_span as i64;
+        for (key, headers) in self.unretained {
+            let Some(ids) = self.keys.get(&key) else {
+                continue;
+            };
+            for header in headers.into_values() {
+                for &id in &header.existing {
+                    self.flows[id].note_uncertain(header.packet);
+                }
+                let first = ids.partition_point(|&id| id < header.first_future_id);
+                for &id in &ids[first..] {
+                    self.remaining_loss_checks = self
+                        .remaining_loss_checks
+                        .checked_sub(1)
+                        .ok_or_else(|| Error::limit("unretained_tcp_generation_checks"))?;
+                    let flow = &mut self.flows[id];
+                    let expired = header
+                        .time
+                        .zip(flow.first_ns)
+                        .is_some_and(|(seen, start)| start.saturating_sub(seen) > self.idle_ns);
+                    if !expired && header.matches(flow, max_span) {
+                        flow.note_uncertain(header.packet);
+                    }
+                }
+            }
+        }
         let mut output = Vec::with_capacity(self.flows.len());
-        let mut checks = self.remaining_snap_checks;
         for mut flow in self.flows {
             let mut a = StreamAssembler::new(flow.syn[0], self.limits.clone());
             let mut b = StreamAssembler::new(flow.syn[1], self.limits.clone());
             let mut reconstruction_errors = Vec::new();
             let mut invalid = [false, false];
-            for input in std::mem::take(&mut flow.inputs) {
+            for input in flow.inputs {
                 if invalid[input.direction] {
                     continue;
                 }
@@ -787,24 +863,6 @@ impl TcpTracker {
             };
             flow.packets.sort();
             flow.packets.dedup();
-            if let Some(headers) = self.snapped.get(&flow.key) {
-                // Headers are appended in admission order. Later headers were
-                // checked against this generation while it was active.
-                let end = headers.partition_point(|h| h.first_future_id <= flow.id);
-                for header in &headers[..end] {
-                    checks = checks
-                        .checked_sub(1)
-                        .ok_or_else(|| Error::limit("snapped_tcp_generation_checks"))?;
-                    let expired = header
-                        .time
-                        .zip(flow.first_ns)
-                        .is_some_and(|(seen, start)| start.saturating_sub(seen) > self.idle_ns);
-                    if !expired && header.matches(&flow, self.limits.max_stream_span as i64) {
-                        flow.note_uncertain(header.packet);
-                        break;
-                    }
-                }
-            }
             flow.anomalies.sort();
             flow.anomalies.dedup();
             output.push(FlowResult {

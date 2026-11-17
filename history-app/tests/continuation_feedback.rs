@@ -271,6 +271,8 @@ fn history_modbus_nested_interpretations_obey_field_budget() {
             (8, 2, 8, 1),
             (15, 4, 16, 1),
             (16, 3, 16, 1),
+            (16, 4, 13, 1),
+            (16, 4, 14, 1),
             (16, 4, 15, 1),
             (16, 4, 16, 2),
         ] {
@@ -292,6 +294,14 @@ fn history_modbus_nested_interpretations_obey_field_budget() {
                 decoded,
                 "{fields}/{elements}/{spans}, page {page}"
             );
+            if spans == 13 {
+                assert!(output.contains(r#""code":"semantic_tail_spans""#));
+                let digest = pcap_evidence::sha256::hex(&pcap_evidence::sha256::digest(&adu[8..]));
+                let expected = format!(
+                    r#""undecoded_tail":{{"range":{{"start":"8","end":"14"}},"evidence":{{"sha256":"{digest}","spans":[]}}}}"#
+                );
+                assert!(output.contains(&expected), "limited v1 tail: {output}");
+            }
             assert_eq!(output.contains("limit_exceeded"), decoded < 2);
         }
     }

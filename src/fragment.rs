@@ -154,6 +154,7 @@ impl FragmentReassembler {
                 protocol: datagram.protocol,
                 ipv6: datagram.ipv6,
                 network_header_len: datagram.network_header_len,
+                declared_payload_len: datagram.declared_payload_len,
                 fragment: datagram.fragment.clone(),
                 payload: EvidenceBytes::default(),
                 ip_checksum: datagram.ip_checksum,
@@ -291,6 +292,7 @@ impl FragmentReassembler {
                 joined.append(&part.bytes.slice(skip..part.bytes.len())?, 65_535)?;
             }
         }
+        set.template.declared_payload_len = joined.len();
         set.template.payload = joined;
         set.template.fragment = None;
         Ok(FragmentOutcome::Complete(set.template, set.packets))

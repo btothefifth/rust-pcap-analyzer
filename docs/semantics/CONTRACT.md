@@ -165,7 +165,12 @@ generation that could own an unassigned TCP data segment. When snaplen removes
 transport data but the captured IP and TCP headers identify a plausible
 generation, the same restriction applies, including when the snapped header precedes
 the first complete segment. Streaming uses the observed tunnel path to distinguish
-otherwise identical connections. A disjoint successor generation can
+otherwise identical connections. Offset-zero fragments and partial TCP options
+can supply a fixed header for loss attribution. A pending first fragment
+withholds enrichment until its reassembled segment is assigned. Losing only
+the options of a header-only TCP segment preserves payload eligibility. A rejected TCP data segment or
+a segment that exceeds a streaming window also contributes header evidence.
+A disjoint successor generation can
 still produce pairs. Ambiguous application groups reference competing messages
 and framing issues in the snapshot, and their event IDs in streaming output.
 
@@ -179,4 +184,4 @@ only if the requested ID is optional and absent from the observed page.
 Role alternatives share the caller's record, field, span and work budgets.
 Undecoded tails count toward the span budget. If the remaining allowance cannot
 represent the whole tail, its evidence retains the byte digest and an empty
-span list with reason `semantic_tail_spans`.
+span list. The bounded issues list records `semantic_tail_spans` when it has room.

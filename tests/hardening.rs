@@ -71,6 +71,7 @@ fn fragment(frame: u64, offset: usize, more: bool, protocol: u8, bytes: &[u8]) -
         protocol,
         ipv6: true,
         network_header_len: 48,
+        declared_payload_len: bytes.len(),
         fragment: Some(FragmentInfo {
             id: 123,
             offset,

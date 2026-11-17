@@ -15,7 +15,7 @@ use pcap_evidence::{
     protocol::ProbeTransport,
     provenance::{EvidenceBytes, PacketId},
     sha256::{self, Sha256},
-    tcp::{Assignment, FlowResult, TcpTracker},
+    tcp::{Assignment, FlowResult, HeaderDisposition, TcpTracker},
     wire::{self, Checksum, ChecksumPolicy, Endpoint, Scope, Transport},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -495,15 +495,13 @@ impl State<'_> {
                     if let Some((scope, path, segment)) =
                         network::snapped_tcp(meta.link_type, &raw, scope, self.c.max_tunnel_depth)
                     {
-                        let (key, _) =
-                            Key::new(scope.clone(), path, 6, segment.source, segment.destination);
-                        let mut active = self.admit_window(&key, meta.frame, exact, &[id], 0)?;
-                        active
-                            .tracker
-                            .as_mut()
-                            .ok_or_else(|| Error::limit("tcp_tracker"))?
-                            .observe_snapped(scope, id, exact, &segment)?;
-                        self.put(active)?;
+                        self.observe_tcp_header(
+                            (scope, path, segment),
+                            id,
+                            meta.frame,
+                            exact,
+                            HeaderDisposition::Omitted,
+                        )?;
                     }
                 }
                 self.diagnostic(e.to_string(), vec![id], EvidenceStatus::Unsupported)?;
@@ -562,6 +560,21 @@ impl State<'_> {
             )?;
             if self.c.base.checksum_policy == ChecksumPolicy::RequireValid {
                 return Ok(());
+            }
+        }
+        if d.fragment.as_ref().is_some_and(|f| f.offset == 0) {
+            if let Some(header) = network::tcp_prefix_path(
+                &d,
+                path.clone(),
+                self.c.max_tunnel_depth.saturating_sub(depth),
+            ) {
+                self.observe_tcp_header(
+                    header,
+                    id,
+                    frame,
+                    time,
+                    HeaderDisposition::AwaitingReassembly,
+                )?;
             }
         }
         let fragmented = d.fragment.is_some();
@@ -726,15 +739,35 @@ impl State<'_> {
         };
         self.transport(datagram.scope, path, transport, contributors, frame, time)
     }
+    fn observe_tcp_header(
+        &mut self,
+        (scope, path, segment): (Scope, Vec<String>, wire::TcpHeader),
+        id: PacketId,
+        frame: u64,
+        time: Option<i128>,
+        disposition: HeaderDisposition,
+    ) -> Result<()> {
+        let (key, _) = Key::new(scope.clone(), path, 6, segment.source, segment.destination);
+        // Reassembly charges the contributor list when it delivers the segment.
+        let charge = usize::from(disposition == HeaderDisposition::Omitted);
+        let mut active = self.admit_window(&key, frame, time, &[id], charge, 0)?;
+        active
+            .tracker
+            .as_mut()
+            .ok_or_else(|| Error::limit("tcp_tracker"))?
+            .observe_header(scope, id, time, segment, disposition)?;
+        self.put(active)
+    }
+
     fn admit_window(
         &mut self,
         key: &Key,
         frame: u64,
         time: Option<i128>,
         packets: &[PacketId],
+        packet_refs: usize,
         bytes: usize,
     ) -> Result<Active> {
-        let packet_refs = packets.len();
         let mut a = match self.take(key) {
             Some(a) => a,
             None => {
@@ -808,6 +841,17 @@ impl State<'_> {
             )?;
         }
         if bytes > self.c.window_payload || packets.len() > self.c.window_packets {
+            if let Transport::Tcp(segment) = &transport {
+                if !segment.payload.is_empty() {
+                    self.observe_tcp_header(
+                        (scope, path, segment.header()),
+                        packets[0],
+                        frame,
+                        time,
+                        HeaderDisposition::Omitted,
+                    )?;
+                }
+            }
             self.diagnostic(
                 "segment_or_fragment_provenance_exceeds_window_budget",
                 packets,
@@ -816,7 +860,7 @@ impl State<'_> {
             return Ok(());
         }
         let (key, direction) = Key::new(scope.clone(), path, protocol, source, destination);
-        let mut a = self.admit_window(&key, frame, time, &packets, bytes)?;
+        let mut a = self.admit_window(&key, frame, time, &packets, packets.len(), bytes)?;
         match transport {
             Transport::Tcp(segment) => {
                 let syn = segment.syn();
@@ -834,6 +878,18 @@ impl State<'_> {
                             packets.clone(),
                             EvidenceStatus::Incomplete,
                         )?;
+                        if !retry.payload.is_empty() {
+                            a.tracker
+                                .as_mut()
+                                .ok_or_else(|| Error::limit("tcp_tracker"))?
+                                .observe_header(
+                                    scope.clone(),
+                                    packets[0],
+                                    time,
+                                    retry.header(),
+                                    HeaderDisposition::Omitted,
+                                )?;
+                        }
                         self.flush(a, "tracker_admission_boundary")?;
                         a = self.create(key.clone(), frame, time)?;
                         a.packet_refs = packets.len();
