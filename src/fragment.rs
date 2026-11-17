@@ -85,12 +85,34 @@ impl FragmentReassembler {
         self.retained -= size;
         Some(a)
     }
-    pub fn push(&mut self, mut datagram: Datagram, frame: u64) -> Result<FragmentOutcome> {
+    pub fn push(&mut self, datagram: Datagram, frame: u64) -> Result<FragmentOutcome> {
+        self.push_with_contributors(datagram, frame, &[])
+    }
+    /// Retain enclosing datagram contributors, including exact retransmissions
+    /// that supplied no unique bytes to an inner fragment.
+    pub fn push_with_contributors(
+        &mut self,
+        mut datagram: Datagram,
+        frame: u64,
+        ancestors: &[PacketId],
+    ) -> Result<FragmentOutcome> {
         self.limits.validate()?;
+        datagram.require_complete()?;
+        if ancestors.len() > self.limits.max_fragments_per_set {
+            return Err(Error::limit("fragment_contributors"));
+        }
+        let mut ids = datagram.payload.packets();
+        if !ancestors.is_empty() {
+            ids.extend_from_slice(ancestors);
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() > self.limits.max_fragments_per_set {
+                return Err(Error::limit("fragment_contributors"));
+            }
+        }
         let info = match datagram.fragment.clone() {
             Some(x) => x,
             None => {
-                let ids = datagram.payload.packets();
                 return Ok(FragmentOutcome::Complete(datagram, ids));
             }
         };
@@ -123,7 +145,7 @@ impl FragmentReassembler {
         }
         let existing = self.sets.get(&key);
         let mut admitted_packets = existing.map_or_else(Vec::new, |set| set.packets.clone());
-        admitted_packets.extend(datagram.payload.packets());
+        admitted_packets.extend(ids);
         admitted_packets.sort();
         admitted_packets.dedup();
         if admitted_packets.len() > self.limits.max_fragments_per_set

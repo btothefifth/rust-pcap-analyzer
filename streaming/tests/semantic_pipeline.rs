@@ -629,14 +629,32 @@ fn successfully_reassembled_tcp_releases_its_provisional_header() {
         let start = if tunnel { 48 } else { 24 };
         let first = ipv4_fragment(&req, 0..start, true);
         let last = ipv4_fragment(&req, start..length, false);
-        for fragments in [[first.clone(), last.clone()], [last.clone(), first.clone()]] {
-            let bytes = capture(&[
+        let mut cases = vec![
+            vec![first.clone(), last.clone()],
+            vec![last.clone(), first.clone()],
+            vec![first.clone(), first.clone(), last.clone()],
+            vec![last.clone(), last, first],
+        ];
+        if tunnel {
+            let inner_first = wrap(ipv4_fragment(&request, 0..24, true), false);
+            let inner_last = wrap(ipv4_fragment(&request, 24..32, false), false);
+            let outer_first = ipv4_fragment(&inner_first, 0..24, true);
+            let outer_last = ipv4_fragment(&inner_first, 24..inner_first.len() - 34, false);
+            cases.push(vec![
+                outer_first.clone(),
+                outer_last.clone(),
+                inner_last.clone(),
+            ]);
+            cases.push(vec![outer_last, outer_first, inner_last]);
+        }
+        for fragments in cases {
+            let mut frames = vec![
                 wrap(tcp(false, 100, 0, 2, &[]), false),
                 wrap(tcp(true, 500, 101, 0x12, &[]), true),
-                fragments[0].clone(),
-                fragments[1].clone(),
-                wrap(response.clone(), true),
-            ]);
+            ];
+            frames.extend(fragments);
+            frames.push(wrap(response.clone(), true));
+            let bytes = capture(&frames);
             if !tunnel {
                 let analysis = pcap_evidence::engine::analyze(&bytes, config.base.clone()).unwrap();
                 assert!(analysis.flows[0].uncertain_payload.is_none());
@@ -656,6 +674,136 @@ fn successfully_reassembled_tcp_releases_its_provisional_header() {
                     .count(),
                 1
             );
+        }
+    }
+}
+
+#[test]
+fn window_cut_accounts_for_pending_and_omitted_tcp_headers() {
+    use tiny_capture::{capture, ipv4_fragment, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let pair = vec![
+        tcp(false, 100, 0, 2, &[]),
+        tcp(true, 500, 101, 0x12, &[]),
+        tcp(false, 101, 501, 0x10, &[]),
+        tcp(false, 101, 501, 0x18, &req),
+        tcp(true, 501, 113, 0x18, &rsp),
+    ];
+    let tail = tcp(false, 113, 512, 0x18, &req);
+    let mut config = StreamConfig::default();
+    config.base.modbus_ports = vec![2000];
+    config.window_packets = pair.len();
+    for count in [0, 1, 5, 6] {
+        let mut frames = pair.clone();
+        for _ in 0..count {
+            frames.push(ipv4_fragment(&tail, 0..24, true));
+        }
+        let events = run(&capture(&frames), config.clone()).events;
+        assert_eq!(
+            events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            count == 0
+        );
+    }
+    let mut frames = pair.clone();
+    frames.push(tail[..54].to_vec());
+    let mut raw = capture(&frames);
+    let record = capture(&pair).len();
+    raw[record + 12..record + 16].copy_from_slice(&(tail.len() as u32).to_le_bytes());
+    let events = run(&raw, config).events;
+    assert!(!events
+        .iter()
+        .any(|e| e.data.encode().contains("read_mapping")));
+}
+
+#[test]
+fn strict_checksum_adjudication_releases_only_completed_reassembly() {
+    use tiny_capture::{capture, ipv4_fragment, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let mut tail = tcp(false, 113, 512, 0x18, &req);
+    tail[50] ^= 1;
+    let mut config = StreamConfig::default();
+    config.base.modbus_ports = vec![2000];
+    config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+    let first = ipv4_fragment(&tail, 0..24, true);
+    let last = ipv4_fragment(&tail, 24..32, false);
+    for (extra, paired) in [
+        (vec![tail], true),
+        (vec![first.clone(), last], true),
+        (vec![first], false),
+    ] {
+        let mut frames = vec![
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 500, 101, 0x12, &[]),
+            tcp(false, 101, 501, 0x18, &req),
+            tcp(
+                true,
+                501,
+                113,
+                0x18,
+                &[0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34],
+            ),
+        ];
+        frames.extend(extra);
+        let raw = capture(&frames);
+        let snapshot = pcap_evidence::engine::analyze(&raw, config.base.clone()).unwrap();
+        assert_eq!(
+            pcap_evidence::report::analysis(&snapshot, false)
+                .encode()
+                .contains("read_mapping"),
+            paired
+        );
+        assert_eq!(
+            run(&raw, config.clone())
+                .events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            paired
+        );
+    }
+}
+
+#[test]
+fn native_modbus_limits_apply_across_stream_directions() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/semantics/modbus_fc23_split.pcap");
+    for (bytes, messages, issue) in [
+        ("19", "2", None),
+        ("18", "2", Some("modbus_application_bytes")),
+        ("19", "1", Some("modbus_protocol_messages")),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_pcap-stream"))
+            .arg("analyze")
+            .arg(&fixture)
+            .args([
+                "--source-bytes",
+                "4096",
+                "--window-bytes",
+                "512",
+                "--window-packets",
+                "32",
+                "--event-bytes",
+                "262144",
+                "--application-bytes",
+                bytes,
+                "--native-messages",
+                messages,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = String::from_utf8(output.stdout).unwrap();
+        assert!(events.lines().last().unwrap().contains("capture.complete"));
+        assert_eq!(events.contains("\"read_mapping\""), issue.is_none());
+        if let Some(code) = issue {
+            assert!(events.contains(code));
+            assert_eq!(events.matches("\"kind\":\"protocol.message\"").count(), 1);
         }
     }
 }

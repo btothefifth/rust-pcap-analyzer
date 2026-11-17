@@ -539,6 +539,25 @@ impl TcpTracker {
         if !self.unretained.contains_key(&key) && self.unretained.len() >= self.limits.max_flows {
             return Err(Error::limit("unretained_tcp_keys"));
         }
+        let header = self.match_header(&key, direction, packet, when, segment, disposition)?;
+        let headers = self.unretained.entry(key).or_default();
+        if headers.len() >= self.limits.max_segments_per_flow {
+            return Err(Error::limit("unretained_tcp_headers"));
+        }
+        headers.insert(packet, header);
+        self.loss_count += 1;
+        Ok(())
+    }
+
+    fn match_header(
+        &mut self,
+        key: &FlowKey,
+        direction: usize,
+        packet: PacketId,
+        when: Option<i128>,
+        segment: TcpHeader,
+        disposition: HeaderDisposition,
+    ) -> Result<UnretainedHeader> {
         let mut header = UnretainedHeader {
             packet,
             time: when,
@@ -552,7 +571,7 @@ impl TcpTracker {
             disposition,
         };
         let max_span = self.limits.max_stream_span as i64;
-        let ids = self.keys.get(&key).map_or(&[][..], Vec::as_slice);
+        let ids = self.keys.get(key).map_or(&[][..], Vec::as_slice);
         self.remaining_loss_checks = self
             .remaining_loss_checks
             .checked_sub(ids.len())
@@ -565,17 +584,61 @@ impl TcpTracker {
                 open |= !flow.closed;
             }
         }
-        let headers = self.unretained.entry(key).or_default();
-        if headers.len() >= self.limits.max_segments_per_flow {
-            return Err(Error::limit("unretained_tcp_headers"));
-        }
         // A late data packet with only closed candidates is unassigned.
         if !open {
             header.existing.clear();
         }
-        headers.insert(packet, header);
-        self.loss_count += 1;
+        Ok(header)
+    }
+
+    /// Apply an arriving loss to matching generations before closing a window.
+    /// No header is retained here: the new window owns any future generations.
+    pub fn observe_at_cut(
+        &mut self,
+        scope: Scope,
+        packet: PacketId,
+        when: Option<i128>,
+        segment: TcpHeader,
+    ) -> Result<()> {
+        let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
+        let header = self.match_header(
+            &key,
+            direction,
+            packet,
+            when,
+            segment,
+            HeaderDisposition::Omitted,
+        )?;
+        for id in header.existing {
+            self.flows[id].note_uncertain(packet);
+        }
         Ok(())
+    }
+
+    /// Count contributor references already charged while waiting for reassembly.
+    pub fn provisional_count(
+        &self,
+        scope: Scope,
+        header: TcpHeader,
+        packets: &[PacketId],
+    ) -> usize {
+        let (key, _) = FlowKey::new(scope, header.source, header.destination);
+        self.unretained.get(&key).map_or(0, |set| {
+            packets
+                .iter()
+                .filter(|id| {
+                    set.get(id)
+                        .is_some_and(|h| h.disposition == HeaderDisposition::AwaitingReassembly)
+                })
+                .count()
+        })
+    }
+
+    /// A completed reassembly with a definitive transport disposition resolves
+    /// its provisional observations. Omitted data remains a loss witness.
+    pub fn resolve_reassembly(&mut self, scope: Scope, header: TcpHeader, packets: &[PacketId]) {
+        let (key, _) = FlowKey::new(scope, header.source, header.destination);
+        self.resolve_packets(&key, packets);
     }
 
     pub fn ingest(
@@ -607,20 +670,7 @@ impl TcpTracker {
         let (key, direction) = FlowKey::new(scope, header.source, header.destination);
         let assignment = self.assign(&key, direction, packets, when, segment)?;
         if matches!(assignment, Assignment::Assigned { .. }) {
-            if let Some(headers) = self.unretained.get_mut(&key) {
-                for id in packets {
-                    if headers
-                        .get(id)
-                        .is_some_and(|h| h.disposition == HeaderDisposition::AwaitingReassembly)
-                    {
-                        headers.remove(id);
-                        self.loss_count -= 1;
-                    }
-                }
-                if headers.is_empty() {
-                    self.unretained.remove(&key);
-                }
-            }
+            self.resolve_packets(&key, packets);
         } else if has_payload {
             self.observe_header(
                 key.scope,
@@ -631,6 +681,23 @@ impl TcpTracker {
             )?;
         }
         Ok(assignment)
+    }
+
+    fn resolve_packets(&mut self, key: &FlowKey, packets: &[PacketId]) {
+        if let Some(headers) = self.unretained.get_mut(key) {
+            for id in packets {
+                if headers
+                    .get(id)
+                    .is_some_and(|h| h.disposition == HeaderDisposition::AwaitingReassembly)
+                {
+                    headers.remove(id);
+                    self.loss_count -= 1;
+                }
+            }
+            if headers.is_empty() {
+                self.unretained.remove(key);
+            }
+        }
     }
 
     fn assign(

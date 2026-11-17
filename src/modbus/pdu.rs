@@ -243,11 +243,10 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu> {
 
 fn file_records(b: &[u8], write: bool, request: bool) -> Result<Pdu> {
     let len = usize::from(byte(b, 1)?);
-    require(
-        len > 0 && len + 2 == b.len() && (write || len <= 245),
-        1,
-        "modbus_file_bytes",
-    )?;
+    let count_error = (len == 0 || len + 2 != b.len() || (!write && len > 245))
+        .then(|| invalid(1, "modbus_file_bytes"));
+    let max_count = if write { len } else { len.min(245) };
+    let b = &b[..b.len().min(2 + max_count)];
     let mut records = Vec::new();
     let mut offset = 2;
     let mut response_bytes = 0;
@@ -259,7 +258,7 @@ fn file_records(b: &[u8], write: bool, request: bool) -> Result<Pdu> {
         };
         let record = match parsed {
             Ok(record) => record,
-            Err(error) => return Ok(Pdu::Files(records, Some(error))),
+            Err(error) => return Ok(Pdu::Files(records, Some(count_error.unwrap_or(error)))),
         };
         if request && !write {
             response_bytes += 2 + 2 * usize::from(record.words);
@@ -274,7 +273,7 @@ fn file_records(b: &[u8], write: bool, request: bool) -> Result<Pdu> {
         offset += record.data_len;
         records.push(record);
     }
-    Ok(Pdu::Files(records, None))
+    Ok(Pdu::Files(records, count_error))
 }
 fn file_address_record(b: &[u8], offset: usize, write: bool) -> Result<FileRecord> {
     require(byte(b, offset)? == 6, offset, "modbus_file_reference")?;

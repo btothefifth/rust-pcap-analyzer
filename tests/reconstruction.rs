@@ -357,3 +357,28 @@ fn provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection() {
     assert!(bytes.slice(invalid_start..invalid_end).is_err());
     assert!(EvidenceBytes::default().validate());
 }
+
+#[test]
+fn prefix_decoding_cannot_admit_partial_transport_or_fragment_bytes() {
+    let frame = small_tcp::tcp(false, 101, 501, 0x18, b"12345678");
+    let first = small_tcp::ipv4_fragment(&frame, 0..24, true);
+    for full in [&frame, &first] {
+        let prefix = &full[..56];
+        assert!(decode_packet(1, prefix, id(1), scope()).is_err());
+        let partial = decode_packet_extent(1, prefix, id(1), scope(), true).unwrap();
+        assert!(tcp_loss_header(&partial).is_some());
+        assert!(decode_transport(&partial, ChecksumPolicy::Observe).is_err());
+        let mut assembly = FragmentReassembler::new(Limits::default());
+        assert!(assembly.push(partial, 1).is_err());
+        assert!(assembly.finish().is_empty());
+    }
+    let full = decode_packet(1, &frame, id(1), scope()).unwrap();
+    let Transport::Tcp(segment) = decode_transport(&full, ChecksumPolicy::RequireValid).unwrap()
+    else {
+        panic!("expected TCP");
+    };
+    assert_eq!(segment.payload.data(), b"12345678");
+}
+
+#[path = "support/tiny_capture.rs"]
+mod small_tcp;

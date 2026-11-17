@@ -1673,11 +1673,18 @@ fn modbus_file_read_limits_and_a_malformed_second_record() {
             );
         }
     }
-    let wire = adu(&[20, 8, 3, 6, 0x12, 0x34, 3, 7, 0x56, 0x78]);
-    let report = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+    for declared in [4, 5, 8, 9] {
+        let wire = adu(&[20, declared, 3, 6, 0x12, 0x34, 3, 7, 0x56, 0x78]);
+        let report = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+        assert_eq!(report.status(), Status::Rejected);
+        assert_eq!(report.consumed(), 13);
+        assert_eq!(values(&report, "register_u16"), [&Value::Unsigned(0x1234)]);
+        assert!(!root_message(&wire, Role::Response).shape_valid);
+    }
+    let clipped = adu(&[20, 3, 3, 6, 0x12, 0x34]);
+    let report = modbus::decode(&clipped, Role::Response, Limits::default()).unwrap();
     assert_eq!(report.status(), Status::Rejected);
-    assert_eq!(report.consumed(), 13);
-    assert_eq!(values(&report, "register_u16"), [&Value::Unsigned(0x1234)]);
+    assert!(values(&report, "register_u16").is_empty());
 }
 
 #[test]

@@ -343,6 +343,11 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         let transport = match wire::decode_transport(&datagram, config.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
+                if e.code == ErrorCode::Checksum {
+                    if let Some(header) = wire::tcp_loss_header(&datagram) {
+                        tracker.resolve_reassembly(datagram.scope.clone(), header, &contributors);
+                    }
+                }
                 each_packet(&mut packets, &contributors, |p| {
                     p.disposition = Disposition::Rejected {
                         code: e.code.as_str(),

@@ -349,6 +349,7 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
 /// conflicting hints, unknown critical options, GRE routing/version extensions,
 /// and encrypted tunnels never authorize inner decoding.
 pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
+    d.require_complete()?;
     peel_extent(d, false)
 }
 fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>> {
@@ -590,7 +591,12 @@ pub(crate) fn snapped_tcp(
     raw: &EvidenceBytes,
     scope: Scope,
     max_depth: usize,
-) -> Option<(Scope, Vec<String>, wire::TcpHeader)> {
+) -> Option<(
+    Scope,
+    Vec<String>,
+    wire::TcpHeader,
+    pcap_evidence::provenance::PacketId,
+)> {
     let Decoded::Ip(datagram, context) = decode_extent(link, raw, scope, true).ok()? else {
         return None;
     };
@@ -601,12 +607,17 @@ pub(crate) fn tcp_prefix_path(
     first: &Datagram,
     mut path: Vec<String>,
     max_depth: usize,
-) -> Option<(Scope, Vec<String>, wire::TcpHeader)> {
+) -> Option<(
+    Scope,
+    Vec<String>,
+    wire::TcpHeader,
+    pcap_evidence::provenance::PacketId,
+)> {
     let mut next;
     let mut datagram = first;
     for depth in 0..=max_depth {
-        if let Some(header) = wire::tcp_loss_header(datagram) {
-            return Some((datagram.scope.clone(), path, header));
+        if let Some((header, packet)) = wire::tcp_loss_witness(datagram) {
+            return Some((datagram.scope.clone(), path, header, packet));
         }
         if datagram.fragment.as_ref().is_some_and(|f| f.offset != 0) {
             return None;

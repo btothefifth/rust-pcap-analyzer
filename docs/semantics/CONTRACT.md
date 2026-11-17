@@ -126,7 +126,10 @@ that partially inspected bits after it were never observed.
 
 Default logical limits: 64 KiB input, 2048 records, 8192 fields, 16384 source-span
 references, 1,048,576 work units, 4 MiB nested JSON. Parent capture application and
-message budgets can only reduce the derived defaults. These are finite logical
+message budgets can only reduce the derived defaults. In streaming, each Modbus
+ADU must fit the application byte limit. Both directions of a TCP generation
+share the native message allowance within its window. An over-limit ADU
+produces a scoped issue before field decoding and transaction matching. These are finite logical
 bounds, not OS-enforced RSS or CPU sandbox limits. Output trees and a bounded
 serialized validation copy can coexist. The parent event/report output cap still
 applies and can reject an expanded report rather than silently omit fields.
@@ -167,19 +170,28 @@ generation, the same restriction applies, including when the snapped header prec
 the first complete segment. Streaming uses the observed tunnel path to distinguish
 otherwise identical connections. Offset-zero fragments and partial TCP options
 can supply a fixed header for loss attribution. A pending first fragment
-withholds enrichment until its reassembled segment is assigned. Losing only
-the options of a header-only TCP segment preserves payload eligibility. A rejected TCP data segment or
-a segment that exceeds a streaming window also contributes header evidence.
-A disjoint successor generation can
-still produce pairs. Ambiguous application groups reference competing messages
+counts toward the streaming packet window and withholds enrichment for plausible
+generations. When such a header forces a capacity cut, it also applies to the
+closing window. Reassembly resolves its own fragment observations, including
+duplicate fragments in enclosing tunnels. Under strict checksum checking, a
+completed segment rejected for its checksum has the same disposition whether
+it arrived whole or in fragments. Partial IP payloads can supply a header
+witness, but normal transport decoding and fragment admission require the
+complete declared extent.
+
+Losing only the options of a header-only TCP segment preserves payload
+eligibility. Unassigned data and segments too large for a streaming window
+also contribute header evidence. A disjoint successor generation can still
+produce pairs. Ambiguous application groups reference competing messages
 and framing issues in the snapshot, and their event IDs in streaming output.
 
 FC20 uses the 245-byte response data ceiling in V1.1b3 §6.14. A single record
 can therefore return up to 121 words. For the lower bound, the parser follows
 the specified word layout and the worked example, whose subresponse length
 is 5 even though the table lists 7 as its minimum. It accepts a one-word
-subresponse of length 3. A malformed following record retains complete
-preceding records and their witnesses. FC43/14 accepts a restart at object 0
+subresponse of length 3. A malformed record or outer byte count yields a
+rejected PDU. Complete preceding records retain their witnesses within the
+declared count, the available bytes and the function's size limit. FC43/14 accepts a restart at object 0
 only if the requested ID is optional and absent from the observed page.
 Role alternatives share the caller's record, field, span and work budgets.
 Undecoded tails count toward the span budget. If the remaining allowance cannot

@@ -206,6 +206,7 @@
     "reconstruction::identical_ipv4_fragment_duplicate_is_preserved_as_observation",
     "reconstruction::fragment_expiry_is_explicit_and_uses_capture_progress_not_wall_clock",
     "reconstruction::provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection",
+    "reconstruction::prefix_decoding_cannot_admit_partial_transport_or_fragment_bytes",
     "semantic_pipeline::snapshot_modbus_semantic_fields_reach_actual_report",
     "semantic_pipeline::snapshot_padding_bad_response_does_not_pair_as_consistent",
     "semantic_pipeline::snapshot_dnp_split_reordered_duplicate_retains_semantic_objects",

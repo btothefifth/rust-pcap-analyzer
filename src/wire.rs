@@ -152,6 +152,10 @@ pub fn snapped_tcp(
 /// Read a fixed TCP header only for attributing missing data. A noninitial
 /// fragment has no transport header at its payload offset.
 pub fn tcp_loss_header(d: &Datagram) -> Option<TcpHeader> {
+    tcp_loss_witness(d).map(|(header, _)| header)
+}
+/// Return the packet supplying the first TCP header byte, even after reassembly.
+pub fn tcp_loss_witness(d: &Datagram) -> Option<(TcpHeader, PacketId)> {
     if d.fragment.as_ref().is_some_and(|f| f.offset != 0) {
         return None;
     }
@@ -163,7 +167,11 @@ pub fn tcp_loss_header(d: &Datagram) -> Option<TcpHeader> {
     if d.fragment.is_none() && d.declared_payload_len <= offset + header_len {
         return None;
     }
-    Some(header)
+    let spans = d.payload.spans();
+    let packet = spans
+        .get(spans.partition_point(|s| s.end <= offset))?
+        .packet;
+    Some((header, packet))
 }
 
 /// Read captured network headers for loss attribution. In prefix mode the
@@ -559,7 +567,22 @@ fn transport_offset(datagram: &Datagram) -> Result<(u8, usize, ChecksumContext)>
     Ok((protocol, prefix, checksum_context))
 }
 
+impl Datagram {
+    /// Only a complete declared extent may enter reassembly or normal decoding.
+    pub fn require_complete(&self) -> Result<()> {
+        if self.payload.len() != self.declared_payload_len {
+            return Err(Error::new(
+                ErrorCode::Truncated,
+                self.payload.len() as u64,
+                "ip_payload_extent",
+                "captured IP payload differs from declared length",
+            ));
+        }
+        Ok(())
+    }
+}
 pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<Transport> {
+    datagram.require_complete()?;
     if datagram.fragment.is_some() {
         return Err(bad(
             "fragment",

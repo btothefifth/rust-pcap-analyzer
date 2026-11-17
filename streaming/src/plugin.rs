@@ -107,6 +107,8 @@ pub struct Output<'a> {
     pub dnp3_confirmations: &'a mut Vec<Dnp3StreamingConfirmationRecord>,
     pub remaining: &'a mut usize,
     pub max_message_bytes: usize,
+    native: &'a Limits,
+    remaining_modbus: &'a mut usize,
     sink_failed: bool,
 }
 
@@ -288,7 +290,12 @@ impl Output<'_> {
         *self.remaining -= 1;
         let code: String = code.into();
         let prefix = (protocol == "modbus").then(|| {
-            if code == "incomplete_application_at_gap_or_window_end" {
+            if matches!(
+                code.as_str(),
+                "incomplete_application_at_gap_or_window_end"
+                    | "modbus_application_bytes"
+                    | "modbus_protocol_messages"
+            ) {
                 let role = if self
                     .context
                     .modbus_ports
@@ -926,6 +933,7 @@ impl Registry {
         }
 
         let run_id = output.sink.run_id().to_owned();
+        let mut remaining_modbus = c.base.limits.max_protocol_messages;
         let mut analyses = Vec::new();
         let mut buffered_bytes = 0usize;
         for (ctx, stream) in inputs {
@@ -971,6 +979,8 @@ impl Registry {
                         dnp3_confirmations: &mut analysis.confirmations,
                         remaining: output.remaining,
                         max_message_bytes: c.max_plugin_bytes,
+                        native: &c.base.limits,
+                        remaining_modbus: &mut remaining_modbus,
                         sink_failed: false,
                     };
                     let result = analyzer
@@ -1077,6 +1087,7 @@ impl Registry {
         c: &StreamConfig,
         output: &mut RegistryOutput<'_>,
     ) -> Result<()> {
+        let mut remaining_modbus = c.base.limits.max_protocol_messages;
         let indices = self.selection(ctx, bytes, c, output.sink)?;
         let mut context = ctx.clone();
         context.ambiguous = ctx.ambiguous || indices.len() > 1;
@@ -1093,6 +1104,8 @@ impl Registry {
                 dnp3_confirmations: output.dnp3_confirmations,
                 remaining: output.remaining,
                 max_message_bytes: c.max_plugin_bytes,
+                native: &c.base.limits,
+                remaining_modbus: &mut remaining_modbus,
                 sink_failed: false,
             };
             if let Err(e) = analyzer.analyze(&DatagramInput { bytes }, &mut out) {
@@ -1638,6 +1651,16 @@ fn emit_modbus(
     out: &mut Output<'_>,
     l: &AnalyzerLimits,
 ) -> Result<()> {
+    if raw.len() > out.native.max_application_bytes {
+        return out.issue("modbus", "modbus_application_bytes", raw);
+    }
+    if *out.remaining_modbus == 0 {
+        return out.issue("modbus", "modbus_protocol_messages", raw);
+    }
+    *out.remaining_modbus -= 1;
+    let mut native = out.native.clone();
+    native.max_application_bytes = native.max_application_bytes.min(l.max_buffer_bytes);
+    native.max_protocol_messages = native.max_protocol_messages.min(l.max_messages);
     let parsed = pcap_evidence::semantics::modbus::FramedAdu::new(raw)?;
     let (request_valid, response_valid) = parsed.shapes();
     let supported = parsed.supported();
@@ -1707,7 +1730,7 @@ fn emit_modbus(
                 "semantic_subset",
                 parsed.fields(
                     decoded_role,
-                    pcap_evidence::semantics::Limits::from_capture(&native_limits(l)),
+                    pcap_evidence::semantics::Limits::from_capture(&native),
                 ),
             ),
         ]),

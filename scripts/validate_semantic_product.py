@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -89,7 +91,7 @@ def semantic_event_count(values: list[dict]) -> int:
     return count
 
 
-def verify_split_fc23(events, capture):
+def packet_bytes(capture):
     packets = []
     data = capture.read_bytes()
     offset = 24
@@ -97,6 +99,38 @@ def verify_split_fc23(events, capture):
         length = struct.unpack_from('<I', data, offset + 8)[0]
         packets.append(data[offset + 16:offset + 16 + length])
         offset += 16 + length
+    return packets
+
+
+def field_bytes(field, packets):
+    raw = bytearray()
+    for span in field["evidence"]["spans"]:
+        packet = packets[int(span["frame"]) - 1]
+        start = int(span["packet_start"])
+        raw.extend(packet[start:start + int(span["end"]) - int(span["start"])])
+    return raw
+
+
+def verify_device_objects(events, capture):
+    packets = packet_bytes(capture)
+    objects = 0
+    for event in events:
+        subset = event["data"].get("semantic_subset", {})
+        for report in subset.get("interpretations", []):
+            for record in report["records"]:
+                for field in record["fields"]:
+                    if field["name"] == "object_value":
+                        raw = field_bytes(field, packets)
+                        expected = {"length": str(len(raw)), "sha256": hashlib.sha256(raw).hexdigest()}
+                        if field["type"] != "octets_sha256" or field["value"] != expected:
+                            raise AssertionError("FC43 device object differs from its wire bytes")
+                        objects += 1
+    if not objects:
+        raise AssertionError("missing FC43 device objects")
+
+
+def verify_split_fc23(events, capture):
+    packets = packet_bytes(capture)
     mapping, = [e["data"]["read_mapping"] for e in events if e["kind"] == "transaction.candidate"]
     if (mapping["starting_address_zero_based"], mapping["quantity"]) != (0xabcd, 2):
         raise AssertionError("FC23 read mapping differs from the wire request")
@@ -111,11 +145,7 @@ def verify_split_fc23(events, capture):
         report, = message["semantic_subset"]["interpretations"]
         field = next(f for rec in report["records"] for f in rec["fields"] if f["name"] == name)
         spans = field["evidence"]["spans"]
-        raw = bytearray()
-        for span in spans:
-            packet = packets[int(span["frame"]) - 1]
-            start = int(span["packet_start"])
-            raw.extend(packet[start:start + int(span["end"]) - int(span["start"])])
+        raw = field_bytes(field, packets)
         if ([int(s["frame"]) for s in spans] != frames or raw != expected
                 or int(field["value"]) != int.from_bytes(expected, "big")):
             raise AssertionError(f"FC23 {name} differs from its packet witnesses")
@@ -136,6 +166,7 @@ def main() -> int:
     fixture_root = ROOT / "fixtures" / "semantics"
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
+    validator = Draft202012Validator(json.loads((ROOT / "docs/semantics/semantic.schema.json").read_text()))
     results = []
     for fixture_name in FIXTURES:
         capture = fixture_root / fixture_name
@@ -155,8 +186,13 @@ def main() -> int:
             raise AssertionError(f"{capture.name}: missing terminal capture event")
         if ndjson[-1]["data"].get("source_sha256") != hashlib.sha256(capture.read_bytes()).hexdigest():
             raise AssertionError(f"{capture.name}: incorrect source hash")
+        for event in ndjson:
+            if "semantic_subset" in event["data"]:
+                validator.validate(event["data"]["semantic_subset"])
         if fixture_name == "modbus_fc23_split.pcap":
-            verify_split_fc23(ndjson,capture)
+            verify_split_fc23(ndjson, capture)
+        if fixture_name == "modbus_interleaved.pcap":
+            verify_device_objects(ndjson, capture)
         results.append(
             {
                 "fixture": fixture_name,
