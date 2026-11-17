@@ -286,7 +286,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     if let Some((scope, segment)) =
                         wire::snapped_tcp(metadata.link_type, data, id, scope)
                     {
-                        tracker.observe_snapped(scope, id, time, &segment);
+                        tracker.observe_snapped(scope, id, time, &segment)?;
                     }
                 }
                 packets[at].disposition = Disposition::Rejected {

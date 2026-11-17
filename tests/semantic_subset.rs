@@ -1694,3 +1694,41 @@ fn device_pages_keep_valid_objects_before_a_rejected_suffix() {
     assert!(req.shape_valid && rsp.shape_valid);
     assert!(!pcap_evidence::modbus::response_matches(&req, &rsp));
 }
+
+#[test]
+fn unresolved_role_tail_witnesses_share_the_span_limit() {
+    use pcap_evidence::json::Json;
+    fn spans(json: &Json) -> usize {
+        match json {
+            Json::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| match (key, value) {
+                    (&"spans", Json::Array(items)) => items.len(),
+                    _ => spans(value),
+                })
+                .sum(),
+            Json::Array(items) => items.iter().map(spans).sum(),
+            _ => 0,
+        }
+    }
+    let adu = ev(&[0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1]);
+    for limit in 1..=16 {
+        let output = modbus::alternatives_json(
+            &adu,
+            Role::Unknown,
+            Limits {
+                max_source_spans: limit,
+                ..Limits::default()
+            },
+        );
+        assert!(spans(&output) <= limit, "span budget {limit}: {output:?}");
+        if limit == 13 {
+            assert_eq!(spans(&output), 13);
+            assert!(output.encode().contains("semantic_tail_spans"));
+        }
+        if limit == 16 {
+            assert_eq!(spans(&output), 16);
+            assert_eq!(output.encode().matches("decoded_subset").count(), 2);
+        }
+    }
+}

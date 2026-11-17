@@ -10,7 +10,10 @@ use pcap_evidence::{correlate, report, sha256, Error, ErrorCode, Result};
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-const HELP: &str = r#"pcap-evidence 0.1.0 — offline capture evidence, not an attack detector
+const HELP: &str = concat!(
+    "pcap-evidence ",
+    env!("CARGO_PKG_VERSION"),
+    r#" — offline capture evidence
 
 USAGE
   pcap-evidence inspect CAPTURE [OPTIONS]
@@ -38,7 +41,8 @@ OPTIONS
 EXIT: 0 completed; 2 usage/labels; 3 I/O/publication; 4 malformed/unsupported/degraded.
 JSON stdout may be piped; source files are never rewritten. Index verification scans
 once; repeated packet access through the library's VerifiedIndex is then indexed.
-"#;
+"#
+);
 struct Args {
     command: String,
     input: PathBuf,

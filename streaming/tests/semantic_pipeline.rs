@@ -431,3 +431,76 @@ fn device_competitors_and_echo_disagreements_reach_both_correlators() {
     };
     assert_eq!(blockers.len(), 1);
 }
+
+#[path = "../../history/tests/support/tiny_capture.rs"]
+mod tiny_capture;
+
+#[test]
+fn snapped_headers_follow_their_tunnel_and_later_tcp_generation() {
+    use tiny_capture::{capture, tcp, tunneled};
+    let req = [0, 72, 0, 0, 0, 6, 3, 3, 0, 9, 0, 1];
+    let rsp = [0, 72, 0, 0, 0, 5, 3, 3, 2, 0x12, 0x34];
+    for kind in ["plain", "gre", "vxlan", "geneve"] {
+        let wrap = |vni, reverse, bytes: Vec<u8>| {
+            if kind == "plain" {
+                bytes
+            } else {
+                tunneled(kind, vni, reverse, &bytes)
+            }
+        };
+        for (same_path, same_sequence, snap, expected) in [
+            (true, true, true, 0),
+            (true, true, false, 0),
+            (true, false, true, 1),
+            (false, true, true, 1),
+        ] {
+            if kind == "plain" && !same_path {
+                continue;
+            }
+            let seq = if same_sequence { 1013 } else { 1_000_000_001 };
+            let mut first = wrap(
+                if same_path { 7 } else { 8 },
+                false,
+                tcp(false, 1001, 5001, 0x18, &req),
+            );
+            let original = first.len() as u32;
+            if snap {
+                first.truncate(first.len() - 4);
+            }
+            let mut bytes = capture(&[
+                first,
+                wrap(7, false, tcp(false, seq, 5001, 0x18, &req)),
+                wrap(7, true, tcp(true, 5001, seq + 12, 0x18, &rsp)),
+            ]);
+            bytes[36..40].copy_from_slice(&original.to_le_bytes());
+            let mut config = StreamConfig::default();
+            config.base.modbus_ports = vec![2000];
+            if kind == "plain" {
+                let root = pcap_evidence::engine::analyze(&bytes, config.base.clone()).unwrap();
+                assert_eq!(
+                    pcap_evidence::report::analysis(&root, false)
+                        .encode()
+                        .matches("read_mapping")
+                        .count(),
+                    expected
+                );
+            }
+            let out = run(&bytes, config);
+            assert!(out
+                .events
+                .iter()
+                .any(|e| e.kind == EventKind::Message && e.protocol.as_deref() == Some("modbus")));
+            let count = out
+                .events
+                .iter()
+                .filter(|e| {
+                    e.kind == EventKind::Transaction && e.data.encode().contains("read_mapping")
+                })
+                .count();
+            assert_eq!(
+                count, expected,
+                "{kind} same_path={same_path} same_sequence={same_sequence} snap={snap}"
+            );
+        }
+    }
+}

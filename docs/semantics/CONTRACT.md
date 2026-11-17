@@ -163,7 +163,9 @@ analyzer equivalence are NOT established by this implementation or its case list
 The snapshot and streaming correlators withhold Modbus enrichment for every
 generation that could own an unassigned TCP data segment. When snaplen removes
 transport data but the captured IP and TCP headers identify a plausible
-generation, the same restriction applies. A disjoint successor generation can
+generation, the same restriction applies, including when the snapped header precedes
+the first complete segment. Streaming uses the observed tunnel path to distinguish
+otherwise identical connections. A disjoint successor generation can
 still produce pairs. Ambiguous application groups reference competing messages
 and framing issues in the snapshot, and their event IDs in streaming output.
 
@@ -175,3 +177,6 @@ subresponse of length 3. A malformed following record retains complete
 preceding records and their witnesses. FC43/14 accepts a restart at object 0
 only if the requested ID is optional and absent from the observed page.
 Role alternatives share the caller's record, field, span and work budgets.
+Undecoded tails count toward the span budget. If the remaining allowance cannot
+represent the whole tail, its evidence retains the byte digest and an empty
+span list with reason `semantic_tail_spans`.

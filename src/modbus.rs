@@ -41,20 +41,93 @@ struct Interpretation {
     role: Role,
     bytes: Box<[u8]>,
     pdu: Result<pdu::Pdu>,
+    other_role: Option<Result<pdu::Pdu>>,
 }
 impl ModbusMessage {
-    pub(crate) fn interpretation(&self, role: Role) -> Result<pdu::Pdu> {
-        if self.parsed.role == role && self.raw.data() == self.parsed.bytes.as_ref() {
-            self.parsed.pdu.clone()
-        } else {
-            pdu::parse(self.raw.data().get(7..).unwrap_or_default(), role)
+    /// Decode one complete MBAP frame. The caller supplies the direction and
+    /// the observed alignment. A malformed PDU retains its raw frame.
+    ///
+    /// ```
+    /// use pcap_evidence::modbus::{ModbusMessage, ModbusResult, Role};
+    /// use pcap_evidence::provenance::{EvidenceBytes, PacketId};
+    ///
+    /// let source = PacketId { capture: [7; 32], frame: 1, record_offset: 24 };
+    /// let raw = EvidenceBytes::from_packet(&[0, 1, 0, 0, 0, 6, 1, 3, 0, 8, 0, 1], source, 54);
+    /// let message = ModbusMessage::from_adu(raw, Role::Request, 0, true)?;
+    /// assert_eq!((message.transaction, message.function), (1, 3));
+    /// let mut result = ModbusResult::default();
+    /// result.messages.push(message);
+    /// # Ok::<(), pcap_evidence::Error>(())
+    /// ```
+    pub fn from_adu(
+        raw: EvidenceBytes,
+        role: Role,
+        stream_offset: i64,
+        boundary_verified: bool,
+    ) -> Result<Self> {
+        let bytes = raw.data();
+        if !raw.validate() {
+            return Err(Error::new(
+                ErrorCode::Invariant,
+                0,
+                "provenance",
+                "invalid Modbus source spans",
+            ));
         }
+        crate::semantics::modbus::envelope(bytes)?;
+        stream_offset
+            .checked_add(bytes.len() as i64)
+            .ok_or_else(|| Error::limit("stream_offset"))?;
+        let parse_role = if role == Role::Unknown {
+            Role::Request
+        } else {
+            role
+        };
+        let pdu = pdu::parse(&bytes[7..], parse_role);
+        let other_role = (role == Role::Unknown).then(|| pdu::parse(&bytes[7..], Role::Response));
+        let valid = pdu.as_ref().is_ok_and(pdu::Pdu::complete)
+            || other_role
+                .as_ref()
+                .is_some_and(|r| r.as_ref().is_ok_and(pdu::Pdu::complete));
+        let parsed = std::sync::Arc::new(Interpretation {
+            role: parse_role,
+            bytes: bytes.into(),
+            pdu,
+            other_role,
+        });
+        let supported = pdu::supported(&bytes[7..]) && role != Role::Unknown;
+        Ok(Self {
+            parsed,
+            stream_offset,
+            transaction: be16(&bytes[..2]),
+            unit: bytes[6],
+            function: bytes[7],
+            role,
+            shape_valid: valid,
+            semantics_supported: supported,
+            boundary_verified,
+            raw,
+        })
+    }
+    pub(crate) fn interpretation(&self, role: Role) -> Result<pdu::Pdu> {
+        if self.raw.data() == self.parsed.bytes.as_ref() {
+            if self.parsed.role == role {
+                return self.parsed.pdu.clone();
+            }
+            if role == Role::Response {
+                if let Some(result) = &self.parsed.other_role {
+                    return result.clone();
+                }
+            }
+        }
+        pdu::parse(self.raw.data().get(7..).unwrap_or_default(), role)
     }
     pub(crate) fn binding(&self) -> MessageBinding {
         MessageBinding {
             parsed: self.parsed.clone(),
             spans: self.raw.spans().into(),
             boundary: self.boundary_verified,
+            stream_offset: self.stream_offset,
         }
     }
 }
@@ -63,6 +136,7 @@ pub(crate) struct MessageBinding {
     parsed: std::sync::Arc<Interpretation>,
     spans: Box<[crate::provenance::SourceSpan]>,
     boundary: bool,
+    stream_offset: i64,
 }
 impl MessageBinding {
     pub(crate) fn matches(&self, message: &ModbusMessage) -> bool {
@@ -71,6 +145,7 @@ impl MessageBinding {
             && self.parsed.bytes.as_ref() == raw
             && self.spans.as_ref() == message.raw.spans()
             && message.role == self.parsed.role
+            && message.stream_offset == self.stream_offset
             && message.boundary_verified == self.boundary
             && message.shape_valid
             && message.semantics_supported
@@ -203,13 +278,13 @@ fn incomplete(
 ) -> Result<()> {
     let index = out.issues.len();
     add_issue(out, code, bytes, at, limits)?;
-    if let Some(span) = bytes.spans().first() {
+    if let Some(capture) = bytes.capture_scope() {
         let key = if code == "modbus_framing_lost" {
             String::new()
         } else {
             observation_prefix(bytes.data(), role)
         };
-        out.unfinished.push((span.packet.capture, key, index));
+        out.unfinished.push((capture, key, index));
     }
     Ok(())
 }
@@ -282,53 +357,32 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
                 )?;
                 break;
             }
-            let parse_role = if role == Role::Unknown {
-                Role::Request
-            } else {
-                role
-            };
-            let pdu = pdu::parse(&bytes[7..total], parse_role);
-            let valid = pdu.as_ref().is_ok_and(pdu::Pdu::complete)
-                || (role == Role::Unknown
-                    && pdu::parse(&bytes[7..total], Role::Response)
-                        .as_ref()
-                        .is_ok_and(pdu::Pdu::complete));
-            let parsed = std::sync::Arc::new(Interpretation {
-                role: parse_role,
-                bytes: bytes[..total].into(),
-                pdu,
-            });
-            let supported = pdu::supported(&bytes[7..total]) && role != Role::Unknown;
+            let raw = chunk.bytes.slice(p..p + total)?;
+            let message = ModbusMessage::from_adu(raw, role, at, verified)?;
             capacity(
                 &out,
-                1 + usize::from(!supported) + usize::from(!valid),
+                1 + usize::from(!message.semantics_supported) + usize::from(!message.shape_valid),
                 limits,
             )?;
-            let raw = chunk.bytes.slice(p..p + total)?;
-            if !supported {
+            if !message.semantics_supported {
                 add_issue(
                     &mut out,
                     "unsupported_modbus_function_or_role",
-                    &raw,
+                    &message.raw,
                     at,
                     limits,
                 )?;
             }
-            if !valid {
-                add_issue(&mut out, "invalid_modbus_pdu_shape", &raw, at, limits)?;
+            if !message.shape_valid {
+                add_issue(
+                    &mut out,
+                    "invalid_modbus_pdu_shape",
+                    &message.raw,
+                    at,
+                    limits,
+                )?;
             }
-            out.messages.push(ModbusMessage {
-                parsed,
-                stream_offset: at,
-                transaction: be16(&bytes[..2]),
-                unit: bytes[6],
-                function: bytes[7],
-                role,
-                shape_valid: valid,
-                semantics_supported: supported,
-                boundary_verified: verified,
-                raw,
-            });
+            out.messages.push(message);
             p += total;
         }
     }
@@ -394,6 +448,19 @@ mod tests {
         assert!(crate::report::analysis(&snapshot, false)
             .encode()
             .contains("read_mapping"));
-        super::pdu::PARSES.with(|n| assert_eq!(n.get(), 2));
+        super::pdu::PARSES.with(|n| assert_eq!(n.replace(0), 2));
+        let ambiguous = crate::engine::Config {
+            modbus_ports: vec![41000, 502],
+            ..Default::default()
+        };
+        let snapshot = crate::engine::analyze(
+            include_bytes!("../fixtures/semantics/modbus_fc23_split.pcap"),
+            ambiguous,
+        )
+        .unwrap();
+        assert!(crate::report::analysis(&snapshot, false)
+            .encode()
+            .contains("unresolved_role"));
+        super::pdu::PARSES.with(|n| assert_eq!(n.get(), 4));
     }
 }

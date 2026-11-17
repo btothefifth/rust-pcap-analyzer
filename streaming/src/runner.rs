@@ -492,23 +492,18 @@ impl State<'_> {
             Ok(d) => d,
             Err(e) => {
                 if meta.captured_len < meta.original_len {
-                    if let Some((scope, segment)) =
-                        wire::snapped_tcp(meta.link_type, data, id, scope)
+                    if let Some((scope, path, segment)) =
+                        network::snapped_tcp(meta.link_type, &raw, scope, self.c.max_tunnel_depth)
                     {
-                        let (key, _) = Key::new(
-                            scope.clone(),
-                            vec![],
-                            6,
-                            segment.source,
-                            segment.destination,
-                        );
-                        if let Some(tracker) = self
-                            .active
-                            .get_mut(&key)
-                            .and_then(|active| active.tracker.as_mut())
-                        {
-                            tracker.observe_snapped(scope, id, exact, &segment);
-                        }
+                        let (key, _) =
+                            Key::new(scope.clone(), path, 6, segment.source, segment.destination);
+                        let mut active = self.admit_window(&key, meta.frame, exact, &[id], 0)?;
+                        active
+                            .tracker
+                            .as_mut()
+                            .ok_or_else(|| Error::limit("tcp_tracker"))?
+                            .observe_snapped(scope, id, exact, &segment)?;
+                        self.put(active)?;
                     }
                 }
                 self.diagnostic(e.to_string(), vec![id], EvidenceStatus::Unsupported)?;
@@ -731,6 +726,61 @@ impl State<'_> {
         };
         self.transport(datagram.scope, path, transport, contributors, frame, time)
     }
+    fn admit_window(
+        &mut self,
+        key: &Key,
+        frame: u64,
+        time: Option<i128>,
+        packets: &[PacketId],
+        bytes: usize,
+    ) -> Result<Active> {
+        let packet_refs = packets.len();
+        let mut a = match self.take(key) {
+            Some(a) => a,
+            None => {
+                self.room(bytes)?;
+                self.create(key.clone(), frame, time)?
+            }
+        };
+        let idle = match (time, a.last_ns) {
+            (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
+            _ => false,
+        };
+        if idle
+            || a.packet_refs
+                .checked_add(packet_refs)
+                .is_none_or(|n| n > self.c.window_packets)
+            || a.payload
+                .checked_add(bytes)
+                .is_none_or(|n| n > self.c.window_payload)
+        {
+            self.flush(
+                a,
+                if idle {
+                    "idle_time_boundary"
+                } else {
+                    "reconstruction_window_budget"
+                },
+            )?;
+            a = self.create(key.clone(), frame, time)?;
+        }
+        self.room(a.payload + bytes)?;
+        if matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
+            self.diagnostic(
+                "capture_clock_reversal",
+                packets.to_vec(),
+                EvidenceStatus::Ambiguous,
+            )?;
+        }
+        a.last_frame = frame;
+        a.last_ns = match (time, a.last_ns) {
+            (Some(x), Some(y)) => Some(x.max(y)),
+            (x, None) => x,
+            (None, y) => y,
+        };
+        a.packet_refs += packet_refs;
+        Ok(a)
+    }
     fn transport(
         &mut self,
         scope: Scope,
@@ -766,50 +816,7 @@ impl State<'_> {
             return Ok(());
         }
         let (key, direction) = Key::new(scope.clone(), path, protocol, source, destination);
-        let mut a = match self.take(&key) {
-            Some(a) => a,
-            None => {
-                self.room(bytes)?;
-                self.create(key.clone(), frame, time)?
-            }
-        };
-        let idle = match (time, a.last_ns) {
-            (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
-            _ => false,
-        };
-        if idle
-            || a.packet_refs
-                .checked_add(packets.len())
-                .is_none_or(|n| n > self.c.window_packets)
-            || a.payload
-                .checked_add(bytes)
-                .is_none_or(|n| n > self.c.window_payload)
-        {
-            self.flush(
-                a,
-                if idle {
-                    "idle_time_boundary"
-                } else {
-                    "reconstruction_window_budget"
-                },
-            )?;
-            a = self.create(key.clone(), frame, time)?;
-        }
-        self.room(a.payload + bytes)?;
-        if matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
-            self.diagnostic(
-                "capture_clock_reversal",
-                packets.clone(),
-                EvidenceStatus::Ambiguous,
-            )?;
-        }
-        a.last_frame = frame;
-        a.last_ns = match (time, a.last_ns) {
-            (Some(x), Some(y)) => Some(x.max(y)),
-            (x, None) => x,
-            (None, y) => y,
-        };
-        a.packet_refs += packets.len();
+        let mut a = self.admit_window(&key, frame, time, &packets, bytes)?;
         match transport {
             Transport::Tcp(segment) => {
                 let syn = segment.syn();

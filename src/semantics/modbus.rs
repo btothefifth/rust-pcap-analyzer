@@ -46,7 +46,7 @@ use crate::modbus::{
     transaction::Summary,
 };
 
-fn envelope(b: &[u8]) -> Result<()> {
+pub(crate) fn envelope(b: &[u8]) -> Result<()> {
     need(b, 0, 8, "modbus_mbap_truncated")?;
     let len = uint(b, 4, 2, false) as usize;
     if uint(b, 2, 2, false) != 0 || !(2..=254).contains(&len) {
@@ -464,6 +464,10 @@ fn render<'a>(
                 remaining.max_records -= report.records.len();
                 remaining.max_fields -= report.fields;
                 remaining.max_source_spans -= report.spans;
+                let tail = report.tail_spans();
+                if tail <= remaining.max_source_spans {
+                    remaining.max_source_spans -= tail;
+                }
                 remaining.max_work -= report.work;
             }
             super::as_json(report)

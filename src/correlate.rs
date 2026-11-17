@@ -9,7 +9,7 @@ pub use dnp3_confirmations::{
 use crate::dnp3::MessageClass;
 use crate::engine::{Analysis, ApplicationAnalysis, ApplicationData};
 use crate::modbus::Role;
-use crate::provenance::{EvidenceBytes, PacketId};
+use crate::provenance::PacketId;
 use crate::wire::Endpoint;
 use crate::{Error, ErrorCode, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +33,9 @@ pub struct Transaction {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ModbusPair {
+    pub capture: [u8; 32],
+    pub flow: usize,
+    pub generation: Option<(usize, crate::tcp::FlowKey)>,
     pub refs: [MessageRef; 2],
     pub directions: [usize; 2],
     pub bindings: [crate::modbus::MessageBinding; 2],
@@ -45,20 +48,9 @@ struct Group {
     uncertain_boundary: bool,
 }
 
-// An absent, invalid or mixed-capture witness has no assignable source scope.
-fn capture_scope(raw: &EvidenceBytes) -> Option<[u8; 32]> {
-    if !raw.validate() {
-        return None;
-    }
-    let capture = raw.spans().first()?.packet.capture;
-    raw.spans()
-        .iter()
-        .all(|span| span.packet.capture == capture)
-        .then_some(capture)
-}
-
-/// Pair within one capture and connection generation. Reused small sequence
-/// numbers remain ambiguous rather than being joined by an invented clock/order heuristic.
+/// Group application observations by capture and caller-assigned flow. Reused
+/// identifiers remain ambiguous. Use `engine::analyze` for snapshot mappings
+/// checked against transport generations, gaps and conflicts.
 pub fn transactions(
     applications: &[ApplicationAnalysis],
     limits: &Limits,
@@ -198,15 +190,9 @@ pub(crate) fn transactions_with_flows(
                         .or_default()
                         .record(prefix.clone(), (ai, "issue", *index));
                 }
-                let discontinuous = flows.get(application.flow).is_some_and(|flow| {
-                    flow.uncertain_payload.is_some()
-                        || !flow.reconstruction_errors.is_empty()
-                        || flow
-                            .streams
-                            .iter()
-                            .flatten()
-                            .any(|s| !s.gaps.is_empty() || !s.conflicts.is_empty())
-                });
+                let discontinuous = flows
+                    .get(application.flow)
+                    .is_some_and(crate::tcp::FlowResult::has_transport_loss);
                 for (mi, message) in result.messages.iter().enumerate() {
                     count += 1;
                     if count > limits.max_protocol_messages {
@@ -221,7 +207,7 @@ pub(crate) fn transactions_with_flows(
                         .and_then(|work| work.checked_add(1))
                         .filter(|work| *work <= limits.max_correlation_checks)
                         .ok_or_else(|| Error::limit("transaction_capture_scope_work"))?;
-                    let capture = capture_scope(&message.raw);
+                    let capture = message.raw.capture_scope();
                     if discontinuous
                         || application.direction > 1
                         || application.protocol != "modbus"
@@ -317,43 +303,48 @@ pub(crate) fn transactions_with_flows(
         let competing = !witnesses.is_empty()
             || (protocol == "modbus" && failed_modbus_flows.contains(&(capture, flow)));
         let mut pair = None;
-        let inconsistent_modbus =
-            if protocol == "modbus" && group.requests.len() == 1 && group.responses.len() == 1 {
-                let request = &group.requests[0];
-                let response = &group.responses[0];
-                match (
-                    &applications[request.application].data,
-                    &applications[response.application].data,
-                ) {
-                    (ApplicationData::Modbus(a), ApplicationData::Modbus(b)) => {
-                        match crate::modbus::pair_summaries(
-                            &a.messages[request.message],
-                            &b.messages[response.message],
-                        ) {
-                            Some((left, right)) => {
-                                let agrees = left.agrees(&right);
-                                pair = Some(ModbusPair {
-                                    refs: [*request, *response],
-                                    directions: [
-                                        applications[request.application].direction,
-                                        applications[response.application].direction,
-                                    ],
-                                    bindings: [
-                                        a.messages[request.message].binding(),
-                                        b.messages[response.message].binding(),
-                                    ],
-                                    tokens: [left.token(), right.token()],
-                                });
-                                !agrees
-                            }
-                            None => true,
+        let inconsistent_modbus = if protocol == "modbus"
+            && group.requests.len() == 1
+            && group.responses.len() == 1
+        {
+            let request = &group.requests[0];
+            let response = &group.responses[0];
+            match (
+                &applications[request.application].data,
+                &applications[response.application].data,
+            ) {
+                (ApplicationData::Modbus(a), ApplicationData::Modbus(b)) => {
+                    match crate::modbus::pair_summaries(
+                        &a.messages[request.message],
+                        &b.messages[response.message],
+                    ) {
+                        Some((left, right)) => {
+                            let agrees = left.agrees(&right);
+                            pair = Some(ModbusPair {
+                                capture,
+                                flow,
+                                generation: flows.get(flow).map(|f| (f.generation, f.key.clone())),
+                                refs: [*request, *response],
+                                directions: [
+                                    applications[request.application].direction,
+                                    applications[response.application].direction,
+                                ],
+                                bindings: [
+                                    a.messages[request.message].binding(),
+                                    b.messages[response.message].binding(),
+                                ],
+                                tokens: [left.token(), right.token()],
+                            });
+                            !agrees
                         }
+                        None => true,
                     }
-                    _ => false,
                 }
-            } else {
-                false
-            };
+                _ => false,
+            }
+        } else {
+            false
+        };
         let same_direction = group.requests.len() == 1
             && group.responses.len() == 1
             && applications[group.requests[0].application].direction

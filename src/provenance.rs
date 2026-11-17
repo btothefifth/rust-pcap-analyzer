@@ -180,6 +180,13 @@ impl EvidenceBytes {
         }
         Ok(())
     }
+    /// Capture identity shared by every contributing byte, if established.
+    pub(crate) fn capture_scope(&self) -> Option<[u8; 32]> {
+        let capture = self.spans.first()?.packet.capture;
+        (self.validate() && self.spans.iter().all(|s| s.packet.capture == capture))
+            .then_some(capture)
+    }
+
     pub fn packets(&self) -> Vec<PacketId> {
         let mut ids: Vec<_> = self.spans.iter().map(|s| s.packet).collect();
         ids.sort();

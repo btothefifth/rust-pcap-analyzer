@@ -131,7 +131,9 @@ pub fn snapped_tcp(
     };
     Some((d.scope, segment))
 }
-fn decode_packet_extent(
+/// Read captured network headers for loss attribution. In prefix mode the
+/// returned datagram may have fewer bytes than the declared IP length.
+pub fn decode_packet_extent(
     link_type: u32,
     packet: &[u8],
     id: PacketId,

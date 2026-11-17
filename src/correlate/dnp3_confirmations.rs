@@ -64,7 +64,7 @@ fn invalid_scope(
     limits: &Limits,
 ) -> Result<InvalidScope> {
     charge(work, fragment.raw.spans().len(), limits)?;
-    let Some(capture) = super::capture_scope(&fragment.raw) else {
+    let Some(capture) = fragment.raw.capture_scope() else {
         return Ok(InvalidScope::UnknownCapture(flow));
     };
     for &index in &fragment.frames {
@@ -73,7 +73,7 @@ fn invalid_scope(
             return Ok(InvalidScope::UnknownCapture(flow));
         };
         charge(work, frame.raw.spans().len(), limits)?;
-        if super::capture_scope(&frame.raw) != Some(capture) {
+        if frame.raw.capture_scope() != Some(capture) {
             return Ok(InvalidScope::UnknownCapture(flow));
         }
     }

@@ -19,6 +19,15 @@ records a response. Captures alone cannot establish execution on a device.
 Serial functions 7/8/11/12/17, RTU, CANopen MEI 13, vendor maps and device
 identification across pages remain outside this profile.
 
+### Rust caller migration
+
+The 0.2 root crate keeps the existing wire and report readers. Building a
+message or a finalized pair from public flags alone cannot establish which
+bytes supplied its cached fields. The implementation therefore changes Rust
+struct construction and exhaustive enum matching. The checked single-frame
+constructor, stream decoder and correlator are the supported entry points.
+See the [source migration notes](../../CHANGELOG.md).
+
 ## Project intent and current structure
 
 The project turns offline capture bytes into inspectable evidence. Source hashes,

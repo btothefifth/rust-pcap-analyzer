@@ -358,13 +358,62 @@ pub struct FlowResult {
     /// First unassigned or snapped data packet compatible with this generation.
     pub uncertain_payload: Option<PacketId>,
 }
+impl FlowResult {
+    pub(crate) fn has_transport_loss(&self) -> bool {
+        self.uncertain_payload.is_some()
+            || !self.reconstruction_errors.is_empty()
+            || self
+                .streams
+                .iter()
+                .flatten()
+                .any(|s| !s.gaps.is_empty() || !s.conflicts.is_empty())
+    }
+}
 #[derive(Clone, Debug)]
 pub enum Assignment {
     Assigned { flow_id: usize, direction: usize },
     Ambiguous { candidate_flow_ids: Vec<usize> },
     Unassigned { reason: &'static str },
 }
+impl Flow {
+    fn sequence_plausible(
+        &self,
+        direction: usize,
+        seq: u32,
+        ack: Option<u32>,
+        max_span: i64,
+    ) -> bool {
+        let pair = self.anchors[direction]
+            .map(|base| (seq, base))
+            .or_else(|| ack.zip(self.anchors[1 - direction]));
+        pair.is_none_or(|(seq, base)| sequence_delta(seq, base).is_ok_and(|d| d.abs() <= max_span))
+    }
+    fn note_uncertain(&mut self, packet: PacketId) {
+        self.uncertain_payload = Some(self.uncertain_payload.map_or(packet, |p| p.min(packet)));
+    }
+}
+
+struct SnappedHeader {
+    packet: PacketId,
+    time: Option<i128>,
+    direction: usize,
+    sequence: u32,
+    ack: Option<u32>,
+    // Generations below this ID were already considered at packet admission.
+    first_future_id: usize,
+}
+impl SnappedHeader {
+    fn matches(&self, flow: &Flow, max_span: i64) -> bool {
+        flow.packets
+            .first()
+            .is_some_and(|p| p.capture == self.packet.capture)
+            && flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span)
+    }
+}
 pub struct TcpTracker {
+    snapped: BTreeMap<FlowKey, Vec<SnappedHeader>>,
+    snap_count: usize,
+    remaining_snap_checks: usize,
     keys: BTreeMap<FlowKey, Vec<usize>>,
     flows: Vec<Flow>,
     retained: usize,
@@ -385,6 +434,9 @@ impl TcpTracker {
         Ok(Self {
             keys: BTreeMap::new(),
             flows: Vec::new(),
+            snapped: BTreeMap::new(),
+            snap_count: 0,
+            remaining_snap_checks: limits.max_correlation_checks,
             retained: 0,
             limits,
             idle_ns,
@@ -426,17 +478,12 @@ impl TcpTracker {
         }
     }
     fn plausible(&self, flow: &Flow, direction: usize, segment: &TcpSegment) -> bool {
-        if let Some(anchor) = flow.anchors[direction] {
-            return sequence_delta(segment.data_sequence(), anchor)
-                .is_ok_and(|d| d.abs() <= self.limits.max_stream_span as i64);
-        }
-        if segment.ack() {
-            if let Some(anchor) = flow.anchors[1 - direction] {
-                return sequence_delta(segment.acknowledgement, anchor)
-                    .is_ok_and(|d| d.abs() <= self.limits.max_stream_span as i64);
-            }
-        }
-        true
+        flow.sequence_plausible(
+            direction,
+            segment.data_sequence(),
+            segment.ack().then_some(segment.acknowledgement),
+            self.limits.max_stream_span as i64,
+        )
     }
     fn is_final_ack(flow: &Flow, direction: usize, segment: &TcpSegment) -> bool {
         if flow.rst_seen
@@ -457,28 +504,65 @@ impl TcpTracker {
             _ => false,
         }
     }
+    /// Retain only the captured TCP identifiers until the window's generation
+    /// anchors are known. A snapped packet never supplies reconstructed bytes.
     pub fn observe_snapped(
         &mut self,
         scope: Scope,
         packet: PacketId,
         when: Option<i128>,
         segment: &TcpSegment,
-    ) {
+    ) -> Result<()> {
+        if self.snap_count >= self.limits.max_records {
+            return Err(Error::limit("snapped_tcp_headers"));
+        }
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
-        if let Some(ids) = self.keys.get(&key) {
-            for &id in ids {
-                let flow = &self.flows[id];
-                if self.active_at(flow, when) && self.plausible(flow, direction, segment) {
-                    self.flows[id].uncertain_payload.get_or_insert(packet);
-                }
+        if !self.snapped.contains_key(&key) && self.snapped.len() >= self.limits.max_flows {
+            return Err(Error::limit("snapped_tcp_keys"));
+        }
+        let header = SnappedHeader {
+            packet,
+            time: when,
+            direction,
+            sequence: segment.data_sequence(),
+            ack: segment.ack().then_some(segment.acknowledgement),
+            first_future_id: self.flows.len(),
+        };
+        let max_span = self.limits.max_stream_span as i64;
+        let ids = self.keys.get(&key).map_or(&[][..], Vec::as_slice);
+        self.remaining_snap_checks = self
+            .remaining_snap_checks
+            .checked_sub(ids.len())
+            .ok_or_else(|| Error::limit("snapped_tcp_generation_checks"))?;
+        let mut compatible = Vec::new();
+        let mut open = false;
+        for &id in ids {
+            let flow = &self.flows[id];
+            if self.active_at(flow, when) && header.matches(flow, max_span) {
+                compatible.push(id);
+                open |= !flow.closed;
             }
         }
+        let headers = self.snapped.entry(key).or_default();
+        if headers.len() >= self.limits.max_segments_per_flow {
+            return Err(Error::limit("snapped_tcp_headers"));
+        }
+        if open {
+            // With only closed candidates a late data packet is unassigned.
+            // An open competitor makes all compatible generations ambiguous.
+            for id in compatible {
+                self.flows[id].note_uncertain(packet);
+            }
+        }
+        headers.push(header);
+        self.snap_count += 1;
+        Ok(())
     }
 
     fn ambiguous(&mut self, ids: Vec<usize>, segment: &TcpSegment, packet: PacketId) -> Assignment {
         if !segment.payload.is_empty() {
             for &id in &ids {
-                self.flows[id].uncertain_payload.get_or_insert(packet);
+                self.flows[id].note_uncertain(packet);
             }
         }
         Assignment::Ambiguous {
@@ -651,12 +735,13 @@ impl TcpTracker {
     }
     pub fn finish(self, policy: OverlapPolicy) -> Result<Vec<FlowResult>> {
         let mut output = Vec::with_capacity(self.flows.len());
+        let mut checks = self.remaining_snap_checks;
         for mut flow in self.flows {
             let mut a = StreamAssembler::new(flow.syn[0], self.limits.clone());
             let mut b = StreamAssembler::new(flow.syn[1], self.limits.clone());
             let mut reconstruction_errors = Vec::new();
             let mut invalid = [false, false];
-            for input in flow.inputs {
+            for input in std::mem::take(&mut flow.inputs) {
                 if invalid[input.direction] {
                     continue;
                 }
@@ -702,6 +787,24 @@ impl TcpTracker {
             };
             flow.packets.sort();
             flow.packets.dedup();
+            if let Some(headers) = self.snapped.get(&flow.key) {
+                // Headers are appended in admission order. Later headers were
+                // checked against this generation while it was active.
+                let end = headers.partition_point(|h| h.first_future_id <= flow.id);
+                for header in &headers[..end] {
+                    checks = checks
+                        .checked_sub(1)
+                        .ok_or_else(|| Error::limit("snapped_tcp_generation_checks"))?;
+                    let expired = header
+                        .time
+                        .zip(flow.first_ns)
+                        .is_some_and(|(seen, start)| start.saturating_sub(seen) > self.idle_ns);
+                    if !expired && header.matches(&flow, self.limits.max_stream_span as i64) {
+                        flow.note_uncertain(header.packet);
+                        break;
+                    }
+                }
+            }
             flow.anomalies.sort();
             flow.anomalies.dedup();
             output.push(FlowResult {

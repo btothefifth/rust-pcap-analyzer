@@ -372,6 +372,12 @@ impl<'a> Report<'a> {
         self.consumed = at.min(self.source.len());
         self.warn(error.field, self.consumed..self.source.len());
     }
+    /// Tail provenance shares the same span allowance as the decoded fields.
+    pub(crate) fn tail_spans(&self) -> usize {
+        let spans = self.source.spans();
+        spans.len() - spans.partition_point(|s| s.end <= self.consumed)
+    }
+
     pub fn json(&self) -> Result<Json> {
         let value = Json::object([
             ("schema", SCHEMA.into()),
@@ -432,7 +438,22 @@ impl<'a> Report<'a> {
                         ("range", range_json(&(self.consumed..self.source.len()))),
                         (
                             "evidence",
-                            witness(self.source, &(self.consumed..self.source.len())),
+                            if self.tail_spans() <= self.limits.max_source_spans - self.spans {
+                                witness(self.source, &(self.consumed..self.source.len()))
+                            } else {
+                                Json::object([
+                                    ("status", "limit_exceeded".into()),
+                                    ("reason", "semantic_tail_spans".into()),
+                                    (
+                                        "sha256",
+                                        sha256::hex(&sha256::digest(
+                                            &self.source.data()[self.consumed..],
+                                        ))
+                                        .into(),
+                                    ),
+                                    ("spans", Json::Array(Vec::new())),
+                                ])
+                            },
                         ),
                     ])
                 } else {

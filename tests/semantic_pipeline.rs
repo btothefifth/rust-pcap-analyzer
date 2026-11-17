@@ -144,3 +144,92 @@ fn modbus_decoder_failure_applies_only_to_its_capture_and_generation() {
         .iter()
         .any(|tx| tx.status == "candidate_pair"));
 }
+
+#[test]
+fn moving_a_pair_to_another_flow_or_capture_invalidates_its_mapping() {
+    let mut snapshot = engine::analyze(
+        &capture("modbus_generation_overlap.pcap"),
+        Default::default(),
+    )
+    .unwrap();
+    let has_mapping =
+        |s: &engine::Analysis| report::analysis(s, false).encode().contains("read_mapping");
+    assert!(has_mapping(&snapshot));
+    let original = snapshot.capture_sha256;
+    snapshot.capture_sha256 = [1; 32];
+    assert!(!has_mapping(&snapshot));
+    snapshot.capture_sha256 = original;
+    let pair = snapshot
+        .transactions
+        .iter_mut()
+        .find(|t| t.status == "candidate_pair")
+        .unwrap();
+    assert_ne!(pair.flow, 0);
+    let flow = pair.flow;
+    let key = snapshot.flows[flow].key.clone();
+    snapshot.flows[flow].key.scope.vlans.push(100);
+    assert!(!has_mapping(&snapshot));
+    snapshot.flows[flow].key = key;
+    assert!(has_mapping(&snapshot));
+    let pair = snapshot
+        .transactions
+        .iter_mut()
+        .find(|t| t.status == "candidate_pair")
+        .unwrap();
+    pair.flow = 0;
+    for r in [pair.requests[0], pair.responses[0]] {
+        snapshot.applications[r.application].flow = 0;
+    }
+    assert!(!has_mapping(&snapshot));
+}
+
+#[test]
+fn partial_mbap_requires_one_capture_to_compete_with_a_pair() {
+    use pcap_evidence::{
+        correlate, modbus,
+        provenance::{EvidenceBytes, PacketId},
+        tcp::{StreamChunk, StreamResult},
+        Limits,
+    };
+    let snapshot = engine::analyze(&capture("modbus_bits_valid.pcap"), Default::default()).unwrap();
+    let pair = snapshot
+        .transactions
+        .iter()
+        .find(|t| t.status == "candidate_pair")
+        .unwrap();
+    let app = &snapshot.applications[pair.requests[0].application];
+    let engine::ApplicationData::Modbus(data) = &app.data else {
+        unreachable!()
+    };
+    let raw = &data.messages[pair.requests[0].message].raw;
+    let first = raw.spans()[0].packet;
+    for (capture, expect_pair) in [([7; 32], true), (first.capture, false)] {
+        let mut bytes = raw.slice(0..2).unwrap();
+        bytes
+            .append(
+                &EvidenceBytes::from_packet(&raw.data()[2..8], PacketId { capture, ..first }, 56),
+                64,
+            )
+            .unwrap();
+        let stream = StreamResult {
+            base_sequence: None,
+            anchored_by_syn: true,
+            chunks: vec![StreamChunk { offset: 0, bytes }],
+            gaps: vec![],
+            conflicts: vec![],
+            duplicate_observed_bytes: 0,
+        };
+        let result = modbus::decode(&stream, modbus::Role::Request, &Limits::default()).unwrap();
+        assert_eq!(result.issues[0].code, "truncated_modbus_adu");
+        let mut apps = snapshot.applications.clone();
+        apps.push(engine::ApplicationAnalysis {
+            data: engine::ApplicationData::Modbus(result),
+            ..app.clone()
+        });
+        let groups = correlate::transactions(&apps, &Limits::default()).unwrap();
+        assert_eq!(
+            groups.iter().any(|t| t.status == "candidate_pair"),
+            expect_pair
+        );
+    }
+}

@@ -236,7 +236,20 @@ fn modbus_pair_fields(
     let ([req], [rsp]) = (t.requests.as_slice(), t.responses.as_slice()) else {
         return None;
     };
-    if t.protocol != "modbus" || t.status != *status || pair.refs != [*req, *rsp] {
+    if t.protocol != "modbus"
+        || t.status != *status
+        || pair.refs != [*req, *rsp]
+        || pair.capture != value.capture_sha256
+        || pair.flow != t.flow
+        || !value.flows.get(pair.flow).is_some_and(|f| {
+            f.id == pair.flow
+                && pair
+                    .generation
+                    .as_ref()
+                    .is_some_and(|(generation, key)| *generation == f.generation && key == &f.key)
+                && !f.has_transport_loss()
+        })
+    {
         return None;
     }
     for ((r, binding), direction) in pair.refs.iter().zip(&pair.bindings).zip(pair.directions) {

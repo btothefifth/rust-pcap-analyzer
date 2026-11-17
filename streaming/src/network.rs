@@ -34,11 +34,14 @@ fn hex(b: &[u8]) -> String {
 }
 
 pub fn decode(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+    decode_extent(link, raw, scope, false)
+}
+fn decode_extent(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     if !raw.validate() {
         return Err(malformed("provenance", "invalid input spans"));
     }
     if link == 127 || link == 105 {
-        return wireless(link, raw, scope);
+        return wireless(link, raw, scope, partial);
     }
     let b = raw.data();
     let mut scoped = scope.clone();
@@ -72,18 +75,21 @@ pub fn decode(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
             return arp(&b[p..]);
         }
         if ty == 0x8847 || ty == 0x8848 {
-            return mpls(&raw.slice(p..raw.len())?, scoped);
+            return mpls(&raw.slice(p..raw.len())?, scoped, partial);
         }
     }
-    Ok(Decoded::Ip(decode_ip(link, raw, scope)?, Vec::new()))
+    Ok(Decoded::Ip(
+        decode_ip(link, raw, scope, partial)?,
+        Vec::new(),
+    ))
 }
-fn decode_ip(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Datagram> {
+fn decode_ip(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Datagram> {
     let id = raw
         .spans()
         .first()
         .ok_or_else(|| malformed("network", "empty network packet"))?
         .packet;
-    let mut d = wire::decode_packet(link, raw.data(), id, scope)?;
+    let mut d = wire::decode_packet_extent(link, raw.data(), id, scope, partial)?;
     // wire::decode_packet made a temporary single-span view. Rebind its relative
     // offsets through the ORIGINAL evidence (possibly several IP fragments).
     let start = d
@@ -128,7 +134,7 @@ fn arp(b: &[u8]) -> Result<Decoded> {
         ]),
     })
 }
-fn mpls(raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+fn mpls(raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     let b = raw.data();
     let mut labels = Vec::new();
     let mut p = 0;
@@ -161,11 +167,11 @@ fn mpls(raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
     };
     let path = format!("mpls:{labels:?}");
     Ok(Decoded::Ip(
-        decode_ip(link, &raw.slice(p..raw.len())?, scope)?,
+        decode_ip(link, &raw.slice(p..raw.len())?, scope, partial)?,
         vec![path],
     ))
 }
-fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     let b = raw.data();
     let mut start = 0usize;
     let mut end = b.len();
@@ -205,7 +211,7 @@ fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
             need(&b[..start], at + 1, "radiotap_flags")?;
             flags = b[at];
         }
-        if flags & 0x10 != 0 {
+        if flags & 0x10 != 0 && !partial {
             end = end
                 .checked_sub(4)
                 .ok_or_else(|| malformed("radiotap", "missing FCS"))?;
@@ -264,7 +270,7 @@ fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
         return unsupported("non_snap_payload");
     }
     let ty = u16be(b, p + 6);
-    let mut out = ethertype(ty, &raw.slice(p + 8..end)?, scope)?;
+    let mut out = ethertype(ty, &raw.slice(p + 8..end)?, scope, partial)?;
     if let Decoded::Ip(_, path) = &mut out {
         // Preserve capture-layer namespace instead of merging all WLAN traffic.
         let bssid = match fc & 0x0300 {
@@ -277,12 +283,12 @@ fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
     }
     Ok(out)
 }
-fn ethertype(ty: u16, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+fn ethertype(ty: u16, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     match ty {
-        0x0800 => Ok(Decoded::Ip(decode_ip(228, raw, scope)?, vec![])),
-        0x86dd => Ok(Decoded::Ip(decode_ip(229, raw, scope)?, vec![])),
-        0x6558 => decode(1, raw, scope),
-        0x8847 | 0x8848 => mpls(raw, scope),
+        0x0800 => Ok(Decoded::Ip(decode_ip(228, raw, scope, partial)?, vec![])),
+        0x86dd => Ok(Decoded::Ip(decode_ip(229, raw, scope, partial)?, vec![])),
+        0x6558 => decode_extent(1, raw, scope, partial),
+        0x8847 | 0x8848 => mpls(raw, scope, partial),
         0x0806 => arp(raw.data()),
         _ => Ok(Decoded::Metadata {
             protocol: "ethernet",
@@ -339,6 +345,9 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
 /// conflicting hints, unknown critical options, GRE routing/version extensions,
 /// and encrypted tunnels never authorize inner decoding.
 pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
+    peel_extent(d, false)
+}
+fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>> {
     let b = d.payload.data();
     let (ty, start, label) = if d.protocol == 47 {
         need(b, 4, "gre")?;
@@ -354,7 +363,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
         let mut key = None;
         if f & 0x8000 != 0 {
             need(b, p + 4, "gre_checksum")?;
-            if u16be(b, p + 2) != 0 || wire::internet_checksum(b) != 0 {
+            if u16be(b, p + 2) != 0 || (!partial && wire::internet_checksum(b) != 0) {
                 return Err(malformed(
                     "gre_checksum",
                     "invalid checksum or reserved field",
@@ -377,7 +386,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
         let src = u16be(b, 0);
         let dst = u16be(b, 2);
         let n = usize::from(u16be(b, 4));
-        if n < 8 || n > b.len() {
+        if n < 8 || (!partial && n > b.len()) {
             return Err(malformed("udp_tunnel", "invalid UDP length"));
         }
         let vx = src == 4789 || dst == 4789;
@@ -388,6 +397,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
         if !vx && !ge {
             return Ok(None);
         }
+        let n = n.min(b.len());
         let t = &b[8..n];
         need(t, 8, "udp_tunnel_header")?;
         let vni = (u32::from(t[4]) << 16) | (u32::from(t[5]) << 8) | u32::from(t[6]);
@@ -397,7 +407,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
             }
             // Honor UDP length rather than accidentally decoding trailing IP bytes.
             return Ok(Some((
-                ethertype(0x6558, &d.payload.slice(16..n)?, d.scope.clone())?,
+                ethertype(0x6558, &d.payload.slice(16..n)?, d.scope.clone(), partial)?,
                 tunnel_key(d, &format!("vxlan:{vni}")),
             )));
         }
@@ -435,6 +445,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
                 u16be(t, 2),
                 &d.payload.slice(16 + options..n)?,
                 d.scope.clone(),
+                partial,
             )?,
             tunnel_key(d, &format!("geneve:{vni}")),
         )));
@@ -446,6 +457,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
             ty,
             &d.payload.slice(start..d.payload.len())?,
             d.scope.clone(),
+            partial,
         )?,
         tunnel_key(d, &label),
     )))
@@ -565,4 +577,41 @@ pub fn transport_metadata(d: &Datagram) -> Result<Option<(&'static str, Json)>> 
         }
         _ => Ok(None),
     }
+}
+
+/// Recover only the path and TCP header. Prefix decoding cannot admit a
+/// datagram, validate a transport checksum, or supply protocol payload.
+pub(crate) fn snapped_tcp(
+    link: u32,
+    raw: &EvidenceBytes,
+    scope: Scope,
+    max_depth: usize,
+) -> Option<(Scope, Vec<String>, wire::TcpSegment)> {
+    let mut current = decode_extent(link, raw, scope, true).ok()?;
+    let mut path = Vec::new();
+    for depth in 0..=max_depth {
+        let Decoded::Ip(datagram, context) = current else {
+            return None;
+        };
+        if datagram.fragment.is_some() {
+            return None;
+        }
+        path.extend(context);
+        let datagram = normalize(datagram).ok()?;
+        if datagram.protocol == 6 {
+            let wire::Transport::Tcp(segment) =
+                wire::decode_transport(&datagram, wire::ChecksumPolicy::Observe).ok()?
+            else {
+                return None;
+            };
+            return Some((datagram.scope, path, segment));
+        }
+        if depth == max_depth {
+            return None;
+        }
+        let (inner, hop) = peel_extent(&datagram, true).ok()??;
+        path.push(hop);
+        current = inner;
+    }
+    None
 }
