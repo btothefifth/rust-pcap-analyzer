@@ -318,13 +318,7 @@ impl StreamBuffer {
         let end = offset
             .checked_add(i64::try_from(bytes.len()).map_err(|_| Error::limit("stream_offset"))?)
             .ok_or_else(|| Error::limit("stream_offset"))?;
-        if self
-            .pending
-            .spans()
-            .len()
-            .saturating_add(bytes.spans().len())
-            > self.spans
-        {
+        if self.pending.appended_span_count(bytes) > self.spans {
             return Err(Error::limit("stream_buffer_spans"));
         }
         if self.pending.is_empty() {

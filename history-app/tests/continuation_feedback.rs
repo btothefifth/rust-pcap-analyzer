@@ -265,19 +265,34 @@ fn modbus_mask_write_keeps_both_echo_roles_across_history_pages() {
 #[test]
 fn history_modbus_nested_interpretations_obey_field_budget() {
     let adu = [0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1];
-    let (result, output) = consume_with_limits(
-        "modbus",
-        &adu,
-        adu.len(),
-        Limits {
-            fields: 1,
-            elements: 1,
-            spans: 1,
-            ..Limits::default()
-        },
-    );
-    result.unwrap();
-    assert!(output.contains("analysis.complete"));
-    assert!(output.contains("limit_exceeded"));
-    assert!(!output.contains("and_mask"));
+    for page in [1, 3, adu.len()] {
+        for (fields, elements, spans, decoded) in [
+            (1, 1, 1, 0),
+            (8, 2, 8, 1),
+            (15, 4, 16, 1),
+            (16, 3, 16, 1),
+            (16, 4, 15, 1),
+            (16, 4, 16, 2),
+        ] {
+            let (result, output) = consume_with_limits(
+                "modbus",
+                &adu,
+                page,
+                Limits {
+                    fields,
+                    elements,
+                    spans,
+                    ..Limits::default()
+                },
+            );
+            result.unwrap();
+            assert!(output.contains("analysis.complete"));
+            assert_eq!(
+                output.matches("and_mask").count(),
+                decoded,
+                "{fields}/{elements}/{spans}, page {page}"
+            );
+            assert_eq!(output.contains("limit_exceeded"), decoded < 2);
+        }
+    }
 }

@@ -101,6 +101,11 @@ pub enum ApplicationData {
     Dnp3(Dnp3Result),
     Modbus(ModbusResult),
     Failed(Error),
+    /// The capture and generation remain known when Modbus decoding exhausts a limit.
+    ModbusFailed {
+        capture: [u8; 32],
+        error: Error,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct ApplicationAnalysis {
@@ -153,7 +158,7 @@ impl Analysis {
                         .any(|s| !s.gaps.is_empty() || !s.conflicts.is_empty())
             })
             || self.applications.iter().any(|a| match &a.data {
-                ApplicationData::Failed(_) => true,
+                ApplicationData::Failed(_) | ApplicationData::ModbusFailed { .. } => true,
                 ApplicationData::Dnp3(d) => {
                     !d.issues.is_empty() || d.messages.iter().any(|m| !m.complete)
                 }
@@ -274,9 +279,16 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             link_interface: None,
             vlans: Vec::new(),
         };
-        let network = match wire::decode_packet(metadata.link_type, data, id, scope) {
+        let network = match wire::decode_packet(metadata.link_type, data, id, scope.clone()) {
             Ok(d) => d,
             Err(e) => {
+                if metadata.captured_len < metadata.original_len {
+                    if let Some((scope, segment)) =
+                        wire::snapped_tcp(metadata.link_type, data, id, scope)
+                    {
+                        tracker.observe_snapped(scope, id, time, &segment);
+                    }
+                }
                 packets[at].disposition = Disposition::Rejected {
                     code: e.code.as_str(),
                     detail: e.to_string(),
@@ -454,7 +466,10 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     "modbus",
                     match modbus::decode(stream, role, &config.limits) {
                         Ok(d) => ApplicationData::Modbus(d),
-                        Err(e) => ApplicationData::Failed(e),
+                        Err(error) => ApplicationData::ModbusFailed {
+                            capture: identity,
+                            error,
+                        },
                     },
                 )
             } else {

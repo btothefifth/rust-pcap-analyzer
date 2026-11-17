@@ -3,18 +3,18 @@
 use super::Role;
 use crate::{Error, ErrorCode, Result};
 
-#[derive(Debug)]
-pub(crate) enum Pdu<'a> {
+#[derive(Clone, Debug)]
+pub(crate) enum Pdu {
     Read {
         start: u16,
         count: u16,
     },
-    ReadData(&'a [u8]),
+    ReadData(usize),
     Single,
     Multiple {
         start: u16,
         count: u16,
-        data: &'a [u8],
+        data_len: usize,
     },
     WriteAck {
         start: u16,
@@ -26,32 +26,37 @@ pub(crate) enum Pdu<'a> {
         count: u16,
         write_start: u16,
         write_count: u16,
-        data: &'a [u8],
+        data_len: usize,
     },
     FifoRequest,
-    FifoData(&'a [u8]),
-    Files(Vec<FileRecord<'a>>),
+    FifoData(usize),
+    Files(Vec<FileRecord>, Option<Error>),
     DeviceRequest,
-    DevicePage(Vec<Object<'a>>),
+    DevicePage(Vec<Object>, Option<Error>),
     Exception(u8),
     Opaque,
 }
 
-#[derive(Debug)]
-pub(crate) struct FileRecord<'a> {
+#[derive(Clone, Debug)]
+pub(crate) struct FileRecord {
     pub offset: usize,
     pub address: Option<(u16, u16)>,
     pub words: u16,
-    pub data: &'a [u8],
+    pub data_len: usize,
 }
 
-#[derive(Debug)]
-pub(crate) struct Object<'a> {
+#[derive(Clone, Debug)]
+pub(crate) struct Object {
     pub offset: usize,
     pub id: u8,
-    pub value: &'a [u8],
+    pub value_len: usize,
 }
 
+impl Pdu {
+    pub(crate) fn complete(&self) -> bool {
+        !matches!(self, Pdu::Files(_, Some(_)) | Pdu::DevicePage(_, Some(_)))
+    }
+}
 fn invalid(at: usize, field: &'static str) -> Error {
     Error::new(
         ErrorCode::InvalidLength,
@@ -106,7 +111,12 @@ pub(crate) fn supported(b: &[u8]) -> bool {
     matches!(b.first().map(|f| f & 0x7f), Some(1..=6 | 15 | 16 | 20..=24))
         || matches!(b, [43] | [43, 14, ..] | [0xab, ..])
 }
-pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
+#[cfg(test)]
+std::thread_local! {pub(super) static PARSES:std::cell::Cell<usize>=const {std::cell::Cell::new(0)};}
+
+pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu> {
+    #[cfg(test)]
+    PARSES.with(|n| n.set(n.get() + 1));
     let f = byte(b, 0)?;
     require(
         b.len() <= 253 && f & 0x7f != 0 && role != Role::Unknown,
@@ -148,7 +158,7 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
                 1,
                 "modbus_read_response_byte_count",
             )?;
-            Ok(Pdu::ReadData(&b[2..]))
+            Ok(Pdu::ReadData(n))
         }
         5 | 6 => {
             exact(b, 5)?;
@@ -187,7 +197,7 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
             Ok(Pdu::Multiple {
                 start,
                 count,
-                data: &b[6..],
+                data_len: bytes,
             })
         }
         20 | 21 => file_records(b, f == 21, request),
@@ -209,7 +219,7 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
                 count,
                 write_start,
                 write_count,
-                data: &b[10..],
+                data_len: bytes,
             })
         }
         24 if request => {
@@ -224,79 +234,88 @@ pub(crate) fn parse(b: &[u8], role: Role) -> Result<Pdu<'_>> {
                 1,
                 "modbus_fifo_count",
             )?;
-            Ok(Pdu::FifoData(&b[5..]))
+            Ok(Pdu::FifoData(count))
         }
         43 if byte(b, 1)? == 14 => device(b, request),
         _ => Ok(Pdu::Opaque),
     }
 }
 
-fn file_records(b: &[u8], write: bool, request: bool) -> Result<Pdu<'_>> {
+fn file_records(b: &[u8], write: bool, request: bool) -> Result<Pdu> {
     let len = usize::from(byte(b, 1)?);
     require(
-        len > 0 && len + 2 == b.len() && (write || !request || len <= 245),
+        len > 0 && len + 2 == b.len() && (write || len <= 245),
         1,
         "modbus_file_bytes",
     )?;
     let mut records = Vec::new();
-    let mut at = 2;
-    let mut expected_response = 2;
-    while at < b.len() {
-        let offset = at;
-        if write || request {
-            require(byte(b, at)? == 6, at, "modbus_file_reference")?;
-            let file = word(b, at + 1)?;
-            let record = word(b, at + 3)?;
-            let words = word(b, at + 5)?;
-            require(
-                file != 0 && words != 0 && u32::from(record) + u32::from(words) <= 10000,
-                at + 1,
-                "modbus_file_range",
-            )?;
-            at += 7;
-            let bytes = usize::from(words) * 2;
-            let end = if write { at + bytes } else { at };
-            let data = b
-                .get(at..end)
-                .ok_or_else(|| invalid(at, "modbus_file_data"))?;
-            if !write {
-                expected_response += 2 + bytes;
-                require(
-                    expected_response <= 253,
-                    offset,
-                    "modbus_file_response_size",
-                )?;
-            }
-            records.push(FileRecord {
-                offset,
-                address: Some((file, record)),
-                words,
-                data,
-            });
-            at = end;
+    let mut offset = 2;
+    let mut response_bytes = 0;
+    while offset < b.len() {
+        let parsed = if write || request {
+            file_address_record(b, offset, write)
         } else {
-            let n = usize::from(byte(b, at)?);
-            require(
-                n >= 3 && n % 2 == 1 && byte(b, at + 1)? == 6,
-                at,
-                "modbus_file_response",
-            )?;
-            at += 1 + n;
-            let data = b
-                .get(offset + 2..at)
-                .ok_or_else(|| invalid(offset, "modbus_file_data"))?;
-            records.push(FileRecord {
-                offset,
-                address: None,
-                words: (data.len() / 2) as u16,
-                data,
-            });
+            file_response_record(b, offset)
+        };
+        let record = match parsed {
+            Ok(record) => record,
+            Err(error) => return Ok(Pdu::Files(records, Some(error))),
+        };
+        if request && !write {
+            response_bytes += 2 + 2 * usize::from(record.words);
+            if response_bytes > 245 {
+                return Ok(Pdu::Files(
+                    records,
+                    Some(invalid(offset, "modbus_file_response_size")),
+                ));
+            }
         }
+        offset += if record.address.is_some() { 7 } else { 2 };
+        offset += record.data_len;
+        records.push(record);
     }
-    Ok(Pdu::Files(records))
+    Ok(Pdu::Files(records, None))
+}
+fn file_address_record(b: &[u8], offset: usize, write: bool) -> Result<FileRecord> {
+    require(byte(b, offset)? == 6, offset, "modbus_file_reference")?;
+    let file = word(b, offset + 1)?;
+    let record = word(b, offset + 3)?;
+    let words = word(b, offset + 5)?;
+    require(
+        file != 0 && words != 0 && u32::from(record) + u32::from(words) <= 10000,
+        offset + 1,
+        "modbus_file_range",
+    )?;
+    let data_len = if write { usize::from(words) * 2 } else { 0 };
+    require(
+        offset + 7 + data_len <= b.len(),
+        offset + 7,
+        "modbus_file_data",
+    )?;
+    Ok(FileRecord {
+        offset,
+        address: Some((file, record)),
+        words,
+        data_len,
+    })
+}
+fn file_response_record(b: &[u8], offset: usize) -> Result<FileRecord> {
+    let n = usize::from(byte(b, offset)?);
+    require(
+        n >= 3 && n % 2 == 1 && byte(b, offset + 1)? == 6,
+        offset,
+        "modbus_file_response",
+    )?;
+    require(offset + 1 + n <= b.len(), offset, "modbus_file_data")?;
+    Ok(FileRecord {
+        offset,
+        address: None,
+        words: (n / 2) as u16,
+        data_len: n - 1,
+    })
 }
 
-fn device(b: &[u8], request: bool) -> Result<Pdu<'_>> {
+fn device(b: &[u8], request: bool) -> Result<Pdu> {
     let category = byte(b, 2)?;
     require((1..=4).contains(&category), 2, "modbus_device_category")?;
     if request {
@@ -324,49 +343,53 @@ fn device(b: &[u8], request: bool) -> Result<Pdu<'_>> {
     let permitted = |id: u8| {
         matches!(id, 0..=2) || (access >= 2 && matches!(id, 3..=6)) || (access == 3 && id >= 128)
     };
-    let mut objects: Vec<Object<'_>> = Vec::new();
+    let mut objects: Vec<Object> = Vec::new();
     let mut at = 7;
-    for _ in 0..count {
-        let id = byte(b, at)?;
-        require(
-            permitted(id)
-                && objects
-                    .last()
-                    .is_none_or(|o| o.id < id && (o.id >= 2 || id == o.id + 1)),
-            at,
-            "modbus_device_object_id",
-        )?;
-        let n = usize::from(byte(b, at + 1)?);
-        let end = at + 2 + n;
-        let value = b
-            .get(at + 2..end)
-            .ok_or_else(|| invalid(at, "modbus_device_object_length"))?;
-        require(
-            id > 6 || value.is_ascii(),
-            at + 2,
-            "modbus_device_ascii_string",
-        )?;
-        objects.push(Object {
-            offset: at,
-            id,
-            value,
-        });
-        at = end;
-    }
-    exact(b, at)?;
-    require(
-        more == 0 || (permitted(next) && objects.last().is_some_and(|o| o.id < next)),
-        5,
-        "modbus_device_next_id",
-    )?;
-    if category != 4 {
-        if let Some(last) = objects.last().filter(|o| o.id < 2) {
+    let terminal = (|| -> Result<()> {
+        for _ in 0..count {
+            let id = byte(b, at)?;
             require(
-                more == 255 && next == last.id + 1,
-                5,
-                "modbus_missing_basic_object",
+                permitted(id)
+                    && objects
+                        .last()
+                        .is_none_or(|o| o.id < id && (o.id >= 2 || id == o.id + 1)),
+                at,
+                "modbus_device_object_id",
             )?;
+            let n = usize::from(byte(b, at + 1)?);
+            let end = at + 2 + n;
+            let value = b
+                .get(at + 2..end)
+                .ok_or_else(|| invalid(at, "modbus_device_object_length"))?;
+            require(
+                id > 6 || value.is_ascii(),
+                at + 2,
+                "modbus_device_ascii_string",
+            )?;
+            objects.push(Object {
+                offset: at,
+                id,
+                value_len: value.len(),
+            });
+            at = end;
         }
-    }
-    Ok(Pdu::DevicePage(objects))
+        exact(b, at)?;
+        require(
+            more == 0 || (permitted(next) && objects.last().is_some_and(|o| o.id < next)),
+            5,
+            "modbus_device_next_id",
+        )?;
+        if category != 4 {
+            if let Some(last) = objects.last().filter(|o| o.id < 2) {
+                require(
+                    more == 255 && next == last.id + 1,
+                    5,
+                    "modbus_missing_basic_object",
+                )?;
+            }
+        }
+        Ok(())
+    })()
+    .err();
+    Ok(Pdu::DevicePage(objects, terminal))
 }

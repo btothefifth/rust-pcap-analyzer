@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,9 @@ FIXTURES = (
     "dnp3_split_valid.pcap",
     "modbus_bits_bad_padding.pcap",
     "modbus_bits_valid.pcap",
+    "modbus_fc23_split.pcap",
+    "modbus_generation_overlap.pcap",
+    "modbus_interleaved.pcap",
     "modbus_partial_same.pcap",
     "modbus_partial_sibling.pcap",
     "modbus_mei_exception_reuse.pcap",
@@ -85,6 +89,38 @@ def semantic_event_count(values: list[dict]) -> int:
     return count
 
 
+def verify_split_fc23(events, capture):
+    packets = []
+    data = capture.read_bytes()
+    offset = 24
+    while offset < len(data):
+        length = struct.unpack_from('<I', data, offset + 8)[0]
+        packets.append(data[offset + 16:offset + 16 + length])
+        offset += 16 + length
+    mapping, = [e["data"]["read_mapping"] for e in events if e["kind"] == "transaction.candidate"]
+    if (mapping["starting_address_zero_based"], mapping["quantity"]) != (0xabcd, 2):
+        raise AssertionError("FC23 read mapping differs from the wire request")
+    by_id = {e["sequence"]: e for e in events}
+    for role, name, expected, frames in [
+        ("request", "read_start_zero_based", b"\xab\xcd", [4, 5]),
+        ("response", "register_u16", b"\x12\x34", [6, 7]),
+    ]:
+        message = by_id[mapping[role]]["data"]
+        if message["role"] != role:
+            raise AssertionError(f"FC23 mapping references the wrong {role}")
+        report, = message["semantic_subset"]["interpretations"]
+        field = next(f for rec in report["records"] for f in rec["fields"] if f["name"] == name)
+        spans = field["evidence"]["spans"]
+        raw = bytearray()
+        for span in spans:
+            packet = packets[int(span["frame"]) - 1]
+            start = int(span["packet_start"])
+            raw.extend(packet[start:start + int(span["end"]) - int(span["start"])])
+        if ([int(s["frame"]) for s in spans] != frames or raw != expected
+                or int(field["value"]) != int.from_bytes(expected, "big")):
+            raise AssertionError(f"FC23 {name} differs from its packet witnesses")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -119,6 +155,8 @@ def main() -> int:
             raise AssertionError(f"{capture.name}: missing terminal capture event")
         if ndjson[-1]["data"].get("source_sha256") != hashlib.sha256(capture.read_bytes()).hexdigest():
             raise AssertionError(f"{capture.name}: incorrect source hash")
+        if fixture_name == "modbus_fc23_split.pcap":
+            verify_split_fc23(ndjson,capture)
         results.append(
             {
                 "fixture": fixture_name,

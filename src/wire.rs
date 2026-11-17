@@ -109,7 +109,34 @@ pub fn decode_packet(
     link_type: u32,
     packet: &[u8],
     id: PacketId,
+    scope: Scope,
+) -> Result<Datagram> {
+    decode_packet_extent(link_type, packet, id, scope, false)
+}
+
+/// Read only enough of a snapped packet to locate a TCP generation which
+/// may be missing data. Its bytes never enter transport reassembly.
+pub fn snapped_tcp(
+    link_type: u32,
+    packet: &[u8],
+    id: PacketId,
+    scope: Scope,
+) -> Option<(Scope, TcpSegment)> {
+    let d = decode_packet_extent(link_type, packet, id, scope, true).ok()?;
+    if d.fragment.is_some() || d.protocol != 6 {
+        return None;
+    }
+    let Transport::Tcp(segment) = decode_transport(&d, ChecksumPolicy::Observe).ok()? else {
+        return None;
+    };
+    Some((d.scope, segment))
+}
+fn decode_packet_extent(
+    link_type: u32,
+    packet: &[u8],
+    id: PacketId,
     mut scope: Scope,
+    partial: bool,
 ) -> Result<Datagram> {
     let (mut start, mut ether_type) = match link_type {
         1 => {
@@ -179,8 +206,8 @@ pub fn decode_packet(
         start += 4;
     }
     match ether_type {
-        0x0800 => ipv4(packet, start, id, scope),
-        0x86dd => ipv6(packet, start, id, scope),
+        0x0800 => ipv4(packet, start, id, scope, partial),
+        0x86dd => ipv6(packet, start, id, scope, partial),
         _ => Err(Error::new(
             ErrorCode::UnsupportedNetwork,
             id.record_offset + start as u64,
@@ -190,7 +217,13 @@ pub fn decode_packet(
     }
 }
 
-fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datagram> {
+fn ipv4(
+    packet: &[u8],
+    start: usize,
+    id: PacketId,
+    scope: Scope,
+    partial: bool,
+) -> Result<Datagram> {
     require(packet, start + 20, id.record_offset, "ipv4")?;
     let b = &packet[start..];
     if b[0] >> 4 != 4 {
@@ -205,7 +238,12 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
     if total < header {
         return Err(bad("ipv4_total_length", "length smaller than header"));
     }
-    require(b, total, id.record_offset + start as u64, "ipv4_payload")?;
+    let total = if partial {
+        total.min(b.len())
+    } else {
+        require(b, total, id.record_offset + start as u64, "ipv4_payload")?;
+        total
+    };
     let flags = be16(&b[6..8]);
     let off = usize::from(flags & 0x1fff) * 8;
     let more = flags & 0x2000 != 0;
@@ -252,7 +290,13 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         checksum_context,
     })
 }
-fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datagram> {
+fn ipv6(
+    packet: &[u8],
+    start: usize,
+    id: PacketId,
+    scope: Scope,
+    partial: bool,
+) -> Result<Datagram> {
     require(packet, start + 40, id.record_offset, "ipv6")?;
     let b = &packet[start..];
     if b[0] >> 4 != 6 {
@@ -268,7 +312,12 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         ));
     }
     let total = 40 + n;
-    require(b, total, id.record_offset + start as u64, "ipv6_payload")?;
+    let total = if partial {
+        total.min(b.len())
+    } else {
+        require(b, total, id.record_offset + start as u64, "ipv6_payload")?;
+        total
+    };
     let mut s = [0u8; 16];
     let mut d = [0u8; 16];
     s.copy_from_slice(&b[8..24]);

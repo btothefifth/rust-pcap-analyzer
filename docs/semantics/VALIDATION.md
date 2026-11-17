@@ -43,7 +43,7 @@ python scripts/validate_semantic_product.py \
   --output-dir /new/semantic-product-parity
 ```
 
-The validator runs the eight supplied semantic captures, requires a complete
+The validator runs the eleven supplied semantic captures, requires a complete
 source-bound event stream, decodes TLV with `tools/product/tlv.py`, and compares
 the complete NDJSON/TLV event sequences. This is a local projection-consistency
 gate, not normative protocol qualification or linked-ABI proof.

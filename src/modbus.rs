@@ -34,12 +34,56 @@ pub struct ModbusMessage {
     pub semantics_supported: bool,
     pub boundary_verified: bool,
     pub raw: EvidenceBytes,
+    parsed: std::sync::Arc<Interpretation>,
+}
+#[derive(Debug)]
+struct Interpretation {
+    role: Role,
+    bytes: Box<[u8]>,
+    pdu: Result<pdu::Pdu>,
+}
+impl ModbusMessage {
+    pub(crate) fn interpretation(&self, role: Role) -> Result<pdu::Pdu> {
+        if self.parsed.role == role && self.raw.data() == self.parsed.bytes.as_ref() {
+            self.parsed.pdu.clone()
+        } else {
+            pdu::parse(self.raw.data().get(7..).unwrap_or_default(), role)
+        }
+    }
+    pub(crate) fn binding(&self) -> MessageBinding {
+        MessageBinding {
+            parsed: self.parsed.clone(),
+            spans: self.raw.spans().into(),
+            boundary: self.boundary_verified,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct MessageBinding {
+    parsed: std::sync::Arc<Interpretation>,
+    spans: Box<[crate::provenance::SourceSpan]>,
+    boundary: bool,
+}
+impl MessageBinding {
+    pub(crate) fn matches(&self, message: &ModbusMessage) -> bool {
+        let raw = message.raw.data();
+        std::sync::Arc::ptr_eq(&self.parsed, &message.parsed)
+            && self.parsed.bytes.as_ref() == raw
+            && self.spans.as_ref() == message.raw.spans()
+            && message.role == self.parsed.role
+            && message.boundary_verified == self.boundary
+            && message.shape_valid
+            && message.semantics_supported
+            && message.transaction == be16(&raw[..2])
+            && message.unit == raw[6]
+            && message.function == raw[7]
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct ModbusResult {
     pub messages: Vec<ModbusMessage>,
     pub issues: Vec<ProtocolIssue>,
-    pub(crate) unfinished: Vec<([u8; 32], String)>,
+    pub(crate) unfinished: Vec<([u8; 32], String, usize)>,
 }
 /// Captured portion of a transaction key. Unreadable MBAP framing leaves the
 /// entire connection in scope; a known function narrows it to one group.
@@ -65,39 +109,62 @@ pub fn transaction_prefix(header: &[u8]) -> String {
     }
 }
 
-/// Check only the five possible levels of MBAP evidence for this group.
-pub fn competing_prefix(key: &str, mut contains: impl FnMut(&str) -> bool) -> bool {
-    let Some((tx_unit, _)) = key.rsplit_once(':') else {
-        return false;
-    };
-    let Some((tx, _)) = tx_unit.split_once(':') else {
-        return false;
-    };
-    let Ok(id) = tx.parse::<u16>() else {
-        return false;
-    };
-    contains(key)
-        || contains(tx_unit)
-        || contains(tx)
-        || contains(&format!("hi-{}", id >> 8))
-        || contains("")
+/// A non-device MEI cannot explain a device-identification response. An
+/// exception omits the MEI and can still belong to an opaque request.
+pub fn observation_prefix(header: &[u8], role: Role) -> String {
+    let mut key = transaction_prefix(header);
+    if !key.is_empty() && header.get(7) == Some(&43) && header.get(8).is_some_and(|mei| *mei != 14)
+    {
+        key.push_str(if role == Role::Response {
+            ":opaque-response"
+        } else {
+            ":opaque-request"
+        });
+    }
+    key
 }
 
-/// An exception to an encapsulated interface request omits its MEI type.
-pub fn other_mei(bytes: &[u8]) -> bool {
-    bytes.first() == Some(&43) && bytes.get(1).is_some_and(|mei| *mei != 14)
+pub struct CompetingEvidence<W>(std::collections::BTreeMap<String, Vec<W>>);
+impl<W> Default for CompetingEvidence<W> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
 }
-
+impl<W: Copy> CompetingEvidence<W> {
+    pub fn record(&mut self, key: String, witness: W) {
+        self.0.entry(key).or_default().push(witness);
+    }
+    /// Expand only matching observations and charge every emitted reference.
+    pub fn witnesses(&self, key: &str, exception: bool, remaining: &mut usize) -> Result<Vec<W>> {
+        let mut witnesses = Vec::new();
+        let mut add = |prefix: &str| -> Result<()> {
+            if let Some(items) = self.0.get(prefix) {
+                *remaining = remaining
+                    .checked_sub(items.len())
+                    .ok_or_else(|| Error::limit("modbus_competing_references"))?;
+                witnesses.extend_from_slice(items);
+            }
+            Ok(())
+        };
+        add(key)?;
+        if let Some((tx_unit, _)) = key.rsplit_once(':') {
+            if let Some((tx, _)) = tx_unit.split_once(':') {
+                add(tx_unit)?;
+                add(tx)?;
+                if let Ok(id) = tx.parse::<u16>() {
+                    add(&format!("hi-{}", id >> 8))?;
+                }
+            }
+        }
+        add("")?;
+        if exception {
+            add(&format!("{key}:opaque-request"))?;
+        }
+        Ok(witnesses)
+    }
+}
 fn be16(b: &[u8]) -> u16 {
     u16::from_be_bytes([b[0], b[1]])
-}
-fn pdu_shape(bytes: &[u8], role: Role) -> bool {
-    match role {
-        Role::Unknown => [Role::Request, Role::Response]
-            .into_iter()
-            .any(|r| pdu::parse(bytes, r).is_ok()),
-        _ => pdu::parse(bytes, role).is_ok(),
-    }
 }
 fn capacity(out: &ModbusResult, additions: usize, limits: &Limits) -> Result<()> {
     let used = out
@@ -119,24 +186,31 @@ fn add_issue(
     limits: &Limits,
 ) -> Result<()> {
     capacity(out, 1, limits)?;
-    if matches!(
-        code,
-        "modbus_framing_lost" | "truncated_modbus_mbap" | "truncated_modbus_adu"
-    ) {
-        if let Some(span) = bytes.spans().first() {
-            let prefix = if code == "modbus_framing_lost" {
-                String::new()
-            } else {
-                transaction_prefix(bytes.data())
-            };
-            out.unfinished.push((span.packet.capture, prefix));
-        }
-    }
     out.issues.push(ProtocolIssue {
         code,
         packets: bytes.packets(),
         stream_offset: at,
     });
+    Ok(())
+}
+fn incomplete(
+    out: &mut ModbusResult,
+    code: &'static str,
+    bytes: &EvidenceBytes,
+    at: i64,
+    limits: &Limits,
+    role: Role,
+) -> Result<()> {
+    let index = out.issues.len();
+    add_issue(out, code, bytes, at, limits)?;
+    if let Some(span) = bytes.spans().first() {
+        let key = if code == "modbus_framing_lost" {
+            String::new()
+        } else {
+            observation_prefix(bytes.data(), role)
+        };
+        out.unfinished.push((span.packet.capture, key, index));
+    }
     Ok(())
 }
 pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<ModbusResult> {
@@ -171,23 +245,25 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
             let bytes = &chunk.bytes.data()[p..];
             let at = chunk.offset + p as i64;
             if bytes.len() < 7 {
-                add_issue(
+                incomplete(
                     &mut out,
                     "truncated_modbus_mbap",
                     &chunk.bytes.slice(p..chunk.bytes.len())?,
                     at,
                     limits,
+                    role,
                 )?;
                 break;
             }
             let length = usize::from(be16(&bytes[4..6]));
             if be16(&bytes[2..4]) != 0 || !(2..=254).contains(&length) {
-                add_issue(
+                incomplete(
                     &mut out,
                     "modbus_framing_lost",
                     &chunk.bytes.slice(p..chunk.bytes.len())?,
                     at,
                     limits,
+                    role,
                 )?;
                 break; // No safe arbitrary resynchronization signature exists.
             }
@@ -196,16 +272,32 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
                 return Err(Error::limit("modbus_adu_bytes"));
             }
             if bytes.len() < total {
-                add_issue(
+                incomplete(
                     &mut out,
                     "truncated_modbus_adu",
                     &chunk.bytes.slice(p..chunk.bytes.len())?,
                     at,
                     limits,
+                    role,
                 )?;
                 break;
             }
-            let valid = pdu_shape(&bytes[7..total], role);
+            let parse_role = if role == Role::Unknown {
+                Role::Request
+            } else {
+                role
+            };
+            let pdu = pdu::parse(&bytes[7..total], parse_role);
+            let valid = pdu.as_ref().is_ok_and(pdu::Pdu::complete)
+                || (role == Role::Unknown
+                    && pdu::parse(&bytes[7..total], Role::Response)
+                        .as_ref()
+                        .is_ok_and(pdu::Pdu::complete));
+            let parsed = std::sync::Arc::new(Interpretation {
+                role: parse_role,
+                bytes: bytes[..total].into(),
+                pdu,
+            });
             let supported = pdu::supported(&bytes[7..total]) && role != Role::Unknown;
             capacity(
                 &out,
@@ -226,6 +318,7 @@ pub fn decode(stream: &StreamResult, role: Role, limits: &Limits) -> Result<Modb
                 add_issue(&mut out, "invalid_modbus_pdu_shape", &raw, at, limits)?;
             }
             out.messages.push(ModbusMessage {
+                parsed,
                 stream_offset: at,
                 transaction: be16(&bytes[..2]),
                 unit: bytes[6],
@@ -283,7 +376,24 @@ pub(crate) fn pair_summaries(
     let req = request.raw.data();
     let rsp = response.raw.data();
     Some((
-        transaction::Summary::parse(&req[7..], Role::Request)?,
-        transaction::Summary::parse(&rsp[7..], Role::Response)?,
+        transaction::Summary::from_pdu(&req[7..], &request.interpretation(Role::Request).ok()?)?,
+        transaction::Summary::from_pdu(&rsp[7..], &response.interpretation(Role::Response).ok()?)?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn snapshot_parses_each_configured_role_once() {
+        super::pdu::PARSES.with(|n| n.set(0));
+        let snapshot = crate::engine::analyze(
+            include_bytes!("../fixtures/semantics/modbus_fc23_split.pcap"),
+            Default::default(),
+        )
+        .unwrap();
+        assert!(crate::report::analysis(&snapshot, false)
+            .encode()
+            .contains("read_mapping"));
+        super::pdu::PARSES.with(|n| assert_eq!(n.get(), 2));
+    }
 }

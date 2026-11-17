@@ -80,6 +80,48 @@ def fixtures():
             tcp(response, 5001, 1001 + len(request), 0x18, reverse=True),
             tcp(tail, 1001 + len(request), 5001 + len(response), 0x18),
         ])
+    complete = handshake(502) + [
+        tcp(request, 1001, 5001, 0x18),
+        tcp(response, 5001, 1001 + len(request), 0x18, reverse=True),
+    ]
+    repeated = tcp(request, 1013, 5012, 0x18)
+    result['modbus_generation_overlap.pcap'] = pcap(complete + [
+        tcp(b'', 1012, 0, 2), repeated,
+        # Distant sequence anchors establish an unaffected successor generation.
+        tcp(b'', 1000000000, 0, 2),
+        tcp(b'', 2000000000, 1000000001, 0x12, reverse=True),
+        tcp(request, 1000000001, 2000000001, 0x18),
+        tcp(response, 2000000001, 1000000013, 0x18, reverse=True),
+    ])
+    read_write = adu(bytes.fromhex('17abcd000200070001029abc'))
+    registers = adu(bytes.fromhex('170412345678'))
+    result['modbus_fc23_split.pcap'] = pcap(handshake(502) + [
+        tcp(read_write[:9], 1001, 5001, 0x18),
+        tcp(read_write[9:], 1010, 5001, 0x18),
+        tcp(registers[:10], 5001, 1001 + len(read_write), 0x18, reverse=True),
+        tcp(registers[10:], 5011, 1001 + len(read_write), 0x18, reverse=True),
+    ])
+    # Separate transaction IDs keep every expected disagreement independent.
+    mixed = handshake(502)
+    seq = [1001, 5001]
+    page = '2b0e0101000003000141010142020143'
+    for tx, observations in enumerate([
+        [(0, '1000010001021234'), (1, '1000020001')],
+        [(0, '1509060001000200011234'), (1, '1509060001000200011235')],
+        [(0, '2b0e0100'), (1, page.replace('2b0e01', '2b0e02'))],
+        [(0, '2b0e0101'), (1, page)],
+        [(0, '2b0e0107'), (1, page)],
+        [(0, '2b0e0100'), (0, '2b0d00'), (1, '2b0d00'), (1, page)],
+        [(0, '2b0e0100'), (0, '2b0d00'), (1, 'ab01')],
+        [(0, '2b0e0100'), (0, '2b0d00'), (1, page)],
+    ], 1):
+        for side, pdu in observations:
+            wire = struct.pack('!H', tx) + adu(bytes.fromhex(pdu))[2:]
+            if tx == 8 and pdu == '2b0d00':
+                wire = wire[:-1]
+            mixed.append(tcp(wire, seq[side], seq[1-side], 0x18, reverse=bool(side)))
+            seq[side] += len(wire)
+    result['modbus_interleaved.pcap'] = pcap(mixed)
     device = adu(bytes.fromhex('2b0e0100'))
     opaque = adu(bytes.fromhex('2b0d'))
     result['modbus_mei_exception_reuse.pcap'] = pcap(handshake(502) + [

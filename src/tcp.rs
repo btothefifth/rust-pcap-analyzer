@@ -339,6 +339,7 @@ struct Flow {
     packets: Vec<PacketId>,
     inputs: Vec<Input>,
     anomalies: Vec<&'static str>,
+    uncertain_payload: Option<PacketId>,
 }
 #[derive(Clone, Debug)]
 pub struct FlowResult {
@@ -354,6 +355,8 @@ pub struct FlowResult {
     pub streams: [Option<StreamResult>; 2],
     pub reconstruction_errors: Vec<Error>,
     pub anomalies: Vec<&'static str>,
+    /// First unassigned or snapped data packet compatible with this generation.
+    pub uncertain_payload: Option<PacketId>,
 }
 #[derive(Clone, Debug)]
 pub enum Assignment {
@@ -411,6 +414,7 @@ impl TcpTracker {
             packets: Vec::new(),
             inputs: Vec::new(),
             anomalies: Vec::new(),
+            uncertain_payload: None,
         });
         Ok(id)
     }
@@ -451,6 +455,34 @@ impl TcpTracker {
                 segment.data_sequence() == own_next && segment.acknowledgement == peer_next
             }
             _ => false,
+        }
+    }
+    pub fn observe_snapped(
+        &mut self,
+        scope: Scope,
+        packet: PacketId,
+        when: Option<i128>,
+        segment: &TcpSegment,
+    ) {
+        let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
+        if let Some(ids) = self.keys.get(&key) {
+            for &id in ids {
+                let flow = &self.flows[id];
+                if self.active_at(flow, when) && self.plausible(flow, direction, segment) {
+                    self.flows[id].uncertain_payload.get_or_insert(packet);
+                }
+            }
+        }
+    }
+
+    fn ambiguous(&mut self, ids: Vec<usize>, segment: &TcpSegment, packet: PacketId) -> Assignment {
+        if !segment.payload.is_empty() {
+            for &id in &ids {
+                self.flows[id].uncertain_payload.get_or_insert(packet);
+            }
+        }
+        Assignment::Ambiguous {
+            candidate_flow_ids: ids,
         }
     }
     pub fn ingest(
@@ -549,14 +581,10 @@ impl TcpTracker {
                     let mut possible = closed_candidates;
                     possible.extend(candidates);
                     possible.sort_unstable();
-                    return Ok(Assignment::Ambiguous {
-                        candidate_flow_ids: possible,
-                    });
+                    return Ok(self.ambiguous(possible, &segment, packets[0]));
                 }
             } else if candidates.len() > 1 {
-                return Ok(Assignment::Ambiguous {
-                    candidate_flow_ids: candidates,
-                });
+                return Ok(self.ambiguous(candidates, &segment, packets[0]));
             } else if let Some(id) = candidates.first() {
                 selected = *id;
             } else {
@@ -689,6 +717,7 @@ impl TcpTracker {
                 streams: [first, second],
                 reconstruction_errors,
                 anomalies: flow.anomalies,
+                uncertain_payload: flow.uncertain_payload,
             });
         }
         Ok(output)

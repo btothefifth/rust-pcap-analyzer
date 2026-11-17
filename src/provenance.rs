@@ -128,6 +128,21 @@ impl EvidenceBytes {
         })
     }
 
+    /// Adjacent slices of one physical packet share a single retained span.
+    pub fn appended_span_count(&self, other: &Self) -> usize {
+        let merged = self
+            .spans
+            .last()
+            .zip(other.spans.first())
+            .is_some_and(|(a, b)| Self::contiguous_source(a, b));
+        self.spans
+            .len()
+            .saturating_add(other.spans.len())
+            .saturating_sub(usize::from(merged))
+    }
+    fn contiguous_source(a: &SourceSpan, b: &SourceSpan) -> bool {
+        a.packet == b.packet && a.packet_start.checked_add(a.end - a.start) == Some(b.packet_start)
+    }
     pub fn append(&mut self, other: &Self, limit: usize) -> Result<()> {
         if !self.layout_valid || !other.layout_valid {
             return Err(invalid("invalid source-span layout"));
@@ -156,11 +171,7 @@ impl EvidenceBytes {
                 packet_start: s.packet_start,
             };
             if let Some(last) = self.spans.last_mut() {
-                if last.packet == next.packet
-                    && last.end == next.start
-                    && last.packet_start.checked_add(last.end - last.start)
-                        == Some(next.packet_start)
-                {
+                if last.end == next.start && Self::contiguous_source(last, &next) {
                     last.end = next.end;
                     continue;
                 }

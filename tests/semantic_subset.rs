@@ -1655,3 +1655,42 @@ fn modbus_device_pages_exceptions_and_legacy_short_writes() {
         r#"["and_mask"]"#
     );
 }
+
+#[test]
+fn modbus_file_read_limits_and_a_malformed_second_record() {
+    for (words, status) in [(121, Status::DecodedSubset), (122, Status::Rejected)] {
+        let mut response = vec![20, 2 + 2 * words, 1 + 2 * words, 6];
+        response.resize(4 + 2 * usize::from(words), 9);
+        for (bytes, role) in [
+            (&[20, 7, 6, 0, 1, 0, 0, 0, words][..], Role::Request),
+            (response.as_slice(), Role::Response),
+        ] {
+            assert_eq!(
+                modbus::decode(&adu(bytes), role, Limits::default())
+                    .unwrap()
+                    .status(),
+                status
+            );
+        }
+    }
+    let wire = adu(&[20, 8, 3, 6, 0x12, 0x34, 3, 7, 0x56, 0x78]);
+    let report = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+    assert_eq!(report.status(), Status::Rejected);
+    assert_eq!(report.consumed(), 13);
+    assert_eq!(values(&report, "register_u16"), [&Value::Unsigned(0x1234)]);
+}
+
+#[test]
+fn device_pages_keep_valid_objects_before_a_rejected_suffix() {
+    let wire = adu(&[43, 14, 1, 1, 0, 0, 2, 0, 1, b'A', 2, 1, b'B']);
+    let r = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+    assert_eq!(r.status(), Status::Rejected);
+    assert_eq!(values(&r, "object_id"), [&Value::Unsigned(0)]);
+    let req = root_message(&adu(&[43, 14, 2, 3]), Role::Request);
+    let rsp = root_message(
+        &adu(&[43, 14, 2, 2, 255, 3, 3, 0, 1, b'A', 1, 1, b'B', 2, 1, b'C']),
+        Role::Response,
+    );
+    assert!(req.shape_valid && rsp.shape_valid);
+    assert!(!pcap_evidence::modbus::response_matches(&req, &rsp));
+}

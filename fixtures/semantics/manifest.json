@@ -482,6 +482,21 @@
       "sha256": "ac4501da2c818cc0872915fe66fddaa01a9d2841359f1da4c528e17c11fd56e6"
     },
     {
+      "path": "modbus_generation_overlap.pcap",
+      "bytes": 852,
+      "sha256": "bcda8fe2c9ef446d19a87b9f6275b58623b48c01b57db03ee9152cbd534bf448"
+    },
+    {
+      "path": "modbus_fc23_split.pcap",
+      "bytes": 546,
+      "sha256": "d9ffb71c4f914317ff2bd93f92b189bcf5e5e3e9638945719de3b949c74fc18d"
+    },
+    {
+      "path": "modbus_interleaved.pcap",
+      "bytes": 1926,
+      "sha256": "da570d8a58985f7693f283f68ee87691b3562f31af462b9419a76346d2c8b9bc"
+    },
+    {
       "path": "modbus_mei_exception_reuse.pcap",
       "bytes": 473,
       "sha256": "c38df2ee2fb5d21cb5a28b3e9d020ef82e9f900e6092e3fccc5371fb688892ac"

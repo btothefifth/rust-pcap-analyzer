@@ -18,11 +18,12 @@ pub(crate) enum Summary {
         bytes: u16,
         last: u8,
     },
-    Echo([u8; 32]),
+    Write(u8, u16, u16),
+    FileEcho([[u8; 32]; 4]),
     Mask(u16, u16, u16),
     FileLengths(Vec<u16>),
     DeviceRequest(u8, u8),
-    DevicePage(u8, u8),
+    DevicePage(u8, Vec<u8>),
     Fifo,
     Exception,
 }
@@ -36,32 +37,59 @@ impl Summary {
         Self::from_pdu(bytes, &pdu)
     }
 
-    pub(crate) fn from_pdu(bytes: &[u8], pdu: &Pdu<'_>) -> Option<Self> {
+    pub(crate) fn from_pdu(bytes: &[u8], pdu: &Pdu) -> Option<Self> {
+        if !pdu.complete() {
+            return None;
+        }
         Some(match pdu {
             Pdu::Read { start, count } | Pdu::ReadWrite { start, count, .. } => Self::Read {
                 function: bytes[0],
                 start: *start,
                 count: *count,
             },
-            Pdu::ReadData(data) => Self::Data {
+            Pdu::ReadData(len) => Self::Data {
                 function: bytes[0],
-                bytes: data.len() as u16,
-                last: if bytes[0] <= 2 { *data.last()? } else { 0 },
+                bytes: *len as u16,
+                last: if bytes[0] <= 2 { *bytes.last()? } else { 0 },
             },
             Pdu::Mask => Self::Mask(
                 super::be16(&bytes[1..3]),
                 super::be16(&bytes[3..5]),
                 super::be16(&bytes[5..7]),
             ),
-            Pdu::Single => Self::Echo(sha256::digest(bytes)),
-            Pdu::Multiple { .. } | Pdu::WriteAck { .. } => Self::Echo(sha256::digest(&bytes[..5])),
+            Pdu::Single => Self::Write(
+                bytes[0],
+                super::be16(&bytes[1..3]),
+                super::be16(&bytes[3..5]),
+            ),
+            Pdu::Multiple { start, count, .. } | Pdu::WriteAck { start, count } => {
+                Self::Write(bytes[0], *start, *count)
+            }
             Pdu::FifoRequest | Pdu::FifoData(_) => Self::Fifo,
-            Pdu::Files(records) if bytes[0] == 20 => {
+            Pdu::Files(records, _) if bytes[0] == 20 => {
                 Self::FileLengths(records.iter().map(|r| r.words).collect())
             }
-            Pdu::Files(_) => Self::Echo(sha256::digest(bytes)),
+            Pdu::Files(records, _) => {
+                let mut columns: [sha256::Sha256; 4] = Default::default();
+                for r in records {
+                    let (file, record) = r.address?;
+                    columns[0].update(&file.to_be_bytes());
+                    columns[1].update(&record.to_be_bytes());
+                    columns[2].update(&r.words.to_be_bytes());
+                    let pos = r.offset + 7;
+                    columns[3].update(&bytes[pos..pos + r.data_len]);
+                }
+                Self::FileEcho(columns.map(|column| column.finalize()))
+            }
             Pdu::DeviceRequest => Self::DeviceRequest(bytes[2], bytes[3]),
-            Pdu::DevicePage(objects) => Self::DevicePage(bytes[2], objects.first()?.id),
+            Pdu::DevicePage(objects, _) => Self::DevicePage(
+                bytes[2],
+                objects
+                    .iter()
+                    .map(|o| o.id)
+                    .chain((bytes[4] != 0).then_some(bytes[5]))
+                    .collect(),
+            ),
             Pdu::Exception(_) => Self::Exception,
             Pdu::Opaque => return None,
         })
@@ -88,11 +116,16 @@ impl Summary {
                     }
             }
             (Self::DeviceRequest(category, id), Self::DevicePage(c, i)) => {
-                c == category && (id == i || (*category != 4 && *i == 0))
+                c == category && device_start_matches(*category, *id, i)
             }
-            (Self::Mask(..) | Self::Echo(_) | Self::FileLengths(_) | Self::Fifo, _) => {
-                self == response
-            }
+            (
+                Self::Mask(..)
+                | Self::Write(..)
+                | Self::FileEcho(_)
+                | Self::FileLengths(_)
+                | Self::Fifo,
+                _,
+            ) => self == response,
             _ => false,
         }
     }
@@ -110,9 +143,13 @@ impl Summary {
                 last,
             } => format!("data:{function}:{bytes}:{last}"),
             Self::DeviceRequest(c, id) => format!("id-request:{c}:{id}"),
-            Self::DevicePage(c, id) => format!("id-page:{c}:{id}"),
+            Self::DevicePage(c, ids) => format!("id-page:{c}:{}", sha256::hex(&ids)),
             Self::Mask(a, m, o) => format!("mask:{a}:{m}:{o}"),
-            Self::Echo(hash) => format!("echo:{}", sha256::hex(&hash)),
+            Self::Write(f, address, value) => format!("write:{f}:{address}:{value}"),
+            Self::FileEcho(columns) => format!(
+                "file-echo:{}",
+                columns.map(|hash| sha256::hex(&hash)).join(":")
+            ),
             Self::FileLengths(counts) => format!(
                 "file:{}",
                 counts
@@ -137,6 +174,26 @@ fn parts<const N: usize>(token: &str, prefix: &str) -> Option<[u16; N]> {
         *n = fields.next()?.parse().ok()?;
     }
     fields.next().is_none().then_some(nums)
+}
+fn device_start_matches(category: u8, requested: u8, ids: &[u8]) -> bool {
+    ids.first() == Some(&requested)
+        || (category != 4 && requested > 2 && ids.first() == Some(&0) && !ids.contains(&requested))
+}
+fn device_fields(request: &str, response: &str) -> Option<(bool, bool)> {
+    let [category, id] = parts(request, "id-request:")?;
+    let (peer, encoded) = response.strip_prefix("id-page:")?.split_once(':')?;
+    if encoded.len() > 510 || encoded.len() % 2 != 0 || !encoded.is_ascii() {
+        return None;
+    }
+    let ids = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some((
+        peer.parse::<u16>().ok()? == category,
+        device_start_matches(category.try_into().ok()?, id.try_into().ok()?, &ids),
+    ))
 }
 fn bits_match(count: u16, bytes: u16, last: u16) -> bool {
     (1..=2000).contains(&count)
@@ -185,19 +242,8 @@ fn matches_v2(request: &str, response: &str) -> bool {
             last,
         });
     }
-    if let Some([category, id]) = parts(request, "id-request:") {
-        let Some([c, i]) = parts(response, "id-page:") else {
-            return false;
-        };
-        let (Ok(category), Ok(id), Ok(c), Ok(i)) = (
-            category.try_into(),
-            id.try_into(),
-            c.try_into(),
-            i.try_into(),
-        ) else {
-            return false;
-        };
-        return Summary::DeviceRequest(category, id).agrees(&Summary::DevicePage(c, i));
+    if request.starts_with("id-request:") {
+        return device_fields(request, response) == Some((true, true));
     }
     request == response
 }
@@ -256,6 +302,44 @@ pub fn mismatch_fields(request: &str, response: &str) -> Option<Json> {
                 .zip(a)
                 .zip(b)
                 .filter_map(|((name, x), y)| (x != y).then_some(Json::from(name))),
+        ));
+    }
+    if let Some((category, start)) = device_fields(request, response) {
+        return Some(Json::array(
+            [("read_category", category), ("first_object_id", start)]
+                .into_iter()
+                .filter_map(|(name, agrees)| (!agrees).then_some(Json::from(name))),
+        ));
+    }
+    if let (Some([f, a, v]), Some([_, b, w])) =
+        (parts(request, "write:"), parts(response, "write:"))
+    {
+        let names = if f <= 6 {
+            ["address_zero_based", "wire_value"]
+        } else {
+            ["starting_address_zero_based", "quantity"]
+        };
+        return Some(Json::array(
+            names
+                .into_iter()
+                .zip([a != b, v != w])
+                .filter_map(|(name, diff)| diff.then_some(Json::from(name))),
+        ));
+    }
+    if let (Some(a), Some(b)) = (
+        request.strip_prefix("file-echo:"),
+        response.strip_prefix("file-echo:"),
+    ) {
+        return Some(Json::array(
+            [
+                "file_number",
+                "record_number",
+                "record_words",
+                "register_u16",
+            ]
+            .into_iter()
+            .zip(a.split(':').zip(b.split(':')))
+            .filter_map(|(name, (a, b))| (a != b).then_some(Json::from(name))),
         ));
     }
     let fields: &[&str] = if let (Some([f, _, count]), Some([_, n, _])) =

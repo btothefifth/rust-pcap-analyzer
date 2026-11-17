@@ -317,3 +317,117 @@ fn modbus_mapping_references_resolve_to_both_wire_values() {
         }
     }
 }
+
+#[test]
+fn uncertain_tcp_data_blocks_affected_generations_and_preserves_a_successor() {
+    let bytes = capture("modbus_generation_overlap.pcap");
+    let snapshot = pcap_evidence::engine::analyze(&bytes, Default::default()).unwrap();
+    assert_eq!(
+        snapshot
+            .flows
+            .iter()
+            .filter(|flow| flow.uncertain_payload.is_some())
+            .count(),
+        2
+    );
+    let pairs: Vec<_> = snapshot
+        .transactions
+        .iter()
+        .filter(|tx| tx.status == "candidate_pair")
+        .collect();
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(
+        snapshot.flows[pairs[0].flow].packets.last().unwrap().frame,
+        11
+    );
+    let out = run(&bytes, Default::default());
+    assert_eq!(
+        out.events
+            .iter()
+            .filter(|e| e.data.encode().contains("read_mapping"))
+            .count(),
+        1
+    );
+
+    // Remove the competing SYN, then snap the last four payload bytes on frame 6.
+    let mut records = Vec::new();
+    let mut offset = 24;
+    while offset < bytes.len() {
+        let n = u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap()) as usize;
+        records.push(&bytes[offset..offset + 16 + n]);
+        offset += 16 + n;
+    }
+    let mut snapped = bytes[..24].to_vec();
+    for record in &records[..5] {
+        snapped.extend_from_slice(record);
+    }
+    let mut tail = records[6][..records[6].len() - 4].to_vec();
+    let captured = (tail.len() - 16) as u32;
+    tail[8..12].copy_from_slice(&captured.to_le_bytes());
+    snapped.extend(tail);
+    let snapshot = pcap_evidence::engine::analyze(&snapped, Default::default()).unwrap();
+    assert_eq!(snapshot.flows[0].uncertain_payload.unwrap().frame, 6);
+    assert!(!pcap_evidence::report::analysis(&snapshot, false)
+        .encode()
+        .contains("read_mapping"));
+    assert!(!run(&snapped, Default::default())
+        .events
+        .iter()
+        .any(|e| e.data.encode().contains("read_mapping")));
+}
+
+#[test]
+fn device_competitors_and_echo_disagreements_reach_both_correlators() {
+    let bytes = capture("modbus_interleaved.pcap");
+    let root = pcap_evidence::engine::analyze(&bytes, Default::default()).unwrap();
+    let root_report = pcap_evidence::report::analysis(&root, false);
+    let Json::Array(root_txs) = field(&root_report, "transaction_candidates") else {
+        unreachable!()
+    };
+    let root_groups: Vec<_> = root_txs
+        .iter()
+        .filter(|t| field(t, "status") != &Json::from("unclassified"))
+        .collect();
+    let stream = run(&bytes, Default::default());
+    let groups: Vec<_> = stream
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Transaction)
+        .collect();
+    assert_eq!((root_groups.len(), groups.len()), (8, 8));
+    for (index, name) in [
+        "starting_address_zero_based",
+        "register_u16",
+        "read_category",
+        "first_object_id",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let expected = Json::array([Json::from(name)]);
+        assert_eq!(field(root_groups[index], "disagreeing_fields"), &expected);
+        assert_eq!(field(&groups[index].data, "disagreeing_fields"), &expected);
+    }
+    for i in [4, 5, 7] {
+        assert_eq!(
+            field(root_groups[i], "status"),
+            &Json::from("candidate_pair")
+        );
+        assert_eq!(groups[i].status, EvidenceStatus::Candidate);
+    }
+    assert_eq!(groups[6].status, EvidenceStatus::Ambiguous);
+    assert_eq!(groups[6].related_events.len(), 3);
+    let opaque = groups[6]
+        .related_events
+        .iter()
+        .filter(|id| {
+            let event = &stream.events[**id as usize - 1];
+            field(&event.data, "semantics_supported") == &Json::Bool(false)
+        })
+        .count();
+    assert_eq!(opaque, 1);
+    let Json::Array(blockers) = field(root_groups[6], "competing_observations") else {
+        unreachable!()
+    };
+    assert_eq!(blockers.len(), 1);
+}

@@ -61,11 +61,11 @@ fn envelope(b: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn decode_body<'a>(
-    b: &'a [u8],
+fn decode_body(
+    b: &[u8],
     role: Role,
     out: &mut Report<'_>,
-    parse: impl FnOnce() -> Result<Pdu<'a>>,
+    parse: impl FnOnce() -> Result<Pdu>,
 ) -> Result<()> {
     envelope(b)?;
     let len = b.len() - 6;
@@ -109,8 +109,7 @@ fn decode_body<'a>(
             let fields = address_fields(start, count);
             out.add(Record::new("read_request", 8..12, fields))?;
         }
-        Pdu::ReadData(data) => {
-            let count = data.len();
+        Pdu::ReadData(count) => {
             out.add(Record::new(
                 "read_response",
                 8..9,
@@ -166,11 +165,15 @@ fn decode_body<'a>(
                 address_fields(start, count),
             ))?;
         }
-        Pdu::Multiple { start, count, data } => {
+        Pdu::Multiple {
+            start,
+            count,
+            data_len,
+        } => {
             let mut fields = address_fields(start, count);
             let first = u64::from(start);
             let count = usize::from(count);
-            let expected = data.len();
+            let expected = data_len;
             fields.push(num("byte_count", expected as u64, 12, 13));
             out.add(Record::new("write_multiple_request", 8..13, fields))?;
             out.advance(13);
@@ -226,7 +229,7 @@ fn decode_body<'a>(
             count,
             write_start,
             write_count,
-            data,
+            data_len,
         } => {
             out.add(Record::new(
                 "read_write_registers",
@@ -236,7 +239,7 @@ fn decode_body<'a>(
                     num("read_quantity", count.into(), 10, 12),
                     num("write_start_zero_based", write_start.into(), 12, 14),
                     num("write_quantity", write_count.into(), 14, 16),
-                    num("byte_count", data.len() as u64, 16, 17),
+                    num("byte_count", data_len as u64, 16, 17),
                 ],
             ))?;
             out.advance(17);
@@ -254,19 +257,19 @@ fn decode_body<'a>(
             8..10,
             vec![num("fifo_pointer_address", uint(b, 8, 2, false), 8, 10)],
         ))?,
-        Pdu::FifoData(data) => {
+        Pdu::FifoData(count) => {
             out.add(Record::new(
                 "fifo_response",
                 8..12,
                 vec![
-                    num("byte_count", (data.len() + 2) as u64, 8, 10),
-                    num("fifo_count", (data.len() / 2) as u64, 10, 12),
+                    num("byte_count", (2 * count + 2) as u64, 8, 10),
+                    num("fifo_count", count as u64, 10, 12),
                 ],
             ))?;
             out.advance(12);
-            registers(out, b, 12, data.len() / 2, None, 0..0)?;
+            registers(out, b, 12, count, None, 0..0)?;
         }
-        Pdu::Files(records) => {
+        Pdu::Files(records, error) => {
             out.add(Record::new(
                 "file_record_list",
                 8..9,
@@ -295,7 +298,10 @@ fn decode_body<'a>(
                 };
                 out.add(Record::new("file_record", at..at + width, fields))?;
                 out.advance(at + width);
-                registers(out, b, at + width, record.data.len() / 2, None, 0..0)?;
+                registers(out, b, at + width, record.data_len / 2, None, 0..0)?;
+            }
+            if let Some(error) = error {
+                return Err(error);
             }
         }
         Pdu::DeviceRequest => out.add(Record::new(
@@ -307,7 +313,7 @@ fn decode_body<'a>(
                 num("object_id", b[10].into(), 10, 11),
             ],
         ))?,
-        Pdu::DevicePage(objects) => {
+        Pdu::DevicePage(objects, error) => {
             out.add(Record::new(
                 "device_id_page",
                 8..14,
@@ -323,23 +329,26 @@ fn decode_body<'a>(
             out.advance(14);
             for object in objects {
                 let at = 7 + object.offset;
-                let end = at + 2 + object.value.len();
+                let end = at + 2 + object.value_len;
                 let mut fields = vec![
                     num("object_id", object.id.into(), at, at + 1),
-                    num("object_length", object.value.len() as u64, at + 1, at + 2),
+                    num("object_length", object.value_len as u64, at + 1, at + 2),
                 ];
-                if !object.value.is_empty() {
+                if object.value_len != 0 {
                     fields.push(Field::new(
                         "object_value",
                         Value::OctetsSha256 {
-                            length: object.value.len(),
-                            digest: crate::sha256::digest(object.value),
+                            length: object.value_len,
+                            digest: crate::sha256::digest(&b[at + 2..end]),
                         },
                         at + 2..end,
                     ));
                 }
                 out.add(Record::new("device_id_object", at..end, fields))?;
                 out.advance(end);
+            }
+            if let Some(error) = error {
+                return Err(error);
             }
         }
         Pdu::Opaque => {
@@ -358,12 +367,12 @@ pub fn decode(source: &EvidenceBytes, role: Role, limits: Limits) -> Result<Repo
         pdu::parse(&source.data()[7..], role)
     })
 }
-fn decode_with<'a>(
-    source: &'a EvidenceBytes,
+fn decode_with(
+    source: &EvidenceBytes,
     role: Role,
     limits: Limits,
-    parse: impl FnOnce() -> Result<Pdu<'a>>,
-) -> Result<Report<'a>> {
+    parse: impl FnOnce() -> Result<Pdu>,
+) -> Result<Report<'_>> {
     let mut out = Report::new(source, "modbus", role.as_str(), limits)?;
     if let Err(e) = decode_body(source.data(), role, &mut out, parse) {
         let at = out.consumed();
@@ -374,23 +383,27 @@ fn decode_with<'a>(
 /// Unknown direction yields two explicitly attributed interpretations, including
 /// rejected alternatives. No array element is silently selected as authoritative.
 pub fn alternatives_json(source: &EvidenceBytes, role: Role, limits: Limits) -> Json {
-    render(
-        role,
-        &limits,
-        || super::as_json(decode(source, Role::Request, limits.clone())),
-        || super::as_json(decode(source, Role::Response, limits.clone())),
-    )
+    render(role, limits, |r, l| decode(source, r, l))
+}
+
+pub(crate) fn message_fields(message: &crate::modbus::ModbusMessage, limits: Limits) -> Json {
+    render(message.role, limits, |r, l| {
+        decode_with(&message.raw, r, l, || message.interpretation(r))
+    })
 }
 
 /// A framed ADU received without a known direction. Keep both grammar results
 /// until the caller selects a role, so correlation and fields use the same PDU.
 pub struct FramedAdu<'a> {
     source: &'a EvidenceBytes,
-    request: Result<Pdu<'a>>,
-    response: Result<Pdu<'a>>,
+    request: Result<Pdu>,
+    response: Result<Pdu>,
 }
 impl<'a> FramedAdu<'a> {
     pub fn new(source: &'a EvidenceBytes) -> Result<Self> {
+        if !source.validate() {
+            return Err(fail(ErrorCode::Invariant, 0, "semantic_provenance"));
+        }
         envelope(source.data())?;
         let bytes = &source.data()[7..];
         Ok(Self {
@@ -400,7 +413,10 @@ impl<'a> FramedAdu<'a> {
         })
     }
     pub fn shapes(&self) -> (bool, bool) {
-        (self.request.is_ok(), self.response.is_ok())
+        (
+            self.request.as_ref().is_ok_and(Pdu::complete),
+            self.response.as_ref().is_ok_and(Pdu::complete),
+        )
     }
     pub fn supported(&self) -> bool {
         pdu::supported(&self.source.data()[7..])
@@ -414,27 +430,45 @@ impl<'a> FramedAdu<'a> {
         Some(Summary::from_pdu(&self.source.data()[7..], parsed.as_ref().ok()?)?.token())
     }
     pub fn fields(self, role: Role, limits: Limits) -> Json {
-        let project =
-            |r, result| super::as_json(decode_with(self.source, r, limits.clone(), || result));
-        render(
-            role,
-            &limits,
-            || project(Role::Request, self.request),
-            || project(Role::Response, self.response),
-        )
+        render(role, limits, |r, l| {
+            decode_with(self.source, r, l, || match r {
+                Role::Request => self.request.clone(),
+                _ => self.response.clone(),
+            })
+        })
     }
 }
-fn render(
+fn render<'a>(
     role: Role,
-    limits: &Limits,
-    request: impl FnOnce() -> Json,
-    response: impl FnOnce() -> Json,
+    limits: Limits,
+    mut decode: impl FnMut(Role, Limits) -> Result<Report<'a>>,
 ) -> Json {
-    let interpretations = match role {
-        Role::Request => vec![request()],
-        Role::Response => vec![response()],
-        Role::Unknown => vec![request(), response()],
+    let mut remaining = limits.clone();
+    let roles: &[Role] = if role == Role::Unknown {
+        &[Role::Request, Role::Response]
+    } else {
+        std::slice::from_ref(&role)
     };
+    let interpretations = roles
+        .iter()
+        .map(|&r| {
+            if remaining.max_fields == 0
+                || remaining.max_records == 0
+                || remaining.max_source_spans == 0
+                || remaining.max_work == 0
+            {
+                return super::as_json(Err(crate::Error::limit("modbus_alternatives_budget")));
+            }
+            let report = decode(r, remaining.clone());
+            if let Ok(report) = &report {
+                remaining.max_records -= report.records.len();
+                remaining.max_fields -= report.fields;
+                remaining.max_source_spans -= report.spans;
+                remaining.max_work -= report.work;
+            }
+            super::as_json(report)
+        })
+        .collect();
     let result = Json::object([
         ("schema", "pcap-evidence.modbus-alternatives.v1".into()),
         (
@@ -484,8 +518,12 @@ pub fn check_pair(
     response: &crate::modbus::ModbusMessage,
     limits: Limits,
 ) -> Result<PairStatus> {
-    let a = decode(&request.raw, Role::Request, limits.clone())?;
-    let b = decode(&response.raw, Role::Response, limits)?;
+    let a = decode_with(&request.raw, Role::Request, limits.clone(), || {
+        request.interpretation(Role::Request)
+    })?;
+    let b = decode_with(&response.raw, Role::Response, limits, || {
+        response.interpretation(Role::Response)
+    })?;
     if a.status() == Status::Unsupported
         || b.status() == Status::Unsupported
         || a.status() == Status::Limited

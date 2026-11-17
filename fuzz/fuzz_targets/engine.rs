@@ -73,7 +73,7 @@ fuzz_target!(|data: &[u8]| {
                         check(&message.raw);
                     }
                 }
-                ApplicationData::Failed(_) => {}
+                ApplicationData::Failed(_) | ApplicationData::ModbusFailed { .. } => {}
             }
         }
         for datagram in &analysis.datagrams {

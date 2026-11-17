@@ -228,6 +228,42 @@ fn confirmation_candidate(value: &crate::correlate::Dnp3ConfirmationCandidate) -
         ("error", value.error.as_ref().map_or(J::Null, error)),
     ])
 }
+fn modbus_pair_fields(
+    value: &Analysis,
+    t: &crate::correlate::Transaction,
+) -> Option<(&'static str, J)> {
+    let (status, pair) = t.modbus_pair.as_ref()?;
+    let ([req], [rsp]) = (t.requests.as_slice(), t.responses.as_slice()) else {
+        return None;
+    };
+    if t.protocol != "modbus" || t.status != *status || pair.refs != [*req, *rsp] {
+        return None;
+    }
+    for ((r, binding), direction) in pair.refs.iter().zip(&pair.bindings).zip(pair.directions) {
+        let app = value.applications.get(r.application)?;
+        let ApplicationData::Modbus(data) = &app.data else {
+            return None;
+        };
+        if app.direction != direction
+            || app.protocol != "modbus"
+            || t.flow != app.flow
+            || !binding.matches(data.messages.get(r.message)?)
+        {
+            return None;
+        }
+    }
+    let [a, b] = &pair.tokens;
+    match t.status {
+        "inconsistent_response" => {
+            Some(("disagreeing_fields", crate::modbus::mismatch_fields(a, b)?))
+        }
+        "candidate_pair" | "candidate_unverified_boundary" => Some((
+            "read_mapping",
+            crate::modbus::pair_projection(a, b, t.status, reference(req), reference(rsp))?,
+        )),
+        _ => None,
+    }
+}
 pub fn analysis(value: &Analysis, include_payload: bool) -> J {
     let config = &value.config;
     let limits = &config.limits;
@@ -372,6 +408,10 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                     ("packets", ids(&flow.packets)),
                     ("anomalies", strings(&flow.anomalies)),
                     (
+                        "uncertain_payload_packet",
+                        flow.uncertain_payload.as_ref().map_or(J::Null, packet_id),
+                    ),
+                    (
                         "reconstruction_errors",
                         J::array(flow.reconstruction_errors.iter().map(error)),
                     ),
@@ -395,7 +435,10 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                     .enumerate()
                     .map(|(index, application)| {
                         let data = match &application.data {
-                            ApplicationData::Failed(e) => J::object([("error", error(e))]),
+                            ApplicationData::Failed(e)
+                            | ApplicationData::ModbusFailed { error: e, .. } => {
+                                J::object([("error", error(e))])
+                            }
                             ApplicationData::Dnp3(d) => dnp3_data(d, include_payload, limits),
                             ApplicationData::Modbus(m) => J::object([
                                 ("issues", issues(&m.issues)),
@@ -420,9 +463,8 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                                             ("raw", evidence(&message.raw, include_payload)),
                                             (
                                                 "semantic_subset",
-                                                crate::semantics::modbus::alternatives_json(
-                                                    &message.raw,
-                                                    message.role,
+                                                crate::semantics::modbus::message_fields(
+                                                    message,
                                                     crate::semantics::Limits::from_capture(limits),
                                                 ),
                                             ),
@@ -497,31 +539,22 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                     ("status", t.status.into()),
                     ("reason", t.reason.into()),
                 ]);
-                if t.protocol == "modbus"
-                    && matches!(
-                        t.status,
-                        "candidate_pair"
-                            | "candidate_unverified_boundary"
-                            | "inconsistent_response"
-                    )
-                {
-                    if let ([req], [rsp]) = (t.requests.as_slice(), t.responses.as_slice()) {
-                        if let (Some((a, b)), J::Object(fields)) = (&t.modbus_tokens, &mut entry) {
-                            if t.status == "inconsistent_response" {
-                                if let Some(names) = crate::modbus::mismatch_fields(a, b) {
-                                    fields.push(("disagreeing_fields", names));
-                                }
-                            } else if let Some(mapping) = crate::modbus::pair_projection(
-                                a,
-                                b,
-                                t.status,
-                                reference(req),
-                                reference(rsp),
-                            ) {
-                                fields.push(("read_mapping", mapping));
-                            }
-                        }
+                if !t.competing.is_empty() {
+                    if let J::Object(fields) = &mut entry {
+                        fields.push((
+                            "competing_observations",
+                            J::array(t.competing.iter().map(|(app, kind, index)| {
+                                J::object([
+                                    ("application", (*app).into()),
+                                    (*kind, (*index).into()),
+                                ])
+                            })),
+                        ));
                     }
+                }
+                if let (Some(field), J::Object(fields)) = (modbus_pair_fields(value, t), &mut entry)
+                {
+                    fields.push(field);
                 }
                 entry
             })),

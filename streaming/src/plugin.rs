@@ -18,7 +18,7 @@ use pcap_evidence::{
     wire::Endpoint,
     Limits,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 mod dnp_workflow;
 
@@ -289,7 +289,20 @@ impl Output<'_> {
         let code: String = code.into();
         let prefix = (protocol == "modbus").then(|| {
             if code == "incomplete_application_at_gap_or_window_end" {
-                modbus::transaction_prefix(bytes.data())
+                let role = if self
+                    .context
+                    .modbus_ports
+                    .contains(&self.context.source.port)
+                    && !self
+                        .context
+                        .modbus_ports
+                        .contains(&self.context.destination.port)
+                {
+                    modbus::Role::Response
+                } else {
+                    modbus::Role::Unknown
+                };
+                modbus::observation_prefix(bytes.data(), role)
             } else {
                 String::new()
             }
@@ -373,18 +386,16 @@ impl TransactionCorrelator for IdentifierCorrelator {
         }
         let mut groups: BTreeMap<(u64, &'static str, String), Vec<&MessageRecord>> =
             BTreeMap::new();
-        let mut incomplete = BTreeSet::new();
-        let mut other_mei = BTreeSet::new();
+        let mut incomplete: BTreeMap<u64, modbus::CompetingEvidence<u64>> = BTreeMap::new();
+        let mut reference_budget = max_checks - records.len();
         for r in records {
             if r.protocol == "modbus"
                 && (!r.complete || r.hint.role == Role::Unknown || r.ambiguous)
             {
-                let item = (r.session, r.hint.key.as_str());
-                if r.hint.compatibility == "other-mei-request" {
-                    other_mei.insert(item);
-                } else {
-                    incomplete.insert(item);
-                }
+                incomplete
+                    .entry(r.session)
+                    .or_default()
+                    .record(r.hint.key.clone(), r.event);
             }
             if r.complete && !r.ambiguous && r.hint.role != Role::Unknown {
                 groups
@@ -414,12 +425,15 @@ impl TransactionCorrelator for IdentifierCorrelator {
                         || rsp[0].hint.compatibility.is_empty()
                         || req[0].hint.compatibility == rsp[0].hint.compatibility
                 };
-            let competing = protocol == "modbus"
-                && (modbus::competing_prefix(&key, |prefix| {
-                    incomplete.contains(&(session, prefix))
-                }) || (rsp.iter().any(|r| r.hint.compatibility == "modbus-pdu-v2:")
-                    && other_mei.contains(&(session, key.as_str()))));
-            let (status, reason) = if competing {
+            let witnesses = match incomplete.get(&session).filter(|_| protocol == "modbus") {
+                Some(evidence) => evidence.witnesses(
+                    &key,
+                    rsp.iter().any(|r| r.hint.compatibility == "modbus-pdu-v2:"),
+                    &mut reference_budget,
+                )?,
+                None => Vec::new(),
+            };
+            let (status, reason) = if !witnesses.is_empty() {
                 (EvidenceStatus::Ambiguous, "competing_modbus_observation")
             } else if protocol == "modbus" && (req.len() > 1 || rsp.len() > 1) {
                 (
@@ -490,7 +504,7 @@ impl TransactionCorrelator for IdentifierCorrelator {
             }
             e.session = Some(session);
             e.protocol = Some(protocol.into());
-            e.related_events = group.iter().map(|r| r.event).collect();
+            e.related_events = group.iter().map(|r| r.event).chain(witnesses).collect();
             sink.emit(&e)?;
         }
         Ok(())
@@ -1670,13 +1684,9 @@ fn emit_modbus(
         })
     } else {
         Some(CorrelationHint {
-            key: modbus::transaction_prefix(raw.data()),
+            key: modbus::observation_prefix(raw.data(), decoded_role),
             role: Role::Unknown,
-            compatibility: if role == Role::Request && modbus::other_mei(&raw.data()[7..]) {
-                "other-mei-request".into()
-            } else {
-                String::new()
-            },
+            compatibility: String::new(),
         })
     };
     out.message(

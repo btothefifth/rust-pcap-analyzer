@@ -82,3 +82,65 @@ fn modbus_read_mapping_retains_conditional_boundary_and_both_witnesses() {
         assert!(json.contains("\"padding_checked\":true"));
     }
 }
+
+#[test]
+fn changed_modbus_references_cannot_retarget_a_mapping() {
+    let mut analysis =
+        engine::analyze(&capture("modbus_bits_valid.pcap"), Config::default()).unwrap();
+    let index = analysis
+        .transactions
+        .iter()
+        .position(|t| t.status == "candidate_pair")
+        .unwrap();
+    let reference = analysis.transactions[index].requests[0];
+    let response = analysis.transactions[index].responses[0];
+    analysis.transactions[index].requests[0] = response;
+    assert!(!report::analysis(&analysis, false)
+        .encode()
+        .contains("read_mapping"));
+    analysis.transactions[index].requests[0] = reference;
+    assert!(report::analysis(&analysis, false)
+        .encode()
+        .contains("read_mapping"));
+    let engine::ApplicationData::Modbus(data) =
+        &mut analysis.applications[reference.application].data
+    else {
+        unreachable!()
+    };
+    let source = &mut data.messages[reference.message].raw;
+    let packet = source.spans()[0].packet;
+    *source = pcap_evidence::provenance::EvidenceBytes::from_packet(source.data(), packet, 31);
+    assert!(!report::analysis(&analysis, false)
+        .encode()
+        .contains("read_mapping"));
+}
+
+#[test]
+fn modbus_decoder_failure_applies_only_to_its_capture_and_generation() {
+    use pcap_evidence::{correlate::transactions, Error, Limits};
+    let mut analysis =
+        engine::analyze(&capture("modbus_bits_valid.pcap"), Config::default()).unwrap();
+    let mut failure = engine::ApplicationAnalysis {
+        flow: analysis.transactions[0].flow,
+        direction: 0,
+        protocol: "modbus",
+        data: engine::ApplicationData::ModbusFailed {
+            capture: [0; 32],
+            error: Error::limit("test"),
+        },
+    };
+    analysis.applications.push(failure.clone());
+    assert!(transactions(&analysis.applications, &Limits::default())
+        .unwrap()
+        .iter()
+        .any(|tx| tx.status == "candidate_pair"));
+    failure.data = engine::ApplicationData::ModbusFailed {
+        capture: analysis.capture_sha256,
+        error: Error::limit("test"),
+    };
+    analysis.applications.push(failure);
+    assert!(!transactions(&analysis.applications, &Limits::default())
+        .unwrap()
+        .iter()
+        .any(|tx| tx.status == "candidate_pair"));
+}

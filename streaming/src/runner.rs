@@ -488,9 +488,29 @@ impl State<'_> {
             link_interface: None,
             vlans: vec![],
         };
-        let decoded = match network::decode(meta.link_type, &raw, scope) {
+        let decoded = match network::decode(meta.link_type, &raw, scope.clone()) {
             Ok(d) => d,
             Err(e) => {
+                if meta.captured_len < meta.original_len {
+                    if let Some((scope, segment)) =
+                        wire::snapped_tcp(meta.link_type, data, id, scope)
+                    {
+                        let (key, _) = Key::new(
+                            scope.clone(),
+                            vec![],
+                            6,
+                            segment.source,
+                            segment.destination,
+                        );
+                        if let Some(tracker) = self
+                            .active
+                            .get_mut(&key)
+                            .and_then(|active| active.tracker.as_mut())
+                        {
+                            tracker.observe_snapped(scope, id, exact, &segment);
+                        }
+                    }
+                }
                 self.diagnostic(e.to_string(), vec![id], EvidenceStatus::Unsupported)?;
                 return Ok(());
             }
@@ -931,6 +951,13 @@ impl State<'_> {
         dnp3_confirmations: &mut Vec<Dnp3StreamingConfirmationRecord>,
         remaining: &mut usize,
     ) -> Result<()> {
+        if let Some(packet) = flow.uncertain_payload {
+            self.diagnostic(
+                "tcp_generation_payload_uncertain",
+                vec![packet],
+                EvidenceStatus::Ambiguous,
+            )?;
+        }
         let flow_ambiguous = !flow.reconstruction_errors.is_empty()
             || !flow.anomalies.is_empty()
             || flow
@@ -1024,6 +1051,7 @@ impl State<'_> {
             };
             protocol_inputs.push((ctx, stream));
         }
+        let first_record = messages.len();
         let mut output = RegistryOutput {
             sink: self.sink,
             records: messages,
@@ -1032,6 +1060,13 @@ impl State<'_> {
         };
         self.registry
             .streams(&protocol_inputs, self.c, &mut output)?;
+        if flow.uncertain_payload.is_some() {
+            for r in &mut messages[first_record..] {
+                if r.protocol == "modbus" {
+                    r.ambiguous = true;
+                }
+            }
+        }
         Ok(())
     }
     fn flush(&mut self, mut a: Active, reason: &'static str) -> Result<()> {

@@ -159,3 +159,19 @@ as if they came from the new producer. No old evidence is edited by the installe
 
 Normative edition review, independent expert adjudication, and broad external
 analyzer equivalence are NOT established by this implementation or its case list.
+
+The snapshot and streaming correlators withhold Modbus enrichment for every
+generation that could own an unassigned TCP data segment. When snaplen removes
+transport data but the captured IP and TCP headers identify a plausible
+generation, the same restriction applies. A disjoint successor generation can
+still produce pairs. Ambiguous application groups reference competing messages
+and framing issues in the snapshot, and their event IDs in streaming output.
+
+FC20 uses the 245-byte response data ceiling in V1.1b3 §6.14. A single record
+can therefore return up to 121 words. For the lower bound, the parser follows
+the specified word layout and the worked example, whose subresponse length
+is 5 even though the table lists 7 as its minimum. It accepts a one-word
+subresponse of length 3. A malformed following record retains complete
+preceding records and their witnesses. FC43/14 accepts a restart at object 0
+only if the requested ID is optional and absent from the observed page.
+Role alternatives share the caller's record, field, span and work budgets.
