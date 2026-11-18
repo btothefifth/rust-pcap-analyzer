@@ -14,7 +14,7 @@ excluded by a subsequently observed SYN in `before_syn`. `wire::Datagram`
 carries `declared_payload_len`, the IP payload length after decoded extensions.
 For a complete datagram constructed by a caller, use the payload's byte length.
 Read finalized snapshot observations through `Analysis::applications()` and transport
-generations through `Analysis::flows()`.
+generations through `Analysis::flows()`. Read the producing configuration with `Analysis::config()`.
 Callers editing observations can use `applications().to_vec()` and pass the
 edited list to `correlate::transactions`.
 

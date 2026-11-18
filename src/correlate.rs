@@ -518,7 +518,7 @@ fn tuple(
     }
 }
 pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Vec<AttemptMatch>> {
-    if labels.len() > analysis.config.limits.max_labels {
+    if labels.len() > analysis.config().limits.max_labels {
         return Err(Error::limit("labels"));
     }
     let mut packet_tuples = BTreeMap::<_, Vec<usize>>::new();
@@ -534,7 +534,7 @@ pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Ve
     }
     let mut packet_messages: BTreeMap<PacketId, Vec<MessageRef>> = BTreeMap::new();
     let mut checks = 0usize;
-    let budget = analysis.config.limits.max_correlation_checks;
+    let budget = analysis.config().limits.max_correlation_checks;
     for (ai, application) in analysis.applications().iter().enumerate() {
         let message_packets: Vec<Vec<PacketId>> = match &application.data {
             ApplicationData::Dnp3(d) => d.messages.iter().map(|m| m.packets.clone()).collect(),
@@ -609,7 +609,7 @@ pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Ve
 }
 /// Transactional application: invalid labels leave the analysis unchanged.
 pub fn apply_labels(analysis: &mut Analysis, text: &str) -> Result<()> {
-    let labels = parse_labels(text, &analysis.config.limits)?;
+    let labels = parse_labels(text, &analysis.config().limits)?;
     let matches = match_attempts(analysis, &labels)?;
     analysis.attempt_matches = matches;
     analysis.labels_sha256 = Some(crate::sha256::digest(text.as_bytes()));

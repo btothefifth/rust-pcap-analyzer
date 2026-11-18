@@ -376,3 +376,85 @@ fn history_drains_a_complete_frame_before_charging_later_packet_spans() {
         }
     }
 }
+
+#[test]
+fn a_paged_gap_emits_one_boundary_with_the_discarded_prefix() {
+    let temp = Temp::new();
+    let source = temp.source(&[
+        tcp(false, 100, 0, 2, &[]),
+        tcp(false, 101, 0, 0x18, &[10, 20]),
+        tcp(false, 105, 0, 0x18, &[0, 1, 0, 0, 0, 4, 1, 24, 0, 7]),
+    ]);
+    let workspace = temp.0.join("history");
+    analyze_file(
+        &source,
+        &workspace,
+        Config::default(),
+        &Cancellation::default(),
+    )
+    .unwrap();
+    let mut history = History::open(&source, &workspace).unwrap();
+    let generation = history.generations(None, 10).unwrap()[0];
+    for end in [4, 14] {
+        let mut request = Request {
+            generation,
+            direction: 0,
+            start: 0,
+            end,
+            page_bytes: 14,
+            max_output_bytes: 1024 * 1024,
+            protocol: "modbus".into(),
+            ua_security_none: false,
+        };
+        let mut expected = None;
+        for page in [14, 1, 3] {
+            request.page_bytes = page;
+            let mut output = Vec::new();
+            analyze(
+                &mut history,
+                &request,
+                Limits::default(),
+                &mut output,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let report = std::str::from_utf8(&output).unwrap();
+            assert_eq!(
+                report.matches(r#""kind":"application.boundary""#).count(),
+                1
+            );
+            assert!(report.contains(r#""start":"2","end":"4""#));
+            assert!(
+                report.contains(&pcap_evidence::sha256::hex(&pcap_evidence::sha256::digest(
+                    &[10, 20]
+                )))
+            );
+            assert_eq!(report.contains("protocol.message"), end == 14);
+            request.max_output_bytes = output.len() as u64;
+            assert_eq!(expected.get_or_insert_with(|| output.clone()), &output);
+            if end == 14 {
+                // Leave room for the boundary and abort, but not the next message.
+                let lines: Vec<_> = report.split_inclusive('\n').collect();
+                let mut capped = request.clone();
+                capped.max_output_bytes = (lines[0].len() + lines[1].len() + 1024) as u64;
+                let mut partial = Vec::new();
+                let error = analyze(
+                    &mut history,
+                    &capped,
+                    Limits::default(),
+                    &mut partial,
+                    &AtomicBool::new(false),
+                )
+                .unwrap_err();
+                assert_eq!(error.field, "history_app_output");
+                let last = std::str::from_utf8(&partial)
+                    .unwrap()
+                    .lines()
+                    .last()
+                    .unwrap();
+                assert!(last.contains(r#""sequence":"3","kind":"analysis.aborted""#));
+                assert!(last.contains(r#""consumed_until":"4""#));
+            }
+        }
+    }
+}

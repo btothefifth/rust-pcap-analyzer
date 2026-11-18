@@ -1338,20 +1338,28 @@ fn definitive_fragment_rejection_restores_window_activity() {
     let last = ipv4_fragment(&rejected, 24..32, false);
     // Use unrelated records to keep the two representations at the same ages.
     let other = tiny_capture::tunneled("gre", 7, false, &tcp(false, 200, 0, 2, &[]));
-    for middle in [vec![rejected, other.clone()], vec![first, last]] {
+    let reply = tcp(true, 501, 113, 0x18, &response);
+    for tail in [
+        vec![rejected, other.clone(), other.clone(), reply.clone()],
+        vec![first.clone(), last.clone(), other.clone(), reply.clone()],
+        vec![first, other.clone(), other, reply, last],
+    ] {
         let mut frames = vec![
             tcp(false, 100, 0, 2, &[]),
             tcp(true, 500, 101, 0x12, &[]),
             tcp(false, 101, 501, 0x18, &request),
         ];
-        frames.extend(middle);
-        frames.push(other.clone());
-        frames.push(tcp(true, 501, 113, 0x18, &response));
-        for idle_frames in [3, 8] {
+        frames.extend(tail);
+        for (idle_frames, idle_secs, expected_cut) in [
+            (3, 60, Some("idle_frame_boundary")),
+            (8, 3, Some("idle_time_boundary")),
+            (8, 60, None),
+        ] {
             let mut c = StreamConfig {
                 idle_frames,
                 ..StreamConfig::default()
             };
+            c.base.idle_timeout_ns = idle_secs * 1_000_000_000;
             c.base.modbus_ports = vec![2000];
             c.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
             let events = run(&capture(&frames), c).events;
@@ -1359,14 +1367,11 @@ fn definitive_fragment_rejection_restores_window_activity() {
                 events
                     .iter()
                     .any(|e| e.data.encode().contains("read_mapping")),
-                idle_frames == 8
+                expected_cut.is_none()
             );
-            assert_eq!(
-                events
-                    .iter()
-                    .any(|e| e.data.encode().contains("idle_frame_boundary")),
-                idle_frames == 3
-            );
+            if let Some(reason) = expected_cut {
+                assert!(events.iter().any(|e| e.data.encode().contains(reason)));
+            }
         }
     }
 }
@@ -1392,7 +1397,7 @@ fn late_server_syn_excludes_predecessor_data_without_losing_the_response() {
         let raw = capture(&frames);
         let root = pcap_evidence::engine::analyze(&raw, c.base.clone()).unwrap();
         let reason = if predecessor_first {
-            "payload_precedes_observed_syn"
+            "stream_position_precedes_observed_syn"
         } else {
             "sequence_outside_known_generations"
         };
@@ -1411,5 +1416,48 @@ fn late_server_syn_excludes_predecessor_data_without_losing_the_response() {
         assert!(events
             .iter()
             .any(|e| e.data.encode().contains("read_mapping")));
+    }
+}
+
+#[test]
+fn fin_uses_the_stream_lower_bound_before_and_after_the_syn_ack() {
+    use tiny_capture::{capture, tcp};
+    let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    for fin_seq in [480, 512] {
+        for fin_first in [false, true] {
+            let mut frames = vec![
+                tcp(false, 100, 0, 2, &[]),
+                tcp(true, 500, 101, 0x12, &[]),
+                tcp(true, fin_seq, 101, 0x11, &[]),
+                tcp(false, 101, 501, 0x18, &request),
+                tcp(true, 501, 113, 0x18, &response),
+            ];
+            if fin_first {
+                frames.swap(1, 2);
+            }
+            let source = capture(&frames);
+            let mut config = StreamConfig::default();
+            config.base.modbus_ports = vec![2000];
+            let snapshot = pcap_evidence::engine::analyze(&source, config.base.clone()).unwrap();
+            let flow = &snapshot.flows()[0];
+            assert!(flow.reconstruction_errors.is_empty());
+            assert_eq!(
+                flow.streams[1].as_ref().unwrap().chunks[0].bytes.data(),
+                &response
+            );
+            assert_eq!(
+                flow.before_syn.len(),
+                usize::from(fin_first && fin_seq == 480)
+            );
+            assert!(snapshot
+                .transactions
+                .iter()
+                .any(|t| t.status == "candidate_pair"));
+            let events = run(&source, config).events;
+            assert!(events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")));
+        }
     }
 }

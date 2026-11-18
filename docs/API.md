@@ -122,7 +122,8 @@ and include hex even when bulk payload is disabled. Candidate status does not
 establish receipt, causality, acceptance, device effects, authentication or
 normative conformance. Obtain an `Analysis` with `engine::analyze` and read the finalized application
 observations with `Analysis::applications()` and transport generations with
-`Analysis::flows()`. The streaming crate adds a separate
+`Analysis::flows()`. Read the producing configuration with `Analysis::config()`.
+The streaming crate adds a separate
 `dnp3.confirmation_candidate` event projection for verified TCP fragments. It is
 scoped by capture hash, session, flow window/generation, reversed individual
 addresses, sequence and UNS namespace, and carries exact participant witnesses.

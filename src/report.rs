@@ -293,7 +293,7 @@ fn snapshot_fields(
     value: &Analysis,
     include_payload: bool,
 ) -> impl IntoIterator<Item = (&'static str, P<'_>)> {
-    let config = &value.config;
+    let config = value.config();
     let limits = &config.limits;
     [
         ("schema", "pcap-evidence.analysis.v1".into()),

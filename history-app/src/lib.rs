@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 use pcap_evidence::{json::Json, sha256, Error, Result};
 use pcap_evidence_history::query::History;
-use pcap_evidence_product::deep::{continuation::Parser, Context, Limits};
+use pcap_evidence_product::deep::{continuation::Parser, Context, Limits, Report};
 use std::io::Write;
 #[derive(Clone, Debug)]
 pub struct Request {
@@ -15,6 +15,27 @@ pub struct Request {
     pub max_output_bytes: u64,
     pub protocol: String,
     pub ua_security_none: bool,
+}
+struct Boundary {
+    start: i64,
+    end: i64,
+    status: String,
+    discarded: Report,
+}
+
+impl Boundary {
+    fn emit(self, emit: &mut impl FnMut(&'static str, Json) -> Result<()>) -> Result<i64> {
+        emit(
+            "application.boundary",
+            Json::object([
+                ("start", self.start.to_string().into()),
+                ("end", self.end.to_string().into()),
+                ("transport_status", self.status.into()),
+                ("report", self.discarded.json()),
+            ]),
+        )?;
+        Ok(self.end)
+    }
 }
 pub fn analyze<W: Write>(
     history: &mut History,
@@ -43,12 +64,12 @@ pub fn analyze<W: Write>(
     let mut written = 0u64;
     let mut chain = [0u8; 32];
     let mut emit = |kind: &'static str, data: Json| -> Result<()> {
-        seq = seq
+        let next_seq = seq
             .checked_add(1)
             .ok_or_else(|| Error::limit("history_app_sequence"))?;
         let body = Json::object([
             ("schema", "pcap-evidence.history-app.v1".into()),
-            ("sequence", seq.to_string().into()),
+            ("sequence", next_seq.to_string().into()),
             ("kind", kind.into()),
             ("capture_sha256", sha256::hex(&capture_sha256).into()),
             ("generation", sha256::hex(&request.generation).into()),
@@ -67,11 +88,13 @@ pub fn analyze<W: Write>(
             ("event_sha256", sha256::hex(&next).into()),
         ])
         .encode_bounded_line(l.output_bytes)?;
-        written = written
+        let next_written = written
             .checked_add(line.len() as u64)
             .filter(|n| *n <= request.max_output_bytes)
             .ok_or_else(|| Error::limit("history_app_output"))?;
         output.write_all(line.as_bytes())?;
+        seq = next_seq;
+        written = next_written;
         chain = next;
         Ok(())
     };
@@ -89,7 +112,8 @@ pub fn analyze<W: Write>(
     let mut remaining_frames = l.elements;
     let mut completed_until = request.start;
     let mut at = request.start;
-    let result = (|| -> Result<()> {
+    let mut boundary: Option<Boundary> = None;
+    let read_result = (|| -> Result<()> {
         while at < request.end {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(Error::limit("history_app_cancelled"));
@@ -100,6 +124,15 @@ pub fn analyze<W: Write>(
                 .min(request.end);
             let range = history.evidence_range(request.generation, request.direction, at, end)?;
             for p in range.pieces {
+                if let Some(gap) = &mut boundary {
+                    if p.bytes.is_none() && gap.end == p.start && gap.status == p.status {
+                        gap.end = p.end;
+                        continue;
+                    }
+                }
+                if let Some(gap) = boundary.take() {
+                    completed_until = gap.emit(&mut emit)?;
+                }
                 if let Some(bytes) = p.bytes {
                     parser.feed_with_quota(
                         p.start,
@@ -129,21 +162,23 @@ pub fn analyze<W: Write>(
                         },
                     )?;
                 } else {
-                    let report = parser.cut("transport_gap_conflict_or_ambiguous_placement")?;
-                    emit(
-                        "application.boundary",
-                        Json::object([
-                            ("start", p.start.to_string().into()),
-                            ("end", p.end.to_string().into()),
-                            ("transport_status", p.status.into()),
-                            ("report", report.json()),
-                        ]),
-                    )?;
-                    completed_until = p.end;
+                    boundary = Some(Boundary {
+                        start: p.start,
+                        end: p.end,
+                        status: p.status,
+                        discarded: parser.cut("transport_gap_conflict_or_ambiguous_placement")?,
+                    });
                 }
             }
             at = end;
         }
+        Ok(())
+    })();
+    let result = (|| -> Result<()> {
+        if let Some(gap) = boundary {
+            completed_until = gap.emit(&mut emit)?;
+        }
+        read_result?;
         if let Some(report) = parser.finish()? {
             emit("application.incomplete", report.json())?;
         }

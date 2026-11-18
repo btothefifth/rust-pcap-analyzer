@@ -119,7 +119,7 @@ pub struct Analysis {
     pub capture_sha256: [u8; 32],
     pub labels_sha256: Option<[u8; 32]>,
     pub capture_bytes: usize,
-    pub config: Config,
+    config: Config,
     pub records: usize,
     pub metadata_records: usize,
     pub secret_blocks: usize,
@@ -136,6 +136,17 @@ pub struct Analysis {
     pub correlation_error: Option<Error>,
 }
 impl Analysis {
+    /// Configuration that produced this snapshot.
+    ///
+    /// ```compile_fail
+    /// fn relabel(snapshot: &mut pcap_evidence::engine::Analysis) {
+    ///     snapshot.config().modbus_ports.clear();
+    /// }
+    /// ```
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
     /// Finalized transport evidence used to assign and interpret application data.
     ///
     /// ```compile_fail
@@ -514,7 +525,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
     for flow in &flows {
         each_packet(&mut packets, &flow.before_syn, |p| {
             p.disposition = Disposition::Rejected {
-                code: "payload_precedes_observed_syn",
+                code: "stream_position_precedes_observed_syn",
                 detail: "later handshake excludes this segment from the candidate generation"
                     .into(),
             };

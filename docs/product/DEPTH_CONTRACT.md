@@ -169,6 +169,9 @@ scope until the caller cuts it. This is the intended conservative behavior for
 TCP replay bugs, retransmission ambiguity, timing/order anomalies, and history
 page boundaries.
 
+Adjacent unavailable intervals with the same transport status produce one cut
+and one boundary event, including when the interval spans query pages.
+
 The history application consumer emits a hash-chained NDJSON sequence:
 analysis.start, zero or more message/boundary events, optional incomplete or
 aborted evidence, and analysis.complete. A complete event means that the

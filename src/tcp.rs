@@ -425,7 +425,7 @@ impl Flow {
         self.closed |= self.rst_seen || (self.fin[0] && self.fin[1]);
     }
 
-    fn admits_payload_start(&self, direction: usize, sequence: u32) -> bool {
+    fn admits_stream_start(&self, direction: usize, sequence: u32) -> bool {
         self.syn[direction].is_none_or(|isn| {
             sequence_delta(sequence, isn.wrapping_add(1)).is_ok_and(|delta| delta >= 0)
         })
@@ -471,7 +471,7 @@ impl UnretainedHeader {
         self.syn_isn
             .zip(flow.syn[self.direction])
             .is_none_or(|(seen, assigned)| seen == assigned)
-            && flow.admits_payload_start(self.direction, self.sequence)
+            && flow.admits_stream_start(self.direction, self.sequence)
     }
 
     fn matches(&self, flow: &Flow, max_span: i64) -> bool {
@@ -551,8 +551,8 @@ impl TcpTracker {
         }
     }
     fn plausible(&self, flow: &Flow, direction: usize, segment: &TcpSegment) -> bool {
-        (segment.payload.is_empty()
-            || flow.admits_payload_start(direction, segment.data_sequence()))
+        (!segment.contributes_stream_extent()
+            || flow.admits_stream_start(direction, segment.data_sequence()))
             && flow.sequence_plausible(
                 direction,
                 segment.data_sequence(),
@@ -926,7 +926,7 @@ impl TcpTracker {
             let first = segment.data_sequence();
             let precedes = |input: &Input| {
                 input.direction == direction
-                    && !input.segment.payload.is_empty()
+                    && input.segment.contributes_stream_extent()
                     && !sequence_delta(input.segment.data_sequence(), first).is_ok_and(|d| d >= 0)
             };
             if flow.inputs.iter().any(precedes) {
@@ -956,6 +956,9 @@ impl TcpTracker {
         flow.inputs.push(input);
         self.retained = retained;
         for previous in excluded {
+            if previous.segment.payload.is_empty() {
+                continue; // A FIN alone supplies no missing application bytes.
+            }
             self.retained -= previous.segment.payload.len();
             self.observe_header(
                 key.scope.clone(),

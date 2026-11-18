@@ -40,7 +40,10 @@ fn root_engine_recognizes_modbus_without_configured_fixture_port() {
     assert!(analysis
         .flows()
         .iter()
-        .any(|f| detection::classify_flow(f, &analysis.config).unwrap().basis == "content"));
+        .any(|f| detection::classify_flow(f, analysis.config())
+            .unwrap()
+            .basis
+            == "content"));
 }
 #[test]
 fn timestamp_secondary_index_preserves_file_order_and_unknowns() {

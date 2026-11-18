@@ -101,6 +101,10 @@ impl TcpSegment {
     pub fn rst(&self) -> bool {
         self.flags & 0x04 != 0
     }
+    /// Data and FIN both contribute positions to the reconstructed stream.
+    pub(crate) fn contributes_stream_extent(&self) -> bool {
+        !self.payload.is_empty() || self.fin()
+    }
     pub fn data_sequence(&self) -> u32 {
         self.sequence.wrapping_add(u32::from(self.syn()))
     }
