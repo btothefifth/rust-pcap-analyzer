@@ -243,6 +243,7 @@ pub fn analyze<W: Write>(
                     ("consumed_until", completed_until.to_string().into()),
                 ]),
             );
+            output.flush()?;
             return Err(e);
         }
     }

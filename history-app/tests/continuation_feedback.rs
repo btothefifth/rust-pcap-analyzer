@@ -515,18 +515,18 @@ fn cancellation_from_the_event_writer_aborts_at_the_published_prefix() {
     struct CancelOnEvent<'a> {
         flag: &'a AtomicBool,
         trigger: String,
-        output: Vec<u8>,
+        output: io::BufWriter<Vec<u8>>,
     }
     impl Write for CancelOnEvent<'_> {
         fn write(&mut self, line: &[u8]) -> io::Result<usize> {
-            self.output.extend_from_slice(line);
+            self.output.write_all(line)?;
             if std::str::from_utf8(line).unwrap().contains(&self.trigger) {
                 self.flag.store(true, Ordering::Relaxed);
             }
             Ok(line.len())
         }
         fn flush(&mut self) -> io::Result<()> {
-            Ok(())
+            self.output.flush()
         }
     }
     let (_temp, mut history, generation) = history_with_gap(Config::default());
@@ -550,7 +550,7 @@ fn cancellation_from_the_event_writer_aborts_at_the_published_prefix() {
         let mut writer = CancelOnEvent {
             flag: &cancel,
             trigger: format!(r#""kind":"{trigger}""#),
-            output: Vec::new(),
+            output: io::BufWriter::with_capacity(1024, Vec::new()),
         };
         let result = analyze(
             &mut history,
@@ -560,7 +560,7 @@ fn cancellation_from_the_event_writer_aborts_at_the_published_prefix() {
             &cancel,
         );
         assert_eq!(result.unwrap_err().field, "history_app_cancelled");
-        let events = String::from_utf8(writer.output).unwrap();
+        let events = std::str::from_utf8(writer.output.get_ref()).unwrap();
         let mut lines = events.lines().rev();
         let abort = lines.next().unwrap();
         assert!(abort.contains(r#""kind":"analysis.aborted""#));
@@ -634,5 +634,71 @@ fn a_paged_gap_emits_one_boundary_with_the_discarded_prefix() {
                 assert!(last.contains(r#""consumed_until":"4""#));
             }
         }
+    }
+}
+
+#[test]
+fn partially_agreeing_observations_preserve_messages_across_pages_and_retries() {
+    let temp = Temp::new();
+    let adu = [0, 1, 0, 0, 0, 4, 1, 24, 0, 7];
+    let first = [adu.as_slice(), &[1, 2, 3], &adu].concat();
+    let mut second = first.clone();
+    second[10] = 4;
+    second[12] = 5;
+    let source = temp.source(&[
+        tcp(false, 100, 0, 2, &[]),
+        tcp(false, 101, 0, 0x18, &first),
+        tcp(false, 101, 0, 0x18, &second),
+    ]);
+    let workspace = temp.0.join("history");
+    analyze_file(
+        &source,
+        &workspace,
+        Config::default(),
+        &Cancellation::default(),
+    )
+    .unwrap();
+    let mut history = History::open(&source, &workspace).unwrap();
+    let generation = history.generations(None, 10).unwrap()[0];
+    let end = first.len() as i64;
+    let mut reference = None;
+    for (page_bytes, intervals) in [(1, 64), (23, 64), (23, 2)] {
+        history.config.max_query_intervals = intervals;
+        if intervals == 2 {
+            assert_eq!(
+                history
+                    .evidence_range(generation, 0, 0, end)
+                    .unwrap_err()
+                    .field,
+                "query_evidence_references"
+            );
+        }
+        let request = Request {
+            generation,
+            direction: 0,
+            start: 0,
+            end,
+            page_bytes,
+            max_output_bytes: 65536,
+            protocol: "modbus".into(),
+            ua_security_none: false,
+        };
+        let mut output = Vec::new();
+        analyze(
+            &mut history,
+            &request,
+            Limits::default(),
+            &mut output,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let events = std::str::from_utf8(&output).unwrap();
+        assert_eq!(events.matches(r#""kind":"protocol.message""#).count(), 2);
+        for (a, b) in [(10, 11), (12, 13)] {
+            assert!(events.contains(&format!(
+                r#""start":"{a}","end":"{b}","transport_status":"conflicting_bytes""#
+            )));
+        }
+        assert_eq!(reference.get_or_insert_with(|| output.clone()), &output);
     }
 }

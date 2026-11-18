@@ -182,7 +182,8 @@ limit, the application reader halves the read size and retries at the same
 offset. It keeps the smaller size for the rest of the selection. If a single
 byte cannot be queried within the limit, the analysis aborts with the query
 error. Direct `range` and `evidence_range` calls evaluate the requested interval
-in one query.
+in one query. Within an overlap, agreeing bytes retain their placement status and
+only offsets with disagreeing observations produce a conflict boundary.
 
 The history application consumer emits a hash-chained NDJSON sequence:
 analysis.start, zero or more message/boundary events, optional incomplete or
@@ -195,7 +196,8 @@ Library cancellation is cooperative. The reader checks the flag between pages,
 between pieces, and before publishing further results. If an event writer
 requests cancellation while writing a nonterminal event, that event stays in
 the chain. The reader returns
-`history_app_cancelled` and appends an abort event if output space permits.
+`history_app_cancelled` after attempting to append an abort event and flushing the accepted prefix.
+A flush failure returns the I/O error.
 
 The history application CLI selects the full direction and allows 1,024 framed
 units across that range. If a 1,025th unit is reached, the CLI exits with code 4

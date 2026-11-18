@@ -643,15 +643,27 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
     P::object(snapshot_fields(value, include_payload)).into_json()
 }
 
-/// Encode the CLI report without retaining the projected capture-wide JSON tree.
-/// The limit includes protocol detection and the final newline.
-pub fn analysis_line(value: &Analysis, include_payload: bool, limit: usize) -> Result<String> {
+fn snapshot_output(value: &Analysis, include_payload: bool, limit: usize) -> Result<Output> {
     let mut out = Output {
         text: String::new(),
         limit,
     };
     out.push("{")?;
     out.fields(snapshot_fields(value, include_payload))?;
+    Ok(out)
+}
+
+/// Encode the same fields as `analysis` within a byte limit including the newline.
+pub fn snapshot_line(value: &Analysis, include_payload: bool, limit: usize) -> Result<String> {
+    let mut out = snapshot_output(value, include_payload, limit)?;
+    out.push("}\n")?;
+    Ok(out.text)
+}
+
+/// Encode the CLI report without retaining the projected capture-wide JSON tree.
+/// The limit includes protocol detection and the final newline.
+pub fn analysis_line(value: &Analysis, include_payload: bool, limit: usize) -> Result<String> {
+    let mut out = snapshot_output(value, include_payload, limit)?;
     out.push(",\"protocol_detection\":[")?;
     for (i, record) in crate::detection::flow_records(value).enumerate() {
         if i != 0 {

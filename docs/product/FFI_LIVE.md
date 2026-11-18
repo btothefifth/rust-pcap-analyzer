@@ -13,7 +13,9 @@ copies caller bytes. Output copies into caller-owned storage; the reported lengt
 is exact and output is not NUL terminated. Buffer-too-small leaves destination bytes
 untouched. Failed analysis does not expose a successful empty result. Destroy
 invalidates the numeric handle; handles are not reused. Calls are serialized through
-a process-wide mutex, including analysis. No callbacks occur under that lock.
+a process-wide mutex, including analysis. The encoder checks the output cap as it
+emits snapshot fields. The cap includes the final newline. No callbacks occur under
+that lock.
 
 The caller must supply valid aligned writable/readable allocations of the stated
 length. Null checks cannot prove arbitrary non-null pointers valid. `written` and

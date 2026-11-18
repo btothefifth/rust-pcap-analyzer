@@ -246,7 +246,7 @@ impl History {
         for pair in cuts.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let mut selected: Option<&[u8]> = None;
-            let mut conflict = false;
+            let mut conflicts: Vec<bool> = Vec::new();
             let mut uncertain = false;
             let mut ids = Vec::new();
             for (i, (row, input, _decision)) in observations.iter().enumerate() {
@@ -264,41 +264,67 @@ impl History {
                     if work > self.config.max_query_work {
                         return Err(Error::limit("query_work"));
                     }
-                    if selected.is_some_and(|old| old != raw) {
-                        conflict = true;
+                    if let Some(first) = selected {
+                        if !conflicts.is_empty() || first != raw {
+                            conflicts.resize(raw.len(), false);
+                            for ((differs, left), right) in conflicts.iter_mut().zip(first).zip(raw)
+                            {
+                                *differs |= left != right;
+                            }
+                        }
+                    } else {
+                        selected = Some(raw);
                     }
-                    selected.get_or_insert(raw);
                     uncertain |= !row.selected;
-                    references += 1;
-                    if references > self.config.max_query_intervals.saturating_mul(4) {
-                        return Err(Error::limit("query_evidence_references"));
-                    }
                     ids.push(Json::from(i));
                 }
             }
-            let status = if selected.is_none() {
-                "gap"
-            } else if conflict {
-                "conflicting_bytes"
-            } else if uncertain {
-                "ambiguous_sequence_placement"
-            } else {
-                "candidate"
+            // Placement is constant over this interval, but its observations
+            // may agree on only part of the payload. Split at byte disagreements.
+            let mut emit = |lo: usize, hi: usize, conflict: bool| -> Result<()> {
+                references = references
+                    .checked_add(ids.len())
+                    .filter(|&n| n <= self.config.max_query_intervals.saturating_mul(4))
+                    .ok_or_else(|| Error::limit("query_evidence_references"))?;
+                let status = if conflict {
+                    "conflicting_bytes"
+                } else if uncertain {
+                    "ambiguous_sequence_placement"
+                } else if selected.is_some() {
+                    "candidate"
+                } else {
+                    "gap"
+                };
+                let bytes = selected.filter(|_| !conflict && !uncertain);
+                pieces.push(Json::object([
+                    ("start", (a + lo as i64).to_string().into()),
+                    ("end", (a + hi as i64).to_string().into()),
+                    ("status", status.into()),
+                    (
+                        "observation_ids",
+                        Json::Array(if hi == (b - a) as usize {
+                            std::mem::take(&mut ids)
+                        } else {
+                            ids.clone()
+                        }),
+                    ),
+                    (
+                        "bytes_hex",
+                        bytes.map_or(Json::Null, |raw| sha256::hex(&raw[lo..hi]).into()),
+                    ),
+                ]));
+                Ok(())
             };
-            pieces.push(Json::object([
-                ("start", a.to_string().into()),
-                ("end", b.to_string().into()),
-                ("status", status.into()),
-                ("observation_ids", Json::Array(ids)),
-                (
-                    "bytes_hex",
-                    if conflict || uncertain {
-                        Json::Null
-                    } else {
-                        selected.map_or(Json::Null, |bytes| sha256::hex(bytes).into())
-                    },
-                ),
-            ]));
+            if conflicts.is_empty() {
+                emit(0, (b - a) as usize, false)?;
+            } else {
+                let mut lo = 0;
+                for run in conflicts.chunk_by(|x, y| x == y) {
+                    let hi = lo + run.len();
+                    emit(lo, hi, run[0])?;
+                    lo = hi;
+                }
+            }
         }
         let evidence = observations
             .iter()

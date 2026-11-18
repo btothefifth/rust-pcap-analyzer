@@ -221,6 +221,17 @@ fn snapshot_line_enforces_a_shared_byte_budget_across_decoded_messages() {
         let analysis = engine::analyze(&capture(fixture), Config::default()).unwrap();
         for include in [false, true] {
             let mut expected = report::analysis(&analysis, include);
+            let snapshot = expected.encode_bounded_line(1 << 22).unwrap();
+            assert_eq!(
+                report::snapshot_line(&analysis, include, snapshot.len()).unwrap(),
+                snapshot
+            );
+            assert_eq!(
+                report::snapshot_line(&analysis, include, snapshot.len() - 1)
+                    .unwrap_err()
+                    .field,
+                "report_bytes"
+            );
             let Json::Object(fields) = &mut expected else {
                 unreachable!()
             };

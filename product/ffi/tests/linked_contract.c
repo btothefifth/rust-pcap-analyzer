@@ -71,6 +71,49 @@ static int failure_contracts(void) {
     for(unsigned i=0;i<8;i++)CHECK(pcap_destroy(slots[i])==PCAP_OK);
     return 0;
 }
+/* The validation script supplies the checked-in split FC23 capture. */
+static int modbus_output_budget(const char *fixture) {
+    FILE *file;
+#ifdef _MSC_VER
+    CHECK(fopen_s(&file, fixture, "rb") == 0);
+#else
+    file = fopen(fixture, "rb");
+#endif
+    CHECK(file != NULL);
+    unsigned char input[4096];
+    size_t size = fread(input, 1, sizeof(input), file);
+    CHECK(size > 0 && feof(file) && !ferror(file));
+    CHECK(fclose(file) == 0);
+    size_t cap = 1024 * 1024;
+    for (unsigned attempt = 0; attempt < 3; attempt++) {
+        uint64_t handle;
+        size_t written = 0;
+        CHECK(pcap_create(sizeof(input), cap, &handle) == PCAP_OK);
+        CHECK(pcap_feed(handle, input, size) == PCAP_OK);
+        if (attempt == 2) {
+            CHECK(pcap_analyze(handle) == PCAP_LIMIT);
+            CHECK(pcap_output_size(handle, &written) == PCAP_INVALID);
+        } else {
+            CHECK(pcap_analyze(handle) == PCAP_OK);
+            CHECK(pcap_output_size(handle, &written) == PCAP_OK && written <= cap);
+            unsigned char *json = malloc(written + 1);
+            CHECK(json != NULL);
+            CHECK(pcap_copy_output(handle, json, written, &written) == PCAP_OK);
+            json[written] = 0;
+            CHECK(strstr((char *)json, "\"starting_address_zero_based\":43981") != NULL);
+            CHECK(strstr((char *)json, "\"protocol_detection\"") == NULL);
+            free(json);
+            if (attempt == 0) {
+                cap = written;
+            } else {
+                CHECK(cap == written);
+                cap--;
+            }
+        }
+        CHECK(pcap_destroy(handle) == PCAP_OK);
+    }
+    return 0;
+}
 struct worker_state {int result;};
 #ifdef _WIN32
 static DWORD WINAPI threaded(LPVOID argument)
@@ -100,7 +143,8 @@ static int concurrent_contract(void) {
 #endif
     return 0;
 }
-int main(void) {
+int main(int argc, char **argv) {
+    CHECK(argc == 2 && modbus_output_budget(argv[1]) == 0);
     CHECK(failure_contracts()==0);
     for(unsigned n=0;n<20;n++)CHECK(lifecycle()==0);
     CHECK(concurrent_contract()==0);
