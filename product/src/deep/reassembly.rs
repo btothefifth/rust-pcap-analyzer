@@ -307,6 +307,27 @@ impl StreamBuffer {
             poisoned: false,
         })
     }
+    /// Largest prefix that fits before complete frames must be drained.
+    pub(super) fn span_limited_end(
+        &self,
+        input: &EvidenceBytes,
+        start: usize,
+        cursor: usize,
+    ) -> Result<usize> {
+        let spans = &input.spans()[cursor..];
+        let first = &spans[0];
+        let merges = self.pending.spans().last().is_some_and(|last| {
+            last.packet == first.packet
+                && last.packet_start + (last.end - last.start)
+                    == first.packet_start + (start - first.start)
+        });
+        let slots = self.spans - self.pending.spans().len() + usize::from(merges);
+        spans[..slots.min(spans.len())]
+            .last()
+            .map(|span| span.end)
+            .ok_or_else(|| Error::limit("stream_buffer_spans"))
+    }
+
     pub fn push(&mut self, offset: i64, bytes: &EvidenceBytes) -> Result<()> {
         if self.poisoned {
             return Err(bad("stream_buffer", 0, "explicit gap/reset required"));

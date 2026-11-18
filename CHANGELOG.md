@@ -9,10 +9,12 @@ frame, `modbus::decode` for a stream, and `correlate::transactions` or
 `engine::analyze` to finalize candidate pairs. `ModbusResult::default()` creates
 an empty result. Exhaustive `ApplicationData` matches must handle
 `ModbusFailed { capture, error }`. Read TCP generation results from
-`TcpTracker::finish`; they now include the first uncertain payload witness. `wire::Datagram`
+`TcpTracker::finish`; they now include the first uncertain payload witness and the packet IDs
+excluded by a subsequently observed SYN in `before_syn`. `wire::Datagram`
 carries `declared_payload_len`, the IP payload length after decoded extensions.
 For a complete datagram constructed by a caller, use the payload's byte length.
-Read finalized snapshot observations through `Analysis::applications()`.
+Read finalized snapshot observations through `Analysis::applications()` and transport
+generations through `Analysis::flows()`.
 Callers editing observations can use `applications().to_vec()` and pass the
 edited list to `correlate::transactions`.
 

@@ -1,5 +1,5 @@
 //! Bounded IP fragment reconstruction. Missing bytes are never synthesized.
-use crate::provenance::{EvidenceBytes, PacketId};
+use crate::provenance::{EvidenceBytes, PacketId, SourceSpan};
 use crate::wire::{Checksum, ChecksumContext, Datagram, FragmentInfo, Scope};
 use crate::{Error, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,6 +20,9 @@ struct Part {
     more: bool,
     // Dropped once the contiguous prefix owns these bytes.
     pending: Option<EvidenceBytes>,
+    // A lower-offset fragment can arrive after a higher-offset one has
+    // supplied identical bytes. Its source spans win at final reconstruction.
+    preferred_spans: Vec<SourceSpan>,
 }
 impl Part {
     fn data<'a>(&'a self, prefix: &'a EvidenceBytes) -> &'a [u8] {
@@ -265,9 +268,19 @@ impl FragmentReassembler {
             }
             self.retained = new_size;
             let index = set.parts.partition_point(|part| part.start <= info.offset);
+            let preferred_spans = if set
+                .parts
+                .get(index)
+                .is_some_and(|next| next.start < end && next.start < set.prefix.payload.len())
+            {
+                datagram.payload.spans().to_vec()
+            } else {
+                Vec::new()
+            };
             set.parts.insert(
                 index,
                 Part {
+                    preferred_spans,
                     start: info.offset,
                     end,
                     more: info.more,
@@ -319,6 +332,7 @@ impl FragmentReassembler {
         let mut set = self
             .remove(&key)
             .ok_or_else(|| Error::limit("fragment_state"))?;
+        set.restore_overlap_sources()?;
         set.prefix.declared_payload_len = set.prefix.payload.len();
         set.prefix.fragment = None;
         Ok(FragmentOutcome::Complete(set.prefix, set.packets))
@@ -374,6 +388,38 @@ impl Assembly {
             }
         }
         None
+    }
+
+    fn restore_overlap_sources(&mut self) -> Result<()> {
+        if !self.parts.iter().any(|p| !p.preferred_spans.is_empty()) {
+            return Ok(());
+        }
+        let prefix = &self.prefix.payload;
+        let mut joined = EvidenceBytes::default();
+        for part in &self.parts {
+            let start = joined.len();
+            if start >= part.end {
+                continue;
+            }
+            if part.preferred_spans.is_empty() {
+                joined.append(&prefix.slice(start..part.end)?, 65_535)?;
+                continue;
+            }
+            for span in &part.preferred_spans {
+                let a = start.max(part.start + span.start);
+                let b = part.start + span.end;
+                if a < b {
+                    let bytes = EvidenceBytes::from_packet(
+                        &prefix.data()[a..b],
+                        span.packet,
+                        span.packet_start + (a - part.start - span.start),
+                    );
+                    joined.append(&bytes, 65_535)?;
+                }
+            }
+        }
+        self.prefix.payload = joined;
+        Ok(())
     }
 
     fn extend_prefix(&mut self, index: usize) -> Result<()> {

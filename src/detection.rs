@@ -89,7 +89,7 @@ pub fn analysis_json(analysis: &Analysis) -> Result<Json> {
 }
 
 pub(crate) fn flow_records(analysis: &Analysis) -> impl Iterator<Item = Result<Json>> + '_ {
-    analysis.flows.iter().map(|flow| {
+    analysis.flows().iter().map(|flow| {
         let s = classify_flow(flow, &analysis.config)?;
         Ok(Json::object([
             ("flow", flow.id.into()),

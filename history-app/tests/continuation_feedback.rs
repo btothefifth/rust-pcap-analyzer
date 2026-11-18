@@ -30,11 +30,23 @@ fn consume_with_limits(
     page_bytes: usize,
     limits: Limits,
 ) -> (pcap_evidence::Result<()>, String) {
+    consume_packets(protocol, &[payload], page_bytes, limits)
+}
+
+fn consume_packets(
+    protocol: &str,
+    pieces: &[&[u8]],
+    page_bytes: usize,
+    limits: Limits,
+) -> (pcap_evidence::Result<()>, String) {
     let temp = Temp::new();
-    let source = temp.source(&[
-        tcp(false, 100, 0, 2, &[]),
-        tcp(false, 101, 0, 0x18, payload),
-    ]);
+    let mut frames = vec![tcp(false, 100, 0, 2, &[])];
+    let mut length = 0;
+    for &piece in pieces {
+        frames.push(tcp(false, 101 + length as u32, 0, 0x18, piece));
+        length += piece.len();
+    }
+    let source = temp.source(&frames);
     let workspace = temp.0.join("history");
     analyze_file(
         &source,
@@ -49,7 +61,7 @@ fn consume_with_limits(
         generation,
         direction: 0,
         start: 0,
-        end: payload.len() as i64,
+        end: length as i64,
         page_bytes,
         max_output_bytes: 1024 * 1024,
         protocol: protocol.into(),
@@ -333,6 +345,34 @@ fn modbus_history_message_quota_is_shared_across_pages() {
                 assert!(output.contains("\"consumed_until\":\"28\""));
             }
             assert_eq!(reference.get_or_insert_with(|| output.clone()), &output);
+        }
+    }
+}
+
+#[test]
+fn history_drains_a_complete_frame_before_charging_later_packet_spans() {
+    let adu = [0, 1, 0, 0, 0, 3, 1, 0x83, 2];
+    for spans in [1, 2, 3] {
+        let mut expected = None;
+        for page in [1, 9, 14] {
+            let (result, output) = consume_packets(
+                "modbus",
+                &[&adu[..4], &adu[4..], &adu[..5]],
+                page,
+                Limits {
+                    spans,
+                    ..Limits::default()
+                },
+            );
+            if spans == 1 {
+                assert_eq!(result.unwrap_err().field, "stream_buffer_spans");
+                assert!(!output.contains("protocol.message"));
+            } else {
+                result.unwrap();
+                assert_eq!(output.matches("protocol.message").count(), 1);
+                assert!(output.contains("application.incomplete"));
+            }
+            assert_eq!(expected.get_or_insert_with(|| output.clone()), &output);
         }
     }
 }

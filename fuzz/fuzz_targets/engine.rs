@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
                 Disposition::Pending | Disposition::FragmentPending
             ));
         }
-        for flow in &analysis.flows {
+        for flow in analysis.flows() {
             for stream in flow.streams.iter().flatten() {
                 for chunk in &stream.chunks {
                     check(&chunk.bytes);

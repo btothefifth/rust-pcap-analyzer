@@ -245,7 +245,7 @@ fn bound_modbus_pair<'a>(
         || pair.refs != [*req, *rsp]
         || pair.capture != value.capture_sha256
         || pair.flow != t.flow
-        || !value.flows.get(pair.flow).is_some_and(|f| {
+        || !value.flows().get(pair.flow).is_some_and(|f| {
             f.id == pair.flow
                 && pair
                     .generation
@@ -408,7 +408,7 @@ fn snapshot_fields(
         ),
         (
             "flows",
-            P::array(value.flows.iter().map(move |flow| {
+            P::array(value.flows().iter().map(move |flow| {
                 P::object([
                     ("id", flow.id.into()),
                     ("generation", flow.generation.into()),

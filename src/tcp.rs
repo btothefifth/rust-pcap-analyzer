@@ -319,6 +319,8 @@ impl FlowKey {
     }
 }
 struct Input {
+    packets: Vec<PacketId>,
+    when: Option<i128>,
     direction: usize,
     segment: TcpSegment,
 }
@@ -336,8 +338,8 @@ struct Flow {
     midstream: bool,
     first_ns: Option<i128>,
     last_ns: Option<i128>,
-    packets: Vec<PacketId>,
     inputs: Vec<Input>,
+    before_syn: Vec<PacketId>,
     anomalies: Vec<&'static str>,
     uncertain_payload: Option<PacketId>,
 }
@@ -357,6 +359,8 @@ pub struct FlowResult {
     pub anomalies: Vec<&'static str>,
     /// Earliest observed packet that could carry unretained data for this generation.
     pub uncertain_payload: Option<PacketId>,
+    /// Previously assigned segments excluded when a later SYN established the lower bound.
+    pub before_syn: Vec<PacketId>,
 }
 impl FlowResult {
     pub(crate) fn has_transport_loss(&self) -> bool {
@@ -376,6 +380,51 @@ pub enum Assignment {
     Unassigned { reason: &'static str },
 }
 impl Flow {
+    fn reset_observations(&mut self) {
+        self.syn = [None; 2];
+        self.anchors = [None; 2];
+        self.fin = [false; 2];
+        self.fin_next = [None; 2];
+        self.closed = false;
+        self.rst_seen = false;
+        self.has_payload = false;
+        self.first_ns = None;
+        self.last_ns = None;
+        self.anomalies.clear();
+    }
+    fn record(&mut self, input: &Input) {
+        let direction = input.direction;
+        let segment = &input.segment;
+        let when = input.when;
+        if segment.syn() {
+            self.syn[direction] = Some(segment.sequence);
+            self.anchors[direction] = Some(segment.data_sequence());
+        } else {
+            self.anchors[direction].get_or_insert(segment.data_sequence());
+        }
+        if let Some(now) = when {
+            if self.last_ns.is_some_and(|last| now < last) {
+                self.anomalies.push("capture_clock_reversal");
+            }
+            self.first_ns = Some(self.first_ns.map_or(now, |first| first.min(now)));
+            self.last_ns = Some(self.last_ns.map_or(now, |last| last.max(now)));
+        } else {
+            self.anomalies.push("packet_time_unavailable");
+        }
+        self.has_payload |= !segment.payload.is_empty();
+        if segment.fin() {
+            self.fin[direction] = true;
+            self.fin_next[direction].get_or_insert(
+                segment
+                    .data_sequence()
+                    .wrapping_add(segment.payload.len() as u32)
+                    .wrapping_add(1),
+            );
+        }
+        self.rst_seen |= segment.rst();
+        self.closed |= self.rst_seen || (self.fin[0] && self.fin[1]);
+    }
+
     fn admits_payload_start(&self, direction: usize, sequence: u32) -> bool {
         self.syn[direction].is_none_or(|isn| {
             sequence_delta(sequence, isn.wrapping_add(1)).is_ok_and(|delta| delta >= 0)
@@ -426,8 +475,9 @@ impl UnretainedHeader {
     }
 
     fn matches(&self, flow: &Flow, max_span: i64) -> bool {
-        flow.packets
+        flow.inputs
             .first()
+            .and_then(|input| input.packets.first())
             .is_some_and(|p| p.capture == self.packet.capture)
             && self.handshake_allows(flow)
             && flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span)
@@ -486,7 +536,7 @@ impl TcpTracker {
             midstream,
             first_ns: None,
             last_ns: None,
-            packets: Vec::new(),
+            before_syn: Vec::new(),
             inputs: Vec::new(),
             anomalies: Vec::new(),
             uncertain_payload: None,
@@ -620,8 +670,9 @@ impl TcpTracker {
         if let Some(isn) = header.syn_isn.filter(|_| header.ack.is_none()) {
             if let Some(id) = self.opening_syn_owner(ids, direction, isn, when) {
                 if self.flows[id]
-                    .packets
+                    .inputs
                     .first()
+                    .and_then(|input| input.packets.first())
                     .is_some_and(|p| p.capture == packet.capture)
                 {
                     header.existing.push(id);
@@ -868,37 +919,52 @@ impl TcpTracker {
         if flow.inputs.len() >= self.limits.max_segments_per_flow {
             return Err(Error::limit("segments_per_flow"));
         }
-        if segment.syn() {
-            flow.syn[direction] = Some(segment.sequence);
-        }
-        flow.anchors[direction].get_or_insert(segment.data_sequence());
-        if let Some(now) = when {
-            if flow.last_ns.is_some_and(|last| now < last) {
-                flow.anomalies.push("capture_clock_reversal");
+        let mut excluded = Vec::new();
+        if segment.syn() && flow.syn[direction].is_none() {
+            // Before the handshake arrives, this direction has only a relative
+            // sequence origin. Reconcile data and control state against the ISN.
+            let first = segment.data_sequence();
+            let precedes = |input: &Input| {
+                input.direction == direction
+                    && !input.segment.payload.is_empty()
+                    && !sequence_delta(input.segment.data_sequence(), first).is_ok_and(|d| d >= 0)
+            };
+            if flow.inputs.iter().any(precedes) {
+                flow.reset_observations();
+                for input in std::mem::take(&mut flow.inputs) {
+                    if precedes(&input) {
+                        flow.before_syn.extend_from_slice(&input.packets);
+                        excluded.push(input);
+                    } else {
+                        flow.record(&input);
+                        flow.inputs.push(input);
+                    }
+                }
             }
-            flow.first_ns = Some(flow.first_ns.map_or(now, |first| first.min(now)));
-            flow.last_ns = Some(flow.last_ns.map_or(now, |last| last.max(now)));
-        } else {
-            flow.anomalies.push("packet_time_unavailable");
         }
-        flow.has_payload |= !segment.payload.is_empty();
-        if segment.fin() {
-            flow.fin[direction] = true;
-            flow.fin_next[direction].get_or_insert(
-                segment
-                    .data_sequence()
-                    .wrapping_add(segment.payload.len() as u32)
-                    .wrapping_add(1),
-            );
-        }
-        flow.rst_seen |= segment.rst();
-        flow.closed |= flow.rst_seen || (flow.fin[0] && flow.fin[1]);
-        flow.packets.extend_from_slice(packets);
-        // Include every IP fragment contributing to this TCP segment, not just
-        // the last arriving fragment that completed the network datagram.
-        flow.packets.extend(segment.payload.packets());
-        flow.inputs.push(Input { direction, segment });
+        let mut sources = packets.to_vec();
+        sources.extend(segment.payload.packets());
+        sources.sort_unstable();
+        sources.dedup();
+        let input = Input {
+            direction,
+            segment,
+            when,
+            packets: sources,
+        };
+        flow.record(&input);
+        flow.inputs.push(input);
         self.retained = retained;
+        for previous in excluded {
+            self.retained -= previous.segment.payload.len();
+            self.observe_header(
+                key.scope.clone(),
+                previous.packets[0],
+                previous.when,
+                previous.segment.header(),
+                HeaderDisposition::Omitted,
+            )?;
+        }
         Ok(Assignment::Assigned {
             flow_id: selected,
             direction,
@@ -944,7 +1010,9 @@ impl TcpTracker {
             let mut b = StreamAssembler::new(flow.syn[1], self.limits.clone());
             let mut reconstruction_errors = Vec::new();
             let mut invalid = [false, false];
+            let mut packets = Vec::new();
             for input in flow.inputs {
+                packets.extend(input.packets);
                 if invalid[input.direction] {
                     continue;
                 }
@@ -988,8 +1056,10 @@ impl TcpTracker {
                     }
                 }
             };
-            flow.packets.sort();
-            flow.packets.dedup();
+            packets.sort_unstable();
+            packets.dedup();
+            flow.before_syn.sort_unstable();
+            flow.before_syn.dedup();
             flow.anomalies.sort();
             flow.anomalies.dedup();
             output.push(FlowResult {
@@ -1001,7 +1071,8 @@ impl TcpTracker {
                 midstream: flow.midstream,
                 first_ns: flow.first_ns,
                 last_ns: flow.last_ns,
-                packets: flow.packets,
+                packets,
+                before_syn: flow.before_syn,
                 streams: [first, second],
                 reconstruction_errors,
                 anomalies: flow.anomalies,

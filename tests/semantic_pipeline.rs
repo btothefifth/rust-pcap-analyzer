@@ -159,17 +159,6 @@ fn moving_a_pair_to_another_flow_or_capture_invalidates_its_mapping() {
         .find(|t| t.status == "candidate_pair")
         .unwrap();
     assert_ne!(pair.flow, 0);
-    let flow = pair.flow;
-    let key = snapshot.flows[flow].key.clone();
-    snapshot.flows[flow].key.scope.vlans.push(100);
-    assert!(!has_mapping(&snapshot));
-    snapshot.flows[flow].key = key;
-    assert!(has_mapping(&snapshot));
-    let pair = snapshot
-        .transactions
-        .iter_mut()
-        .find(|t| t.status == "candidate_pair")
-        .unwrap();
     pair.flow = 0;
     assert!(!has_mapping(&snapshot));
 }

@@ -38,7 +38,7 @@ fn root_engine_recognizes_modbus_without_configured_fixture_port() {
         .iter()
         .any(|a| a.protocol == "modbus"));
     assert!(analysis
-        .flows
+        .flows()
         .iter()
         .any(|f| detection::classify_flow(f, &analysis.config).unwrap().basis == "content"));
 }

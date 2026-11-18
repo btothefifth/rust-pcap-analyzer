@@ -150,9 +150,6 @@ impl Parser {
         remaining: &mut usize,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
-        if *remaining > self.limits.elements {
-            return Err(Error::limit("frame_quota"));
-        }
         let result = self.feed_inner(offset, bytes, remaining, emit);
         if result.is_err() {
             self.requires_cut = true;
@@ -182,6 +179,9 @@ impl Parser {
                 "explicit cut required after rejected evidence",
             ));
         }
+        if *remaining > self.limits.elements {
+            return Err(Error::limit("frame_quota"));
+        }
         if !bytes.validate() {
             return Err(bad("continuation_provenance", 0, "invalid input"));
         }
@@ -196,15 +196,18 @@ impl Parser {
             if room == 0 {
                 return Err(Error::limit("application_buffer"));
             }
-            let n = room.min(bytes.len() - p);
-            let chunk = bytes.slice_sequential(p..p + n, &mut input_span)?;
+            let end = self
+                .buffer
+                .span_limited_end(bytes, p, input_span)?
+                .min(p + room.min(bytes.len() - p));
+            let chunk = bytes.slice_sequential(p..end, &mut input_span)?;
             self.buffer.push(
                 offset
                     .checked_add(p as i64)
                     .ok_or_else(|| Error::limit("stream_offset"))?,
                 &chunk,
             )?;
-            p += n;
+            p = end;
             let mut consumed = 0;
             let result = self.emit_buffered(&mut consumed, remaining, emit);
             self.buffer.discard_prefix(consumed)?;

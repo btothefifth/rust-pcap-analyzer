@@ -142,6 +142,49 @@ impl Key {
         ])
     }
 }
+/// Activity from undecided fragments can be withdrawn independently of later
+/// observations, including when capture timestamps arrive out of order.
+#[derive(Default)]
+struct WindowActivity {
+    admitted_frame: u64,
+    admitted_ns: Option<i128>,
+    pending: BTreeMap<PacketId, (u64, Option<i128>)>,
+    frames: BTreeSet<(u64, PacketId)>,
+    times: BTreeSet<(i128, PacketId)>,
+}
+impl WindowActivity {
+    fn frame(&self) -> u64 {
+        self.admitted_frame
+            .max(self.frames.last().map_or(0, |entry| entry.0))
+    }
+    fn time(&self) -> Option<i128> {
+        self.admitted_ns.max(self.times.last().map(|entry| entry.0))
+    }
+    fn remove(&mut self, packet: PacketId) {
+        if let Some((frame, ns)) = self.pending.remove(&packet) {
+            self.frames.remove(&(frame, packet));
+            if let Some(time) = ns {
+                self.times.remove(&(time, packet));
+            }
+        }
+    }
+    fn record(&mut self, packets: &[PacketId], frame: u64, time: Option<i128>, provisional: bool) {
+        for &packet in packets {
+            self.remove(packet);
+            if provisional {
+                self.pending.insert(packet, (frame, time));
+                self.frames.insert((frame, packet));
+                if let Some(ns) = time {
+                    self.times.insert((ns, packet));
+                }
+            }
+        }
+        if !provisional {
+            self.admitted_frame = frame;
+            self.admitted_ns = self.admitted_ns.max(time);
+        }
+    }
+}
 struct Active {
     key: Key,
     window: u64,
@@ -150,8 +193,7 @@ struct Active {
     udp_id: Option<u64>,
     payload: usize,
     packet_refs: usize,
-    last_frame: u64,
-    last_ns: Option<i128>,
+    activity: WindowActivity,
     messages: Vec<MessageRecord>,
     dnp3_confirmations: Vec<Dnp3StreamingConfirmationRecord>,
     remaining: usize,
@@ -163,7 +205,7 @@ struct FragSlot {
 #[derive(Clone, Copy)]
 enum WindowInput {
     Payload(usize, Option<wire::TcpHeader>),
-    Header(wire::TcpHeader),
+    Header(wire::TcpHeader, HeaderDisposition),
 }
 struct LayerContext<'a> {
     ancestors: &'a [PacketId],
@@ -195,7 +237,7 @@ impl State<'_> {
             .ok_or_else(|| Error::limit("session_id"))?;
         Ok(self.next_session)
     }
-    fn create(&mut self, key: Key, frame: u64, time: Option<i128>) -> Result<Active> {
+    fn create(&mut self, key: Key) -> Result<Active> {
         self.next_window = self
             .next_window
             .checked_add(1)
@@ -222,8 +264,7 @@ impl State<'_> {
             udp_id,
             payload: 0,
             packet_refs: 0,
-            last_frame: frame,
-            last_ns: time,
+            activity: WindowActivity::default(),
             messages: Vec::new(),
             dnp3_confirmations: Vec::new(),
             remaining: self.c.max_plugin_events,
@@ -251,7 +292,7 @@ impl State<'_> {
     }
     fn take(&mut self, key: &Key) -> Option<Active> {
         let a = self.active.remove(key)?;
-        self.order.remove(&(a.last_frame, key.clone()));
+        self.order.remove(&(a.activity.frame(), key.clone()));
         self.retained -= a.payload;
         Some(a)
     }
@@ -264,7 +305,7 @@ impl State<'_> {
         {
             return Err(Error::limit("active_state"));
         }
-        self.order.insert((a.last_frame, a.key.clone()));
+        self.order.insert((a.activity.frame(), a.key.clone()));
         self.active.insert(a.key.clone(), a);
         self.summary.peak_active_keys = self.summary.peak_active_keys.max(self.active.len());
         self.summary.peak_retained_tcp_payload =
@@ -824,7 +865,19 @@ impl State<'_> {
         let (key, _) = Key::new(scope.clone(), path, 6, header.source, header.destination);
         if let Some(active) = self.active.get_mut(&key) {
             if let Some(tracker) = &mut active.tracker {
-                active.packet_refs -= tracker.resolve_reassembly(scope, header, packets);
+                let released = tracker.resolve_reassembly(scope, header, packets);
+                if released > 0 {
+                    self.order.remove(&(active.activity.frame(), key.clone()));
+                    active.packet_refs -= released;
+                    for &packet in packets {
+                        active.activity.remove(packet);
+                    }
+                    if active.packet_refs == 0 {
+                        self.active.remove(&key);
+                    } else {
+                        self.order.insert((active.activity.frame(), key));
+                    }
+                }
             }
         }
     }
@@ -836,8 +889,13 @@ impl State<'_> {
         disposition: HeaderDisposition,
     ) -> Result<()> {
         let (key, _) = Key::new(scope.clone(), path, 6, segment.source, segment.destination);
-        let mut active =
-            self.admit_window(&key, frame, time, &[id], WindowInput::Header(segment))?;
+        let mut active = self.admit_window(
+            &key,
+            frame,
+            time,
+            &[id],
+            WindowInput::Header(segment, disposition),
+        )?;
         active
             .tracker
             .as_mut()
@@ -855,17 +913,17 @@ impl State<'_> {
         input: WindowInput,
     ) -> Result<Active> {
         let (bytes, header) = match input {
-            WindowInput::Header(h) => (0, Some(h)),
+            WindowInput::Header(h, _) => (0, Some(h)),
             WindowInput::Payload(bytes, header) => (bytes, header),
         };
         let mut a = match self.take(key) {
             Some(a) => a,
             None => {
                 self.room(bytes)?;
-                self.create(key.clone(), frame, time)?
+                self.create(key.clone())?
             }
         };
-        let idle = match (time, a.last_ns) {
+        let idle = match (time, a.activity.time()) {
             (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
             _ => false,
         };
@@ -882,7 +940,7 @@ impl State<'_> {
                 .is_none_or(|n| n > self.c.window_payload)
         {
             if !idle {
-                if let (WindowInput::Header(header), Some(tracker)) = (input, &mut a.tracker) {
+                if let (WindowInput::Header(header, _), Some(tracker)) = (input, &mut a.tracker) {
                     tracker.observe_at_cut(key.scope.clone(), packets[0], time, header)?;
                 }
             }
@@ -895,22 +953,21 @@ impl State<'_> {
                     "reconstruction_window_budget"
                 },
             )?;
-            a = self.create(key.clone(), frame, time)?;
+            a = self.create(key.clone())?;
         }
         self.room(a.payload + bytes)?;
-        if matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
+        if matches!((time,a.activity.time()),(Some(now),Some(last)) if now<last) {
             self.diagnostic(
                 "capture_clock_reversal",
                 packets.to_vec(),
                 EvidenceStatus::Ambiguous,
             )?;
         }
-        a.last_frame = frame;
-        a.last_ns = match (time, a.last_ns) {
-            (Some(x), Some(y)) => Some(x.max(y)),
-            (x, None) => x,
-            (None, y) => y,
-        };
+        let provisional = matches!(
+            input,
+            WindowInput::Header(_, HeaderDisposition::AwaitingReassembly)
+        );
+        a.activity.record(packets, frame, time, provisional);
         a.packet_refs += packet_refs;
         Ok(a)
     }
@@ -994,8 +1051,9 @@ impl State<'_> {
                                 .observe_at_cut(scope.clone(), packets[0], time, retry.header())?;
                         }
                         self.flush(a, "tracker_admission_boundary")?;
-                        a = self.create(key.clone(), frame, time)?;
+                        a = self.create(key.clone())?;
                         a.packet_refs = packets.len();
+                        a.activity.record(&packets, frame, time, false);
                         a.tracker
                             .as_mut()
                             .ok_or_else(|| Error::limit("tcp_tracker"))?
@@ -1117,6 +1175,20 @@ impl State<'_> {
         dnp3_confirmations: &mut Vec<Dnp3StreamingConfirmationRecord>,
         remaining: &mut usize,
     ) -> Result<()> {
+        if !flow.before_syn.is_empty() {
+            let mut event = Event::new(
+                EventKind::Diagnostic,
+                EvidenceStatus::Observed,
+                Json::object([
+                    ("reason", "payload_precedes_observed_syn".into()),
+                    ("window", window.into()),
+                    ("generation", flow.generation.into()),
+                ]),
+            );
+            event.session = Some(id);
+            event.evidence = Evidence::packets(flow.before_syn.clone());
+            self.sink.emit(&event)?;
+        }
         if let Some(packet) = flow.uncertain_payload {
             let mut event = Event::new(
                 EventKind::Diagnostic,
@@ -1322,7 +1394,7 @@ impl State<'_> {
             Json::object([
                 ("reason", reason.into()),
                 ("window_id", a.window.to_string().into()),
-                ("last_frame", a.last_frame.to_string().into()),
+                ("last_frame", a.activity.frame().to_string().into()),
                 ("cross_window_protocol_state_retained", false.into()),
                 ("cross_window_retransmission_history_retained", false.into()),
                 ("physical_connection_may_continue", true.into()),

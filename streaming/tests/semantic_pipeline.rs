@@ -324,7 +324,7 @@ fn uncertain_tcp_data_blocks_affected_generations_and_preserves_a_successor() {
     let snapshot = pcap_evidence::engine::analyze(&bytes, Default::default()).unwrap();
     assert_eq!(
         snapshot
-            .flows
+            .flows()
             .iter()
             .filter(|flow| flow.uncertain_payload.is_some())
             .count(),
@@ -337,7 +337,11 @@ fn uncertain_tcp_data_blocks_affected_generations_and_preserves_a_successor() {
         .collect();
     assert_eq!(pairs.len(), 1);
     assert_eq!(
-        snapshot.flows[pairs[0].flow].packets.last().unwrap().frame,
+        snapshot.flows()[pairs[0].flow]
+            .packets
+            .last()
+            .unwrap()
+            .frame,
         11
     );
     let out = run(&bytes, Default::default());
@@ -366,7 +370,7 @@ fn uncertain_tcp_data_blocks_affected_generations_and_preserves_a_successor() {
     tail[8..12].copy_from_slice(&captured.to_le_bytes());
     snapped.extend(tail);
     let snapshot = pcap_evidence::engine::analyze(&snapped, Default::default()).unwrap();
-    assert_eq!(snapshot.flows[0].uncertain_payload.unwrap().frame, 6);
+    assert_eq!(snapshot.flows()[0].uncertain_payload.unwrap().frame, 6);
     assert!(!pcap_evidence::report::analysis(&snapshot, false)
         .encode()
         .contains("read_mapping"));
@@ -692,7 +696,7 @@ fn successfully_reassembled_tcp_releases_its_provisional_header() {
             let bytes = capture(&frames);
             if !tunnel {
                 let analysis = pcap_evidence::engine::analyze(&bytes, config.base.clone()).unwrap();
-                assert!(analysis.flows[0].uncertain_payload.is_none());
+                assert!(analysis.flows()[0].uncertain_payload.is_none());
                 assert_eq!(
                     pcap_evidence::report::analysis(&analysis, false)
                         .encode()
@@ -1320,5 +1324,92 @@ fn rejected_reassembly_returns_the_window_slot_before_the_response() {
                 .any(|e| e.data.encode().contains("read_mapping")),
             eligible
         );
+    }
+}
+
+#[test]
+fn definitive_fragment_rejection_restores_window_activity() {
+    use tiny_capture::{capture, ipv4_fragment, tcp};
+    let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let mut rejected = tcp(false, 113, 501, 0x18, &request);
+    rejected[50] ^= 1;
+    let first = ipv4_fragment(&rejected, 0..24, true);
+    let last = ipv4_fragment(&rejected, 24..32, false);
+    // Use unrelated records to keep the two representations at the same ages.
+    let other = tiny_capture::tunneled("gre", 7, false, &tcp(false, 200, 0, 2, &[]));
+    for middle in [vec![rejected, other.clone()], vec![first, last]] {
+        let mut frames = vec![
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 500, 101, 0x12, &[]),
+            tcp(false, 101, 501, 0x18, &request),
+        ];
+        frames.extend(middle);
+        frames.push(other.clone());
+        frames.push(tcp(true, 501, 113, 0x18, &response));
+        for idle_frames in [3, 8] {
+            let mut c = StreamConfig {
+                idle_frames,
+                ..StreamConfig::default()
+            };
+            c.base.modbus_ports = vec![2000];
+            c.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+            let events = run(&capture(&frames), c).events;
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|e| e.data.encode().contains("read_mapping")),
+                idle_frames == 8
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|e| e.data.encode().contains("idle_frame_boundary")),
+                idle_frames == 3
+            );
+        }
+    }
+}
+
+#[test]
+fn late_server_syn_excludes_predecessor_data_without_losing_the_response() {
+    use tiny_capture::{capture, tcp};
+    let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    for predecessor_first in [true, false] {
+        let mut frames = vec![
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 500, 101, 0x12, &[]),
+            tcp(true, 470, 101, 0x18, &response),
+            tcp(false, 101, 501, 0x18, &request),
+            tcp(true, 501, 113, 0x18, &response),
+        ];
+        if predecessor_first {
+            frames.swap(1, 2);
+        }
+        let mut c = StreamConfig::default();
+        c.base.modbus_ports = vec![2000];
+        let raw = capture(&frames);
+        let root = pcap_evidence::engine::analyze(&raw, c.base.clone()).unwrap();
+        let reason = if predecessor_first {
+            "payload_precedes_observed_syn"
+        } else {
+            "sequence_outside_known_generations"
+        };
+        assert!(pcap_evidence::report::analysis(&root, false)
+            .encode()
+            .contains(reason));
+        assert!(root.flows()[0].reconstruction_errors.is_empty());
+        let stream = root.flows()[0].streams[1].as_ref().unwrap();
+        assert_eq!(stream.chunks[0].bytes.spans()[0].packet.frame, 5);
+        assert!(root
+            .transactions
+            .iter()
+            .any(|t| t.status == "candidate_pair"));
+        let events = run(&raw, c).events;
+        assert!(events.iter().any(|e| e.data.encode().contains(reason)));
+        assert!(events
+            .iter()
+            .any(|e| e.data.encode().contains("read_mapping")));
     }
 }

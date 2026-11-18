@@ -796,3 +796,34 @@ fn modbus_many_packet_spans_survive_batch_and_byte_feeds() {
         }
     }
 }
+
+#[test]
+fn oversized_external_frame_quota_requires_a_cut() {
+    let bytes = [0, 1, 0, 0, 0, 3, 1, 0x83, 2];
+    let mut parser = Parser::new("modbus", Limits::default(), Context::default()).unwrap();
+    parser
+        .feed(0, &evidence(&bytes[..4], 1), &mut |_| unreachable!())
+        .unwrap();
+    let tail = evidence(&bytes[4..], 2);
+    let mut quota = usize::MAX;
+    let error = parser
+        .feed_with_quota(4, &tail, &mut quota, &mut |_| unreachable!())
+        .unwrap_err();
+    assert_eq!(error.field, "frame_quota");
+    assert_eq!(
+        parser
+            .feed(4, &tail, &mut |_| unreachable!())
+            .unwrap_err()
+            .field,
+        "continuation_requires_cut"
+    );
+    parser.cut("invalid_frame_allowance").unwrap();
+    let mut count = 0;
+    parser
+        .feed(0, &evidence(&bytes, 3), &mut |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+}

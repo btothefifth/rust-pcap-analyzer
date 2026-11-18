@@ -179,7 +179,10 @@ generations. When such a header forces a capacity cut, it also applies to the
 closing window. Reassembly resolves its own fragment observations, including
 duplicate fragments in enclosing tunnels. Under strict checksum checking, a
 completed segment rejected for its checksum has the same disposition whether
-it arrived whole or in fragments. Partial IP payloads can supply a header
+it arrived whole or in fragments. Withdrawing a provisional fragment also
+removes its packet charge and its contribution to window age and eviction order.
+Identical IPv4 fragment overlaps retain the witness from the lowest starting
+offset, with arrival order breaking ties. Partial IP payloads can supply a header
 witness, but normal transport decoding and fragment admission require the
 complete declared extent. Adjacent fragments can jointly identify a TCP header
 before reassembly finishes. A gap before the identity fields leaves the header
@@ -189,6 +192,9 @@ generation lost evidence. Tunnel loss attribution honors enclosing IP and
 UDP lengths. Both captured and omitted payload must start at or after a
 generation's first payload sequence when that direction has an observed SYN.
 The comparison uses TCP sequence arithmetic and applies in either arrival order.
+A late handshake excludes earlier segments outside its lower bound. Their
+packet IDs remain available in diagnostics and the generation retains its
+admissible stream bytes.
 
 Losing only the options of a header-only TCP segment preserves payload
 eligibility. Unassigned data and segments too large for a streaming window

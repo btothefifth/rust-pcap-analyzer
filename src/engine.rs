@@ -124,7 +124,7 @@ pub struct Analysis {
     pub metadata_records: usize,
     pub secret_blocks: usize,
     pub packets: Vec<PacketObservation>,
-    pub flows: Vec<FlowResult>,
+    flows: Vec<FlowResult>,
     applications: Vec<ApplicationAnalysis>,
     pub datagrams: Vec<crate::datagram::DatagramAnalysis>,
     pub fragment_notices: Vec<FragmentNotice>,
@@ -136,6 +136,17 @@ pub struct Analysis {
     pub correlation_error: Option<Error>,
 }
 impl Analysis {
+    /// Finalized transport evidence used to assign and interpret application data.
+    ///
+    /// ```compile_fail
+    /// fn replace(a: &mut pcap_evidence::engine::Analysis, b: &pcap_evidence::engine::Analysis) {
+    ///     a.flows()[0] = b.flows()[0].clone();
+    /// }
+    /// ```
+    pub fn flows(&self) -> &[FlowResult] {
+        &self.flows
+    }
+
     /// The application observations used to finalize the snapshot's transactions.
     /// To correlate an edited collection, copy this slice and call
     /// [`crate::correlate::transactions`] on the copy.
@@ -501,6 +512,13 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
     let flows = tracker.finish(config.overlap_policy)?;
     let mut applications = Vec::new();
     for flow in &flows {
+        each_packet(&mut packets, &flow.before_syn, |p| {
+            p.disposition = Disposition::Rejected {
+                code: "payload_precedes_observed_syn",
+                detail: "later handshake excludes this segment from the candidate generation"
+                    .into(),
+            };
+        })?;
         let detected = crate::detection::classify_flow(flow, &config)?;
         let dnp = detected.dnp3;
         let modbus = detected.modbus;

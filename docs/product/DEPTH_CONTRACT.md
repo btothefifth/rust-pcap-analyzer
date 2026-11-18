@@ -176,6 +176,13 @@ selected verified range was consumed; it never means complete endpoint history.
 The output is no-clobber and uses a partial file until the final hard-link
 publication succeeds.
 
+The history application CLI selects the full direction and allows 1,024 framed
+units across that range. If a 1,025th unit is reached, the CLI exits with code 4
+and leaves the completed prefix and abort record in the `.history-app.partial`
+file beside the requested output. Library callers can select a smaller interval
+with the `start` and `end` fields of `pcap_evidence_history_app::Request` and set the frame quota
+with `Limits::elements`. Page size controls reads within that interval.
+
 No timing model is invented. Captured timestamps remain source evidence; this
 layer does not sleep, replay traffic, reorder packets by wall clock, or claim
 that a reconstructed order is the endpoint’s actual order.
