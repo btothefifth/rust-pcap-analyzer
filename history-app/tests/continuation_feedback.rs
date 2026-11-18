@@ -702,3 +702,53 @@ fn partially_agreeing_observations_preserve_messages_across_pages_and_retries() 
         assert_eq!(reference.get_or_insert_with(|| output.clone()), &output);
     }
 }
+
+#[test]
+fn completion_output_limit_flushes_accepted_events_to_the_underlying_writer() {
+    let (_temp, mut history, generation) = history_with_gap(Config::default());
+    let mut request = Request {
+        generation,
+        direction: 0,
+        start: 0,
+        end: 14,
+        page_bytes: 14,
+        max_output_bytes: 65536,
+        protocol: "modbus".into(),
+        ua_security_none: false,
+    };
+    let cancel = AtomicBool::new(false);
+    let mut complete = Vec::new();
+    analyze(
+        &mut history,
+        &request,
+        Limits::default(),
+        &mut complete,
+        &cancel,
+    )
+    .unwrap();
+    let chain = std::str::from_utf8(&complete).unwrap();
+    let terminal = chain.lines().last().unwrap();
+    assert!(terminal.contains(r#""kind":"analysis.complete""#));
+    let prefix_len = chain.len() - terminal.len() - 1;
+
+    for cap in [prefix_len, complete.len() - 1, complete.len()] {
+        request.max_output_bytes = cap as u64;
+        let mut writer = std::io::BufWriter::with_capacity(2 * complete.len(), Vec::new());
+        let result = analyze(
+            &mut history,
+            &request,
+            Limits::default(),
+            &mut writer,
+            &cancel,
+        );
+        let expected = if cap == complete.len() {
+            result.unwrap();
+            &complete[..]
+        } else {
+            assert_eq!(result.unwrap_err().field, "history_app_output");
+            &complete[..prefix_len]
+        };
+        assert!(writer.buffer().is_empty());
+        assert_eq!(writer.get_ref().as_slice(), expected);
+    }
+}

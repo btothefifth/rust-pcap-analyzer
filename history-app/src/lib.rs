@@ -226,14 +226,14 @@ pub fn analyze<W: Write>(
         }
         check_cancelled()
     })();
-    match result {
+    let terminal = match result {
         Ok(()) => emit(
             "analysis.complete",
             Json::object([
                 ("selected_range_consumed", true.into()),
                 ("complete_endpoint_history_claimed", false.into()),
             ]),
-        )?,
+        ),
         Err(e) => {
             let _ = emit(
                 "analysis.aborted",
@@ -243,10 +243,9 @@ pub fn analyze<W: Write>(
                     ("consumed_until", completed_until.to_string().into()),
                 ]),
             );
-            output.flush()?;
-            return Err(e);
+            Err(e)
         }
-    }
+    };
     output.flush()?;
-    Ok(())
+    terminal
 }

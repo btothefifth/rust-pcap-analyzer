@@ -192,12 +192,16 @@ selected verified range was consumed; it never means complete endpoint history.
 The output is no-clobber and uses a partial file until the final hard-link
 publication succeeds.
 
+Once the writer accepts `analysis.start`, the reader flushes the accepted event
+chain before returning. If the completion record exceeds the output cap, the
+caller receives the preceding events and a `history_app_output` error. A flush
+failure returns the I/O error.
+
 Library cancellation is cooperative. The reader checks the flag between pages,
 between pieces, and before publishing further results. If an event writer
 requests cancellation while writing a nonterminal event, that event stays in
-the chain. The reader returns
-`history_app_cancelled` after attempting to append an abort event and flushing the accepted prefix.
-A flush failure returns the I/O error.
+the chain. The reader attempts to append an abort event before flushing the
+prefix and returning `history_app_cancelled`.
 
 The history application CLI selects the full direction and allows 1,024 framed
 units across that range. If a 1,025th unit is reached, the CLI exits with code 4
