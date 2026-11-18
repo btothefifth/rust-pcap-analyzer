@@ -163,8 +163,85 @@ impl Active {
             .map_or(0, TcpTracker::retained_payload_bytes)
     }
 }
+enum PrefixVerdict {
+    Pending(network::PrefixHeader),
+    Rejected(network::PrefixHeader),
+    Unidentified,
+}
+fn prefix_tracker<'a>(
+    active: &'a mut BTreeMap<Key, Active>,
+    scope: &Scope,
+    path: &[String],
+    header: wire::TcpHeader,
+) -> Option<&'a mut TcpTracker> {
+    let (key, _) = Key::new(
+        scope.clone(),
+        path.to_vec(),
+        6,
+        header.source,
+        header.destination,
+    );
+    active.get_mut(&key)?.tracker.as_mut()
+}
+
+impl PrefixVerdict {
+    fn invalidate(&self, active: &mut BTreeMap<Key, Active>, packets: &[PacketId]) {
+        let Some((header, disposition)) = self.observation() else {
+            return;
+        };
+        let (scope, path, segment, _) = &header.path;
+        if disposition == HeaderDisposition::RejectedPrefix || segment.payload_len == Some(0) {
+            if let Some(tracker) = prefix_tracker(active, scope, path, *segment) {
+                tracker.invalidate_reassembly_extent(scope, *segment, packets);
+            }
+        }
+    }
+
+    fn inspect(
+        datagram: &wire::Datagram,
+        path: &[String],
+        max_depth: usize,
+        purpose: network::HeaderUse,
+    ) -> (Option<usize>, Self) {
+        let mut next = None;
+        match network::inspect_scheduled_tcp_path(
+            datagram,
+            path.to_vec(),
+            max_depth,
+            purpose,
+            &mut next,
+        ) {
+            Ok(Some(header)) => return (next, Self::Pending(header)),
+            Err(e) if e.code == pcap_evidence::ErrorCode::Truncated => {
+                return (Some(datagram.payload.len() + 1), Self::Unidentified)
+            }
+            _ => {}
+        }
+        match network::inspect_scheduled_tcp_path(
+            datagram,
+            path.to_vec(),
+            max_depth,
+            network::HeaderUse::Resolve,
+            &mut None,
+        ) {
+            Ok(Some(header)) => (None, Self::Rejected(header)),
+            Err(e) if e.code == pcap_evidence::ErrorCode::Truncated => {
+                (Some(datagram.payload.len() + 1), Self::Unidentified)
+            }
+            _ => (None, Self::Unidentified),
+        }
+    }
+
+    fn observation(&self) -> Option<(&network::PrefixHeader, HeaderDisposition)> {
+        match self {
+            Self::Pending(h) => Some((h, HeaderDisposition::AwaitingReassembly)),
+            Self::Rejected(h) => Some((h, HeaderDisposition::RejectedPrefix)),
+            Self::Unidentified => None,
+        }
+    }
+}
 struct FragSlot {
-    reassembler: FragmentReassembler<Option<network::PrefixHeader>>,
+    reassembler: FragmentReassembler<PrefixVerdict>,
     last_frame: u64,
 }
 #[derive(Clone, Copy)]
@@ -175,7 +252,7 @@ enum WindowInput<'a> {
 }
 enum LayerReassembly {
     Complete(wire::Datagram, Vec<PacketId>),
-    Incomplete { quarantined: bool },
+    Incomplete { quarantined: bool, retained: bool },
 }
 struct LayerContext<'a> {
     ancestors: &'a [PacketId],
@@ -199,7 +276,28 @@ struct State<'a> {
     next_window: u64,
     summary: Summary,
 }
-impl State<'_> {
+impl<'a> State<'a> {
+    fn new(
+        c: &'a StreamConfig,
+        registry: &'a Registry,
+        sink: &'a mut dyn EventSink,
+        namespace: [u8; 32],
+    ) -> Self {
+        Self {
+            c,
+            registry,
+            sink,
+            namespace,
+            active: BTreeMap::new(),
+            order: BTreeSet::new(),
+            fragments: BTreeMap::new(),
+            retained: 0,
+            next_session: 0,
+            next_window: 0,
+            summary: Summary::default(),
+        }
+    }
+
     fn session(&mut self) -> Result<u64> {
         self.next_session = self
             .next_session
@@ -326,12 +424,23 @@ impl State<'_> {
                 .get_mut(&key)
                 .ok_or_else(|| Error::limit("fragment_context"))?
                 .reassembler
-                .expire(frame);
-            for n in notices {
-                self.fragment_notice(n)?;
+                .expire_with(frame, |n, v| (n, v));
+            for (n, v) in notices {
+                self.retire_fragment(n, v)?;
             }
         }
         Ok(())
+    }
+    fn retire_fragment(
+        &mut self,
+        notice: FragmentNotice,
+        verdict: Option<PrefixVerdict>,
+    ) -> Result<()> {
+        if let Some(PrefixVerdict::Rejected(header)) = verdict {
+            let (scope, path, segment, _) = header.path;
+            self.resolve_header(scope, path, segment, &notice.packets);
+        }
+        self.fragment_notice(notice)
     }
     fn fragment_notice(&mut self, n: FragmentNotice) -> Result<()> {
         let mut e = Event::new(
@@ -365,10 +474,7 @@ impl State<'_> {
         path: &[String],
         frame: u64,
         ancestors: &[PacketId],
-        inspect: &mut pcap_evidence::fragment::CachedPrefixObserver<
-            '_,
-            Option<network::PrefixHeader>,
-        >,
+        inspect: &mut pcap_evidence::fragment::CachedPrefixObserver<'_, PrefixVerdict>,
     ) -> Result<LayerReassembly> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
@@ -382,8 +488,8 @@ impl State<'_> {
                     .fragments
                     .remove(&oldest)
                     .ok_or_else(|| Error::limit("fragment_context"))?;
-                for n in slot.reassembler.finish() {
-                    self.fragment_notice(n)?;
+                for (n, v) in slot.reassembler.finish_with(|n, v| (n, v)) {
+                    self.retire_fragment(n, v)?;
                 }
                 self.diagnostic(
                     "fragment_context_evicted",
@@ -414,32 +520,24 @@ impl State<'_> {
                 Some(inspect),
                 |_, previous, packets| {
                     quarantined = true;
-                    if let Some(header) = previous.flatten() {
-                        let (scope, path, segment, _) = header.path;
-                        if segment.payload_len == Some(0) {
-                            let (key, _) = Key::new(
-                                scope.clone(),
-                                path,
-                                6,
-                                segment.source,
-                                segment.destination,
-                            );
-                            if let Some(tracker) =
-                                self.active.get_mut(&key).and_then(|a| a.tracker.as_mut())
-                            {
-                                tracker.invalidate_reassembly_extent(&scope, segment, packets);
-                            }
-                        }
+                    if let Some(verdict) = previous {
+                        verdict.invalidate(&mut self.active, packets);
                     }
                 },
             )
         };
         match result {
-            Ok(FragmentOutcome::Pending) => Ok(LayerReassembly::Incomplete { quarantined }),
+            Ok(FragmentOutcome::Pending) => Ok(LayerReassembly::Incomplete {
+                quarantined,
+                retained: true,
+            }),
             Ok(FragmentOutcome::Complete(d, ids)) => Ok(LayerReassembly::Complete(d, ids)),
             Ok(FragmentOutcome::Rejected(n)) => {
                 self.fragment_notice(n)?;
-                Ok(LayerReassembly::Incomplete { quarantined })
+                Ok(LayerReassembly::Incomplete {
+                    quarantined,
+                    retained: false,
+                })
             }
             Err(error) => {
                 // Never silently discard a contradictory fragment and continue
@@ -448,15 +546,18 @@ impl State<'_> {
                     .fragments
                     .remove(path)
                     .ok_or_else(|| Error::limit("fragment_context"))?;
-                for n in slot.reassembler.finish() {
-                    self.fragment_notice(n)?;
+                for (n, v) in slot.reassembler.finish_with(|n, v| (n, v)) {
+                    self.retire_fragment(n, v)?;
                 }
                 self.diagnostic(
                     format!("fragment_context_reset:{error}"),
                     contributors,
                     EvidenceStatus::Incomplete,
                 )?;
-                Ok(LayerReassembly::Incomplete { quarantined })
+                Ok(LayerReassembly::Incomplete {
+                    quarantined,
+                    retained: false,
+                })
             }
         }
     }
@@ -623,23 +724,27 @@ impl State<'_> {
         let max_depth = self.c.max_tunnel_depth.saturating_sub(depth);
         let policy = self.c.base.checksum_policy;
         let purpose = network::HeaderUse::Pending(policy);
-        let loss_header =
-            |d: &wire::Datagram| network::tcp_prefix_path(d, path.clone(), max_depth, purpose);
+        let slot = self.fragments.get(&path);
+        let was_rejected = slot
+            .and_then(|s| s.reassembler.last_prefix_verdict(&d))
+            .is_some_and(|v| matches!(v, PrefixVerdict::Rejected(_)));
+        let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
-            match self
-                .fragments
-                .get(&path)
-                .and_then(|slot| slot.reassembler.cached_prefix(&d))
-            {
-                Some(cached) => cached.as_ref().map(|h| h.witness_for(&d)),
-                None => loss_header(&d),
-            }
+            let classified;
+            let verdict = match slot.and_then(|s| s.reassembler.cached_prefix(&d)) {
+                Some(cached) => cached,
+                None => {
+                    classified = PrefixVerdict::inspect(&d, &path, max_depth, purpose).1;
+                    &classified
+                }
+            };
+            let (h, current) = verdict.observation()?;
+            disposition = current;
+            Some(h.witness_for(&d))
         });
         let mut resolved = None;
         let mut refine_packets = Vec::new();
-        let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
-            let mut next_check = None;
             let complete =
                 prefix.fragment.is_none() && prefix.payload.len() == prefix.declared_payload_len;
             let purpose = if complete {
@@ -647,62 +752,42 @@ impl State<'_> {
             } else {
                 purpose
             };
-            match network::inspect_scheduled_tcp_path(
-                prefix,
-                path.clone(),
-                max_depth,
-                purpose,
-                &mut next_check,
-            ) {
-                Ok(Some(candidate)) => {
-                    if complete {
-                        // A complete prefix is observed here only when the set
-                        // was refused. Replace its provisional contributors.
-                        let (scope, path, segment, _) = &candidate.path;
-                        resolved =
-                            Some((scope.clone(), path.clone(), *segment, contributors.to_vec()));
+            let (next, verdict) = PrefixVerdict::inspect(prefix, &path, max_depth, purpose);
+            let arriving = header.take().map(|h| h.3);
+            if let Some((candidate, current)) = verdict.observation() {
+                let (scope, path, segment, packet) = &candidate.path;
+                disposition = current;
+                if complete {
+                    // Complete prefixes reach this callback only on capacity refusal.
+                    resolved = Some((scope.clone(), path.clone(), *segment, contributors.to_vec()));
+                    if current != HeaderDisposition::RejectedPrefix {
                         disposition = HeaderDisposition::Omitted;
                         header = Some(candidate.path.clone());
-                    } else {
-                        let mut observed = candidate.path.clone();
-                        if let Some((_, _, _, packet)) = &header {
-                            observed.3 = *packet;
-                        }
-                        if observed.2.payload_len == Some(0) {
-                            refine_packets.extend_from_slice(contributors);
-                        }
-                        header = Some(observed);
                     }
-                    (next_check, Some(Some(candidate)))
-                }
-                Err(error) if error.code == pcap_evidence::ErrorCode::Truncated => {
-                    header = None;
-                    (Some(prefix.payload.len() + 1), Some(None))
-                }
-                Ok(None) | Err(_) => {
-                    header = None;
-                    let next = match network::inspect_tcp_path(
-                        prefix,
+                } else {
+                    if current == HeaderDisposition::RejectedPrefix
+                        || was_rejected
+                        || segment.payload_len == Some(0)
+                    {
+                        refine_packets.extend_from_slice(contributors);
+                    }
+                    header = Some((
+                        scope.clone(),
                         path.clone(),
-                        max_depth,
-                        network::HeaderUse::Resolve,
-                    ) {
-                        Ok(Some((scope, path, segment, _))) => {
-                            resolved = Some((scope, path, segment, contributors.to_vec()));
-                            None
-                        }
-                        Ok(None) => None,
-                        Err(error) => (error.code == pcap_evidence::ErrorCode::Truncated)
-                            .then(|| prefix.payload.len() + 1),
-                    };
-                    (next, Some(None))
+                        *segment,
+                        arriving.unwrap_or(*packet),
+                    ));
                 }
             }
+            (next, Some(verdict))
         };
         let (datagram, mut contributors) =
             match self.reassemble(d, &path, frame, ancestors, &mut inspect)? {
                 LayerReassembly::Complete(d, ids) => (d, ids),
-                LayerReassembly::Incomplete { quarantined } => {
+                LayerReassembly::Incomplete {
+                    quarantined,
+                    retained,
+                } => {
                     if let Some((scope, path, segment, packets)) = resolved {
                         self.resolve_header(scope, path, segment, &packets);
                     }
@@ -711,23 +796,19 @@ impl State<'_> {
                         // outer bytes cannot establish the inner payload length.
                         if quarantined {
                             header.2.payload_len = None;
+                            disposition = HeaderDisposition::AwaitingReassembly;
+                        } else if !retained && disposition == HeaderDisposition::RejectedPrefix {
+                            let (scope, path, segment, _) = header;
+                            self.resolve_header(scope, path, segment, &refine_packets);
+                            return Ok(());
                         }
-                        if !refine_packets.is_empty() {
-                            let (scope, path, segment, _) = &header;
-                            let (key, _) = Key::new(
-                                scope.clone(),
-                                path.clone(),
-                                6,
-                                segment.source,
-                                segment.destination,
-                            );
-                            if let Some(tracker) =
-                                self.active.get_mut(&key).and_then(|a| a.tracker.as_mut())
-                            {
-                                tracker.refine_reassembly_extent(scope, *segment, &refine_packets);
-                            }
-                        }
-                        self.observe_tcp_header(header, frame, time, disposition)?;
+                        self.apply_pending_header(
+                            header,
+                            disposition,
+                            &refine_packets,
+                            frame,
+                            time,
+                        )?;
                     }
                     return Ok(());
                 }
@@ -931,6 +1012,27 @@ impl State<'_> {
             }
         }
     }
+    fn apply_pending_header(
+        &mut self,
+        header: network::TcpPath,
+        disposition: HeaderDisposition,
+        contributors: &[PacketId],
+        frame: u64,
+        time: Option<i128>,
+    ) -> Result<()> {
+        if !contributors.is_empty() {
+            let (scope, path, segment, _) = &header;
+            if let Some(tracker) = prefix_tracker(&mut self.active, scope, path, *segment) {
+                tracker.set_reassembly_prefix_rejected(
+                    scope,
+                    *segment,
+                    contributors,
+                    disposition == HeaderDisposition::RejectedPrefix,
+                );
+            }
+        }
+        self.observe_tcp_header(header, frame, time, disposition)
+    }
     fn observe_tcp_header(
         &mut self,
         (scope, path, segment, id): (Scope, Vec<String>, wire::TcpHeader, PacketId),
@@ -977,7 +1079,10 @@ impl State<'_> {
         };
         let provisional = matches!(
             input,
-            WindowInput::Header(_, HeaderDisposition::AwaitingReassembly)
+            WindowInput::Header(
+                _,
+                HeaderDisposition::AwaitingReassembly | HeaderDisposition::RejectedPrefix
+            )
         );
         let idle = !provisional
             && match (time, a.last_ns) {
@@ -1004,7 +1109,12 @@ impl State<'_> {
                 .is_none_or(|n| n > self.c.window_packets)
             || projected > self.c.window_payload
         {
-            if !idle {
+            if !idle
+                && !matches!(
+                    input,
+                    WindowInput::Header(_, HeaderDisposition::RejectedPrefix)
+                )
+            {
                 if let (WindowInput::Header(header, _), Some(tracker)) = (input, &mut a.tracker) {
                     tracker.observe_at_cut(key.scope.clone(), packets[0], time, header)?;
                 }
@@ -1483,8 +1593,8 @@ impl State<'_> {
         while self.evict_oldest("eof")? {}
         let fragments = std::mem::take(&mut self.fragments);
         for (_, slot) in fragments {
-            for n in slot.reassembler.finish() {
-                self.fragment_notice(n)?;
+            for (n, v) in slot.reassembler.finish_with(|n, v| (n, v)) {
+                self.retire_fragment(n, v)?;
             }
         }
         Ok(())
@@ -1534,19 +1644,7 @@ pub fn analyze_reader<R: Read>(
     };
     let mut reader =
         CaptureReader::new(hash_reader, config.reader_limits(), config.base.parse_mode)?;
-    let mut state = State {
-        c: &config,
-        registry,
-        sink: &mut meter,
-        namespace,
-        active: BTreeMap::new(),
-        order: BTreeSet::new(),
-        fragments: BTreeMap::new(),
-        retained: 0,
-        next_session: 0,
-        next_window: 0,
-        summary: Summary::default(),
-    };
+    let mut state = State::new(&config, registry, &mut meter, namespace);
     let result = (|| -> Result<()> {
         while let Some(record) = reader.next_record()? {
             state.summary.records = state
@@ -1644,3 +1742,6 @@ pub fn analyze_reader<R: Read>(
     ))?;
     Ok(summary)
 }
+
+#[cfg(test)]
+mod tests;

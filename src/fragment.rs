@@ -128,6 +128,14 @@ impl<V> FragmentReassembler<V> {
         }
     }
     pub fn expire(&mut self, frame: u64) -> Vec<FragmentNotice> {
+        self.expire_with(frame, |notice, _| notice)
+    }
+    /// Return the last prefix decision along with each expired set's contributors.
+    pub fn expire_with<T>(
+        &mut self,
+        frame: u64,
+        mut retire: impl FnMut(FragmentNotice, Option<V>) -> T,
+    ) -> Vec<T> {
         let mut notices = Vec::new();
         while self
             .deadlines
@@ -138,10 +146,13 @@ impl<V> FragmentReassembler<V> {
                 break;
             };
             if let Some(assembly) = self.remove(&key) {
-                notices.push(FragmentNotice {
-                    code: "fragment_expired",
-                    packets: assembly.packets,
-                });
+                notices.push(retire(
+                    FragmentNotice {
+                        code: "fragment_expired",
+                        packets: assembly.packets,
+                    },
+                    assembly.verdict,
+                ));
             }
         }
         notices
@@ -159,6 +170,11 @@ impl<V> FragmentReassembler<V> {
         let size: usize = a.parts.iter().map(|p| p.end - p.start).sum();
         self.retained -= size;
         Some(a)
+    }
+    /// Last classification for this set. It describes previously inspected bytes.
+    pub fn last_prefix_verdict(&self, datagram: &Datagram) -> Option<&V> {
+        let info = datagram.fragment.as_ref()?;
+        self.sets.get(&Key::new(datagram, info))?.verdict.as_ref()
     }
     /// Return the verdict for an identical offset-zero prefix in this set.
     /// The caller still submits the fragment for admission and accounting.
@@ -413,16 +429,25 @@ impl<V> FragmentReassembler<V> {
         set.prefix.fragment = None;
         Ok(FragmentOutcome::Complete(set.prefix, set.packets))
     }
-    pub fn finish(mut self) -> Vec<FragmentNotice> {
-        let sets = std::mem::take(&mut self.sets);
-        sets.into_values()
-            .map(|set| FragmentNotice {
-                code: if set.poisoned {
-                    "fragment_quarantine_at_eof"
-                } else {
-                    "incomplete_fragment_set_at_eof"
-                },
-                packets: set.packets,
+    pub fn finish(self) -> Vec<FragmentNotice> {
+        self.finish_with(|notice, _| notice)
+    }
+    /// Retire every remaining set and its prefix decision together.
+    pub fn finish_with<T>(self, mut retire: impl FnMut(FragmentNotice, Option<V>) -> T) -> Vec<T> {
+        self.sets
+            .into_values()
+            .map(|set| {
+                retire(
+                    FragmentNotice {
+                        code: if set.poisoned {
+                            "fragment_quarantine_at_eof"
+                        } else {
+                            "incomplete_fragment_set_at_eof"
+                        },
+                        packets: set.packets,
+                    },
+                    set.verdict,
+                )
             })
             .collect()
     }

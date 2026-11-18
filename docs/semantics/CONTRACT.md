@@ -197,6 +197,10 @@ If the whole checksum-covered extent is available on
 a refused arrival, strict mode can resolve the loss witness from its checksum.
 For an incomplete UDP tunnel, strict mode rechecks the checksum when all declared
 UDP bytes become contiguous, even if the enclosing IP datagram still lacks bytes.
+While the set remains open, a rejected prefix keeps its original header witness
+and packet slot. It does not count against a pair's uniqueness unless a later
+conflict disputes that verdict. Completion or retirement of the rejected set
+releases the slot.
 An identical first fragment reuses that verdict and retains its own packet
 reference. A change to the terminal extent or checksum context triggers a new
 inspection.

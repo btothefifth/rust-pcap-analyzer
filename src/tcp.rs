@@ -556,6 +556,8 @@ impl Flow {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum HeaderDisposition {
     AwaitingReassembly,
+    /// The current prefix fails policy, but its containing fragment set is open.
+    RejectedPrefix,
     Omitted,
 }
 
@@ -677,7 +679,7 @@ impl UnretainedHeader {
     }
 
     fn within_final_idle(&self, flow: &Flow, idle_ns: i128) -> bool {
-        self.disposition != HeaderDisposition::AwaitingReassembly
+        self.disposition == HeaderDisposition::Omitted
             || self
                 .time
                 .zip(flow.last_ns)
@@ -834,7 +836,8 @@ impl TcpTracker {
             if seen.disposition == HeaderDisposition::Omitted {
                 return Ok(());
             }
-            if disposition == HeaderDisposition::AwaitingReassembly {
+            if disposition != HeaderDisposition::Omitted {
+                seen.disposition = disposition;
                 seen.refine_empty_extent(direction, segment);
                 return Ok(());
             }
@@ -914,7 +917,7 @@ impl TcpTracker {
         // Fragment timestamps remain provisional until completion. Compare them
         // with admitted activity at finalization, including any later response.
         let admission_time = match header.disposition {
-            HeaderDisposition::AwaitingReassembly => None,
+            HeaderDisposition::AwaitingReassembly | HeaderDisposition::RejectedPrefix => None,
             HeaderDisposition::Omitted => header.time,
         };
         if let Some(isn) = header.syn_isn.filter(|_| header.ack.is_none()) {
@@ -986,7 +989,7 @@ impl TcpTracker {
                 .iter()
                 .filter(|id| {
                     set.get(id)
-                        .is_some_and(|h| h.disposition == HeaderDisposition::AwaitingReassembly)
+                        .is_some_and(|h| h.disposition != HeaderDisposition::Omitted)
                 })
                 .count()
         })
@@ -1001,26 +1004,42 @@ impl TcpTracker {
         packets: &[PacketId],
     ) {
         if header.payload_len == Some(0) {
-            self.update_pending_extents(scope, header, packets, |seen, direction| {
-                seen.refine_empty_extent(direction, header);
-            });
+            self.set_reassembly_prefix_rejected(scope, header, packets, false);
         }
     }
 
-    /// A quarantined fragment set can no longer establish an empty TCP payload.
+    /// A pending fragment set can change its verdict. Update the existing
+    /// witnesses in place so their original generation candidates survive.
+    pub fn set_reassembly_prefix_rejected(
+        &mut self,
+        scope: &Scope,
+        header: TcpHeader,
+        packets: &[PacketId],
+        rejected: bool,
+    ) {
+        self.update_pending_extents(scope, header, packets, |seen, direction| {
+            seen.disposition = if rejected {
+                HeaderDisposition::RejectedPrefix
+            } else {
+                HeaderDisposition::AwaitingReassembly
+            };
+            if !rejected {
+                seen.refine_empty_extent(direction, header);
+            }
+        });
+    }
+
+    /// A disputed prefix establishes neither a rejection nor an empty payload.
     pub fn invalidate_reassembly_extent(
         &mut self,
         scope: &Scope,
         header: TcpHeader,
         packets: &[PacketId],
     ) {
-        if header.payload_len == Some(0) {
-            self.update_pending_extents(scope, header, packets, |seen, _| {
-                if matches!(seen.extent, MissingExtent::Empty { .. }) {
-                    seen.extent = MissingExtent::PossiblePayload;
-                }
-            });
-        }
+        self.update_pending_extents(scope, header, packets, |seen, _| {
+            seen.disposition = HeaderDisposition::AwaitingReassembly;
+            seen.extent = MissingExtent::PossiblePayload;
+        });
     }
 
     fn update_pending_extents(
@@ -1034,8 +1053,7 @@ impl TcpTracker {
         if let Some(headers) = self.unretained.get_mut(&key) {
             for packet in packets {
                 if let Some(seen) = headers.get_mut(packet) {
-                    if seen.disposition == HeaderDisposition::AwaitingReassembly
-                        && seen.direction == direction
+                    if seen.disposition != HeaderDisposition::Omitted && seen.direction == direction
                     {
                         update(seen, direction);
                     }
@@ -1105,7 +1123,7 @@ impl TcpTracker {
             for id in packets {
                 if headers
                     .get(id)
-                    .is_some_and(|h| h.disposition == HeaderDisposition::AwaitingReassembly)
+                    .is_some_and(|h| h.disposition != HeaderDisposition::Omitted)
                 {
                     headers.remove(id);
                     self.loss_count -= 1;
@@ -1404,6 +1422,9 @@ impl TcpTracker {
                 continue;
             };
             for mut header in headers.into_values() {
+                if header.disposition == HeaderDisposition::RejectedPrefix {
+                    continue;
+                }
                 let owned = header.apply_existing(&mut self.flows, max_span, self.idle_ns);
                 if owned && header.syn_isn.is_some() && header.ack.is_none() {
                     continue; // An observed opening SYN already owned this retransmission.
