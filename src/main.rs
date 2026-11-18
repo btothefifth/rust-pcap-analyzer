@@ -192,13 +192,18 @@ fn parse_args(args: Vec<String>) -> Result<Args> {
     out.config.validate()?;
     Ok(out)
 }
+const REPORT_LIMIT: usize = 512 * 1024 * 1024;
+
 fn emit(value: Json, path: Option<&Path>) -> Result<()> {
     // Metadata representation overhead is bounded separately from input size.
-    let bytes = value.encode_bounded_line(512 * 1024 * 1024)?.into_bytes();
+    write_report(&value.encode_bounded_line(REPORT_LIMIT)?, path)
+}
+fn write_report(line: &str, path: Option<&Path>) -> Result<()> {
+    let bytes = line.as_bytes();
     if let Some(path) = path {
-        write_new(path, &bytes)?;
+        write_new(path, bytes)?;
     } else {
-        std::io::stdout().lock().write_all(&bytes)?;
+        std::io::stdout().lock().write_all(bytes)?;
     }
     Ok(())
 }
@@ -224,14 +229,8 @@ fn run(args: Args) -> Result<i32> {
                 correlate::apply_labels(&mut analysis, text)?;
             }
             let degraded = analysis.has_diagnostics();
-            let mut value = report::analysis(&analysis, args.include_payload);
-            if let Json::Object(ref mut fields) = value {
-                fields.push((
-                    "protocol_detection",
-                    pcap_evidence::detection::analysis_json(&analysis)?,
-                ));
-            }
-            emit(value, args.output.as_deref())?;
+            let line = report::analysis_line(&analysis, args.include_payload, REPORT_LIMIT)?;
+            write_report(&line, args.output.as_deref())?;
             if args.require_clean && degraded {
                 return Ok(4);
             }

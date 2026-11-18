@@ -210,3 +210,13 @@ Role alternatives share the caller's record, field, span and work budgets.
 Undecoded tails count toward the span budget. If the remaining allowance cannot
 represent the whole tail, its evidence retains the byte digest and an empty
 span list. The bounded issues list records `semantic_tail_spans` when it has room.
+
+The snapshot CLI encodes report rows against a single byte allowance including
+protocol detection and the trailing newline. It publishes output only after the
+whole report fits. Library callers that need an editable JSON tree can use
+`report::analysis`. A finalized Modbus pair with a changed public reference
+is omitted from the snapshot's transaction candidates.
+
+History application replay shares its frame allowance across the selected
+range, including page boundaries. At exhaustion, earlier reports remain in
+order and the terminal record identifies the last completed output boundary.

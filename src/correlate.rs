@@ -29,7 +29,7 @@ pub struct Transaction {
     pub status: &'static str,
     pub reason: &'static str,
     pub(crate) competing: Vec<(usize, &'static str, usize)>,
-    pub(crate) modbus_pair: Option<(&'static str, ModbusPair)>,
+    pub(crate) modbus_pair: Option<(&'static str, &'static str, ModbusPair)>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ModbusPair {
@@ -385,7 +385,7 @@ pub(crate) fn transactions_with_flows(
         output.push(Transaction {
             modbus_pair: match status {
                 "candidate_pair" | "candidate_unverified_boundary" | "inconsistent_response" => {
-                    pair.map(|pair| (status, pair))
+                    pair.map(|pair| (status, reason, pair))
                 }
                 _ => None,
             },

@@ -822,8 +822,10 @@ impl State<'_> {
         packets: &[PacketId],
     ) {
         let (key, _) = Key::new(scope.clone(), path, 6, header.source, header.destination);
-        if let Some(tracker) = self.active.get_mut(&key).and_then(|a| a.tracker.as_mut()) {
-            tracker.resolve_reassembly(scope, header, packets);
+        if let Some(active) = self.active.get_mut(&key) {
+            if let Some(tracker) = &mut active.tracker {
+                active.packet_refs -= tracker.resolve_reassembly(scope, header, packets);
+            }
         }
     }
     fn observe_tcp_header(

@@ -86,6 +86,8 @@ pub fn analyze<W: Write>(
             ("page_boundaries_reset_protocol", false.into()),
         ]),
     )?;
+    let mut remaining_frames = l.elements;
+    let mut completed_until = request.start;
     let mut at = request.start;
     let result = (|| -> Result<()> {
         while at < request.end {
@@ -99,26 +101,33 @@ pub fn analyze<W: Write>(
             let range = history.evidence_range(request.generation, request.direction, at, end)?;
             for p in range.pieces {
                 if let Some(bytes) = p.bytes {
-                    parser.feed(p.start, &bytes, &mut |record| {
-                        emit(
-                            "protocol.message",
-                            Json::object([
-                                (
-                                    "available_at_frame",
-                                    record.available_at_frame.to_string().into(),
-                                ),
-                                (
-                                    "last_input_stream_start",
-                                    record.stream_start.to_string().into(),
-                                ),
-                                (
-                                    "last_input_stream_end",
-                                    record.stream_end.to_string().into(),
-                                ),
-                                ("report", record.report.json()),
-                            ]),
-                        )
-                    })?;
+                    parser.feed_with_quota(
+                        p.start,
+                        &bytes,
+                        &mut remaining_frames,
+                        &mut |record| {
+                            emit(
+                                "protocol.message",
+                                Json::object([
+                                    (
+                                        "available_at_frame",
+                                        record.available_at_frame.to_string().into(),
+                                    ),
+                                    (
+                                        "last_input_stream_start",
+                                        record.stream_start.to_string().into(),
+                                    ),
+                                    (
+                                        "last_input_stream_end",
+                                        record.stream_end.to_string().into(),
+                                    ),
+                                    ("report", record.report.json()),
+                                ]),
+                            )?;
+                            completed_until = record.stream_end;
+                            Ok(())
+                        },
+                    )?;
                 } else {
                     let report = parser.cut("transport_gap_conflict_or_ambiguous_placement")?;
                     emit(
@@ -130,6 +139,7 @@ pub fn analyze<W: Write>(
                             ("report", report.json()),
                         ]),
                     )?;
+                    completed_until = p.end;
                 }
             }
             at = end;
@@ -153,7 +163,7 @@ pub fn analyze<W: Write>(
                 Json::object([
                     ("error", e.code.as_str().into()),
                     ("field", e.field.into()),
-                    ("consumed_until", at.to_string().into()),
+                    ("consumed_until", completed_until.to_string().into()),
                 ]),
             );
             return Err(e);

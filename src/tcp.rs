@@ -413,20 +413,23 @@ struct UnretainedHeader {
     direction: usize,
     sequence: u32,
     ack: Option<u32>,
-    opening_isn: Option<u32>,
+    syn_isn: Option<u32>,
     // Generations below this ID were already considered at packet admission.
     first_future_id: usize,
 }
 impl UnretainedHeader {
+    fn handshake_allows(&self, flow: &Flow) -> bool {
+        self.syn_isn
+            .zip(flow.syn[self.direction])
+            .is_none_or(|(seen, assigned)| seen == assigned)
+            && flow.admits_payload_start(self.direction, self.sequence)
+    }
+
     fn matches(&self, flow: &Flow, max_span: i64) -> bool {
         flow.packets
             .first()
             .is_some_and(|p| p.capture == self.packet.capture)
-            && self
-                .opening_isn
-                .zip(flow.syn[self.direction])
-                .is_none_or(|(observed, assigned)| observed == assigned)
-            && flow.admits_payload_start(self.direction, self.sequence)
+            && self.handshake_allows(flow)
             && flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span)
     }
 }
@@ -603,7 +606,7 @@ impl TcpTracker {
                 .sequence
                 .wrapping_add(u32::from(segment.flags & 2 != 0)),
             ack: (segment.flags & 0x10 != 0).then_some(segment.acknowledgement),
-            opening_isn: (segment.flags & 0x12 == 0x02).then_some(segment.sequence),
+            syn_isn: (segment.flags & 2 != 0).then_some(segment.sequence),
             first_future_id: self.flows.len(),
             existing: Vec::new(),
             disposition,
@@ -614,7 +617,7 @@ impl TcpTracker {
             .remaining_loss_checks
             .checked_sub(ids.len())
             .ok_or_else(|| Error::limit("unretained_tcp_generation_checks"))?;
-        if let Some(isn) = header.opening_isn {
+        if let Some(isn) = header.syn_isn.filter(|_| header.ack.is_none()) {
             if let Some(id) = self.opening_syn_owner(ids, direction, isn, when) {
                 if self.flows[id]
                     .packets
@@ -686,9 +689,14 @@ impl TcpTracker {
 
     /// A completed reassembly with a definitive transport disposition resolves
     /// its provisional observations. Omitted data remains a loss witness.
-    pub fn resolve_reassembly(&mut self, scope: Scope, header: TcpHeader, packets: &[PacketId]) {
+    pub fn resolve_reassembly(
+        &mut self,
+        scope: Scope,
+        header: TcpHeader,
+        packets: &[PacketId],
+    ) -> usize {
         let (key, _) = FlowKey::new(scope, header.source, header.destination);
-        self.resolve_packets(&key, packets);
+        self.resolve_packets(&key, packets)
     }
 
     pub fn ingest(
@@ -733,7 +741,8 @@ impl TcpTracker {
         Ok(assignment)
     }
 
-    fn resolve_packets(&mut self, key: &FlowKey, packets: &[PacketId]) {
+    fn resolve_packets(&mut self, key: &FlowKey, packets: &[PacketId]) -> usize {
+        let before = self.loss_count;
         if let Some(headers) = self.unretained.get_mut(key) {
             for id in packets {
                 if headers
@@ -748,6 +757,7 @@ impl TcpTracker {
                 self.unretained.remove(key);
             }
         }
+        before - self.loss_count
     }
 
     fn assign(
@@ -781,6 +791,7 @@ impl TcpTracker {
             let mut candidates = Vec::new();
             let mut closed_candidates = Vec::new();
             let mut closed_final_ack_candidates = Vec::new();
+            let mut conflicting_syn = false;
             for id in &history {
                 let f = &self.flows[*id];
                 let expired = match (when, f.last_ns) {
@@ -788,6 +799,11 @@ impl TcpTracker {
                     _ => false,
                 };
                 if !expired && self.plausible(f, direction, &segment) {
+                    if segment.syn() && f.syn[direction].is_some_and(|isn| isn != segment.sequence)
+                    {
+                        conflicting_syn |= !f.closed;
+                        continue;
+                    }
                     if f.closed {
                         closed_candidates.push(*id);
                         if Self::is_final_ack(f, direction, &segment) {
@@ -827,6 +843,10 @@ impl TcpTracker {
                 });
             } else if let Some(id) = candidates.first() {
                 selected = *id;
+            } else if conflicting_syn {
+                return Ok(Assignment::Unassigned {
+                    reason: "conflicting_syn_for_generation",
+                });
             } else {
                 let all_expired = history
                     .iter()
@@ -849,11 +869,6 @@ impl TcpTracker {
             return Err(Error::limit("segments_per_flow"));
         }
         if segment.syn() {
-            if flow.syn[direction].is_some_and(|old| old != segment.sequence) {
-                return Ok(Assignment::Unassigned {
-                    reason: "conflicting_syn_for_generation",
-                });
-            }
             flow.syn[direction] = Some(segment.sequence);
         }
         flow.anchors[direction].get_or_insert(segment.data_sequence());
@@ -897,9 +912,13 @@ impl TcpTracker {
             };
             for header in headers.into_values() {
                 for &id in &header.existing {
-                    self.flows[id].note_uncertain(header.packet);
+                    let flow = &mut self.flows[id];
+                    // The opposite half of the handshake may have arrived since admission.
+                    if header.handshake_allows(flow) {
+                        flow.note_uncertain(header.packet);
+                    }
                 }
-                if header.opening_isn.is_some() && !header.existing.is_empty() {
+                if header.syn_isn.is_some() && header.ack.is_none() && !header.existing.is_empty() {
                     continue; // An observed opening SYN already owned this retransmission.
                 }
                 let first = ids.partition_point(|&id| id < header.first_future_id);

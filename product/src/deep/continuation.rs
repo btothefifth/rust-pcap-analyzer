@@ -138,7 +138,22 @@ impl Parser {
         bytes: &EvidenceBytes,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
-        let result = self.feed_inner(offset, bytes, emit);
+        let mut remaining = self.limits.elements;
+        self.feed_with_quota(offset, bytes, &mut remaining, emit)
+    }
+
+    /// Share a frame allowance across all pieces of a logical input range.
+    pub fn feed_with_quota(
+        &mut self,
+        offset: i64,
+        bytes: &EvidenceBytes,
+        remaining: &mut usize,
+        emit: &mut dyn FnMut(Completed) -> Result<()>,
+    ) -> Result<()> {
+        if *remaining > self.limits.elements {
+            return Err(Error::limit("frame_quota"));
+        }
+        let result = self.feed_inner(offset, bytes, remaining, emit);
         if result.is_err() {
             self.requires_cut = true;
             // Rejected continuation cannot retain an assembly for a later feed.
@@ -153,6 +168,7 @@ impl Parser {
         &mut self,
         offset: i64,
         bytes: &EvidenceBytes,
+        remaining: &mut usize,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
         if self.requires_cut {
@@ -171,7 +187,7 @@ impl Parser {
         }
         let mut p = 0;
         let mut input_span = 0;
-        let mut messages = 0;
+
         while p < bytes.len() {
             let room = self
                 .limits
@@ -190,7 +206,7 @@ impl Parser {
             )?;
             p += n;
             let mut consumed = 0;
-            let result = self.emit_buffered(&mut consumed, &mut messages, emit);
+            let result = self.emit_buffered(&mut consumed, remaining, emit);
             self.buffer.discard_prefix(consumed)?;
             result?;
         }
@@ -199,15 +215,14 @@ impl Parser {
     fn emit_buffered(
         &mut self,
         consumed: &mut usize,
-        messages: &mut usize,
+        remaining: &mut usize,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
         let mut span_cursor = 0;
         while let Some(n) = self.length(*consumed)? {
-            *messages += 1;
-            if *messages > self.limits.elements {
-                return Err(Error::limit("messages_per_feed"));
-            }
+            *remaining = remaining
+                .checked_sub(1)
+                .ok_or_else(|| Error::limit("messages_per_feed"))?;
             let at = self.buffer.offset() + *consumed as i64;
             let end = *consumed + n;
             let raw = self

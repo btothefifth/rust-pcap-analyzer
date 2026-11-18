@@ -95,9 +95,9 @@ fn changed_modbus_references_cannot_retarget_a_mapping() {
     let reference = analysis.transactions[index].requests[0];
     let response = analysis.transactions[index].responses[0];
     analysis.transactions[index].requests[0] = response;
-    assert!(!report::analysis(&analysis, false)
-        .encode()
-        .contains("read_mapping"));
+    let report = report::analysis(&analysis, false).encode();
+    assert!(!report.contains("read_mapping"));
+    assert!(report.contains("\"transaction_candidates\":[]"));
     analysis.transactions[index].requests[0] = reference;
     assert!(report::analysis(&analysis, false)
         .encode()
@@ -222,5 +222,50 @@ fn partial_mbap_requires_one_capture_to_compete_with_a_pair() {
             groups.iter().any(|t| t.status == "candidate_pair"),
             expect_pair
         );
+    }
+}
+
+#[test]
+fn snapshot_line_enforces_a_shared_byte_budget_across_decoded_messages() {
+    use pcap_evidence::{detection, json::Json};
+    for fixture in ["modbus_fc23_split.pcap", "dnp3_split_valid.pcap"] {
+        let analysis = engine::analyze(&capture(fixture), Config::default()).unwrap();
+        for include in [false, true] {
+            let mut expected = report::analysis(&analysis, include);
+            let Json::Object(fields) = &mut expected else {
+                unreachable!()
+            };
+            fields.push((
+                "protocol_detection",
+                detection::analysis_json(&analysis).unwrap(),
+            ));
+            let line = expected.encode_bounded_line(1 << 22).unwrap();
+            assert_eq!(
+                report::analysis_line(&analysis, include, line.len()).unwrap(),
+                line
+            );
+            assert_eq!(
+                report::analysis_line(&analysis, include, line.len() - 1)
+                    .unwrap_err()
+                    .field,
+                "report_bytes"
+            );
+            if fixture.starts_with("modbus") {
+                let offsets: Vec<_> = line
+                    .match_indices("\"semantic_subset\":")
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(offsets.len(), 2);
+                // Both individual ADUs fit. The remaining capture-wide allowance
+                // runs out while the second semantic report is being encoded.
+                let limit = offsets[1] + 32;
+                assert_eq!(
+                    report::analysis_line(&analysis, include, limit)
+                        .unwrap_err()
+                        .field,
+                    "report_bytes"
+                );
+            }
+        }
     }
 }

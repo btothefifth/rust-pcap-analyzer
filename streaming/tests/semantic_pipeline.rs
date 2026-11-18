@@ -1219,3 +1219,106 @@ fn late_predecessor_payload_does_not_belong_to_a_known_successor() {
             .contains(r#""starting_address_zero_based":17"#));
     }
 }
+
+#[test]
+fn data_on_a_syn_ack_must_match_the_observed_server_isn() {
+    use tiny_capture::{capture, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let pair = [
+        tcp(false, 100, 0, 2, &[]),
+        tcp(true, 500, 101, 0x12, &[]),
+        tcp(false, 101, 501, 0x18, &req),
+        tcp(true, 501, 113, 0x18, &rsp),
+    ];
+    let mut different = rsp;
+    different[10] ^= 1;
+    for isn in [500, 502] {
+        for snapped in [false, true] {
+            let extra = tcp(true, isn, 101, 0x12, &different);
+            let len = extra.len() as u32;
+            let mut frames = pair.to_vec();
+            frames.push(if snapped { extra[..54].to_vec() } else { extra });
+            let mut raw = capture(&frames);
+            let at = capture(&pair).len();
+            raw[at + 12..at + 16].copy_from_slice(&len.to_le_bytes());
+            let mut c = StreamConfig::default();
+            c.base.modbus_ports = vec![2000];
+            let root = pcap_evidence::engine::analyze(&raw, c.base.clone()).unwrap();
+            assert_eq!(
+                pcap_evidence::report::analysis(&root, false)
+                    .encode()
+                    .contains("read_mapping"),
+                isn != 500
+            );
+            assert_eq!(
+                run(&raw, c)
+                    .events
+                    .iter()
+                    .any(|e| e.data.encode().contains("read_mapping")),
+                isn != 500
+            );
+        }
+    }
+    // The client SYN exists, but the server ISN is still unknown at observation.
+    for isn in [500, 502] {
+        let extra = tcp(true, isn, 101, 0x12, &different);
+        let mut frames = pair.to_vec();
+        frames.insert(1, extra[..54].to_vec());
+        let mut bytes = capture(&frames);
+        let at = capture(&pair[..1]).len();
+        bytes[at + 12..at + 16].copy_from_slice(&(extra.len() as u32).to_le_bytes());
+        let mut c = StreamConfig::default();
+        c.base.modbus_ports = vec![2000];
+        let root = pcap_evidence::engine::analyze(&bytes, c.base.clone()).unwrap();
+        assert_eq!(
+            pcap_evidence::report::analysis(&root, false)
+                .encode()
+                .contains("read_mapping"),
+            isn != 500
+        );
+        assert_eq!(
+            run(&bytes, c)
+                .events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            isn != 500
+        );
+    }
+}
+
+#[test]
+fn rejected_reassembly_returns_the_window_slot_before_the_response() {
+    use tiny_capture::{capture, ipv4_fragment, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let mut rejected = tcp(false, 113, 501, 0x18, &req);
+    rejected[50] ^= 1;
+    let first = ipv4_fragment(&rejected, 0..24, true);
+    let last = ipv4_fragment(&rejected, 24..32, false);
+    for (middle, eligible) in [
+        (vec![rejected], true),
+        (vec![first.clone(), last.clone()], true),
+        (vec![last, first.clone()], true),
+        (vec![first], false),
+    ] {
+        let mut frames = vec![
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 500, 101, 0x12, &[]),
+            tcp(false, 101, 501, 0x18, &req),
+        ];
+        frames.extend(middle);
+        frames.push(tcp(true, 501, 113, 0x18, &rsp));
+        let mut c = StreamConfig::default();
+        c.base.modbus_ports = vec![2000];
+        c.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+        c.window_packets = 4;
+        let events = run(&capture(&frames), c).events;
+        assert_eq!(
+            events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            eligible
+        );
+    }
+}

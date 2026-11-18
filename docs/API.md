@@ -120,8 +120,8 @@ never invent trusted header values. Captured timestamps remain in packet records
 No new flag is needed for root `analyze`. Headers are small non-secret evidence
 and include hex even when bulk payload is disabled. Candidate status does not
 establish receipt, causality, acceptance, device effects, authentication or
-normative conformance. Exhaustive Rust `Analysis` literals need the two new fields;
-no ABI compatibility is promised. The streaming crate adds a separate
+normative conformance. Obtain an `Analysis` with `engine::analyze` and read the finalized application
+observations with `Analysis::applications()`. The streaming crate adds a separate
 `dnp3.confirmation_candidate` event projection for verified TCP fragments. It is
 scoped by capture hash, session, flow window/generation, reversed individual
 addresses, sequence and UNS namespace, and carries exact participant witnesses.

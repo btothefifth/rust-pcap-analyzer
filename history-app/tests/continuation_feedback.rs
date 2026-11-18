@@ -306,3 +306,33 @@ fn history_modbus_nested_interpretations_obey_field_budget() {
         }
     }
 }
+
+#[test]
+fn modbus_history_message_quota_is_shared_across_pages() {
+    let adu = [0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1];
+    for count in [2, 3] {
+        let payload = adu.repeat(count);
+        let mut reference = None;
+        for page in [1, adu.len(), payload.len()] {
+            let (result, output) = consume_with_limits(
+                "modbus",
+                &payload,
+                page,
+                Limits {
+                    elements: 2,
+                    ..Limits::default()
+                },
+            );
+            assert_eq!(output.matches("\"kind\":\"protocol.message\"").count(), 2);
+            if count == 2 {
+                result.unwrap();
+                assert!(output.contains("analysis.complete"));
+            } else {
+                assert_eq!(result.unwrap_err().field, "messages_per_feed");
+                assert!(output.contains("analysis.aborted"));
+                assert!(output.contains("\"consumed_until\":\"28\""));
+            }
+            assert_eq!(reference.get_or_insert_with(|| output.clone()), &output);
+        }
+    }
+}
