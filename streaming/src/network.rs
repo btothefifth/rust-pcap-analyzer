@@ -720,13 +720,19 @@ pub(crate) fn inspect_tcp_path(
             let header = outer.payload.data();
             need_extent(header, 8, "udp_tunnel", true)?;
             if matches!(
-                wire::udp_header_checksum(outer, outer.checksum_context, u16be(header, 6)),
+                wire::udp_checksum_if_captured(outer, outer.checksum_context, header)?,
                 Some(wire::Checksum::Invalid | wire::Checksum::NotChecked)
             ) {
                 return Ok(None);
             }
         }
         let extent = match purpose {
+            HeaderUse::Loss(_)
+                if outer.fragment.is_none()
+                    && outer.declared_payload_len == outer.payload.len() =>
+            {
+                TunnelExtent::Complete
+            }
             HeaderUse::Loss(_) => TunnelExtent::Prefix {
                 ip_length_known: datagram.fragment.is_none(),
             },

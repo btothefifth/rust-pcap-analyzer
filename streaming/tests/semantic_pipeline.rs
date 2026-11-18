@@ -1586,12 +1586,12 @@ mod provisional_transport {
                 assert_eq!(assert_pair(&capture(&frames), c, true).flows().len(), 1);
             }
         }
+        // Both client SYN extents include the acknowledged position.
         let frames = [
-            tcp(false, 100, 0, 2, &[]),
+            tcp(false, 100, 0, 2, REQUEST),
             tcp(true, 372, 101, 0x11, &[]),
             tcp(false, 107, 0, 2, &[]),
-            tcp(true, 501, 108, 0x10, &[]),
-            tcp(true, 500, 101, 0x12, &[]),
+            tcp(true, 500, 108, 0x12, &[]),
         ];
         let mut c = config();
         c.base.limits.max_stream_span = 128;
@@ -1603,6 +1603,149 @@ mod provisional_transport {
             .events
             .iter()
             .any(|e| e.data.encode().contains("ambiguous_generation")));
+    }
+
+    #[test]
+    fn syn_ack_matches_only_the_observed_peer_syn_extent() {
+        for isn in [100u32, u32::MAX - 5] {
+            for origin in [None, Some(372)] {
+                for offset in [0, 1, 6, 13, 14] {
+                    let mut frames = vec![tcp(false, isn, 0, 2, REQUEST)];
+                    if let Some(origin) = origin {
+                        frames.push(tcp(true, origin, isn.wrapping_add(1), 0x11, &[]));
+                    }
+                    frames.push(tcp(true, 500, isn.wrapping_add(offset), 0x12, &[]));
+                    frames.push(tcp(true, 501, isn.wrapping_add(13), 0x18, RESPONSE));
+                    let source = capture(&frames);
+                    let mut c = config();
+                    c.base.limits.max_stream_span = 128;
+                    c.window_payload = 128;
+                    let root = pcap_evidence::engine::analyze(&source, c.base.clone()).unwrap();
+                    let verified = (1..=13).contains(&offset);
+                    assert_eq!(
+                        root.transactions
+                            .iter()
+                            .any(|t| t.status == "candidate_pair"),
+                        verified
+                    );
+                    assert_eq!(
+                        run(&source, c).events.iter().any(|e| {
+                            e.kind == EventKind::Transaction
+                                && e.data.encode().contains("\"status\":\"candidate_pair\"")
+                        }),
+                        verified
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refusing_a_complete_fragment_set_respects_the_checksum_policy() {
+        for tunnel in [false, true] {
+            let wrap = |frame: Vec<u8>, reverse| {
+                if tunnel {
+                    tiny_capture::tunneled("vxlan", 7, reverse, &frame)
+                } else {
+                    frame
+                }
+            };
+            for invalid in [false, true] {
+                let mut duplicate = wrap(tcp(false, 113, 501, 0x18, REQUEST), false);
+                if invalid {
+                    let checksum = if tunnel { 40 } else { 50 };
+                    duplicate[checksum] ^= 1;
+                }
+                let size = duplicate.len() - 34;
+                let split = if tunnel { 72 } else { 24 };
+                for tail_first in [false, true] {
+                    let mut pieces = [
+                        ipv4_fragment(&duplicate, 0..split, true),
+                        ipv4_fragment(&duplicate, split..size, false),
+                    ];
+                    if tail_first {
+                        pieces.reverse();
+                    }
+                    let mut frames = vec![
+                        wrap(tcp(false, 100, 0, 2, &[]), false),
+                        wrap(tcp(true, 500, 101, 0x12, &[]), true),
+                        wrap(tcp(false, 101, 501, 0x18, REQUEST), false),
+                        wrap(tcp(true, 501, 113, 0x18, RESPONSE), true),
+                    ];
+                    frames.extend(pieces);
+                    for strict in [false, true] {
+                        let mut c = config();
+                        c.base.limits.max_fragments_per_set = 1;
+                        if strict {
+                            c.base.checksum_policy =
+                                pcap_evidence::wire::ChecksumPolicy::RequireValid;
+                        }
+                        let events = run(&capture(&frames), c).events;
+                        assert!(events
+                            .iter()
+                            .any(|e| e.data.encode().contains("fragment_context_reset")));
+                        assert_eq!(
+                            events
+                                .iter()
+                                .any(|e| e.data.encode().contains("read_mapping")),
+                            strict && invalid
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_reassembly_uses_the_generation_at_completion() {
+        let mut next = REQUEST.to_vec();
+        next[9] = 11;
+        let large = tcp(false, 113, 512, 0x18, &REQUEST.repeat(4));
+        let first = ipv4_fragment(&large, 0..24, true);
+        let last = ipv4_fragment(&large, 24..68, false);
+        for completion in [123, 124] {
+            for fragments in [
+                vec![large.clone()],
+                vec![first.clone(), last.clone()],
+                vec![last.clone(), first.clone()],
+            ] {
+                let mut frames = vec![
+                    tcp(false, 100, 0, 2, &[]),
+                    tcp(true, 500, 101, 0x12, &[]),
+                    tcp(false, 101, 501, 0x18, REQUEST),
+                    tcp(true, 501, 113, 0x18, RESPONSE),
+                    tcp(false, 100_000_000, 0, 2, &[]),
+                    tcp(true, 200_000_000, 100_000_001, 0x12, &[]),
+                ];
+                let mut seconds = vec![0, 1, 2, 3, 121, 122];
+                if fragments.len() == 2 {
+                    seconds.push(122);
+                }
+                frames.extend(fragments);
+                frames.push(tcp(false, 100_000_001, 200_000_001, 0x18, &next));
+                frames.push(tcp(true, 200_000_001, 100_000_013, 0x18, RESPONSE));
+                seconds.extend([completion, 126, 127]);
+                let mut c = config();
+                c.window_payload = 46;
+                let events = run(&timed_capture(&frames, &seconds), c).events;
+                let addresses: Vec<_> = events
+                    .iter()
+                    .filter(|e| {
+                        e.kind == EventKind::Transaction && e.data.encode().contains("read_mapping")
+                    })
+                    .map(|e| e.data.encode())
+                    .collect();
+                assert!(addresses
+                    .iter()
+                    .any(|v| v.contains("\"starting_address_zero_based\":11")));
+                assert_eq!(
+                    addresses
+                        .iter()
+                        .any(|v| v.contains("\"starting_address_zero_based\":9")),
+                    completion > 123
+                );
+            }
+        }
     }
 
     #[test]

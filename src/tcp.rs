@@ -337,6 +337,7 @@ struct Flow {
     generation: usize,
     key: FlowKey,
     syn: [Option<u32>; 2],
+    syn_sequence_len: [usize; 2],
     anchors: [Option<u32>; 2],
     fin: [bool; 2],
     fin_next: [Option<u32>; 2],
@@ -402,6 +403,7 @@ fn within_syn_span(sequence: u32, first: u32, max_span: i64) -> bool {
 impl Flow {
     fn reset_observations(&mut self) {
         self.syn = [None; 2];
+        self.syn_sequence_len = [0; 2];
         self.anchors = [None; 2];
         self.fin = [false; 2];
         self.fin_next = [None; 2];
@@ -418,6 +420,8 @@ impl Flow {
         let when = input.when;
         if segment.syn() {
             self.syn[direction] = Some(segment.sequence);
+            self.syn_sequence_len[direction] = self.syn_sequence_len[direction]
+                .max(1 + segment.payload.len() + usize::from(segment.fin()));
             self.anchors[direction] = Some(segment.data_sequence());
         } else {
             self.anchors[direction].get_or_insert(segment.data_sequence());
@@ -447,12 +451,19 @@ impl Flow {
         }
     }
 
+    // A SYN consumes one sequence number. The ACK may cover any prefix of
+    // the data on it, including none (RFC 9293, section 3.10.7.3).
+    fn acknowledges_syn(&self, peer: usize, ack: u32) -> Option<bool> {
+        let acknowledged = ack.wrapping_sub(self.syn[peer]?) as usize;
+        Some((1..=self.syn_sequence_len[peer]).contains(&acknowledged))
+    }
+
     /// A SYN-ACK that identifies the peer SYN can establish the missing sequence
     /// origin. A reset or a FIN consistent with that origin still closes the flow.
     fn completes_handshake(&self, direction: usize, isn: u32, ack: u32, max_span: i64) -> bool {
         if self.rst_seen
             || self.syn[direction].is_some()
-            || self.syn[1 - direction].is_none_or(|peer_isn| ack != peer_isn.wrapping_add(1))
+            || self.acknowledges_syn(1 - direction, ack) != Some(true)
         {
             return false;
         }
@@ -546,6 +557,9 @@ impl UnretainedHeader {
         self.syn_isn
             .zip(flow.syn[self.direction])
             .is_none_or(|(seen, assigned)| seen == assigned)
+            && self.syn_isn.zip(self.ack).is_none_or(|(_, ack)| {
+                flow.acknowledges_syn(1 - self.direction, ack) != Some(false)
+            })
             && flow.admits_stream_start(self.direction, self.sequence)
     }
 
@@ -605,6 +619,7 @@ impl TcpTracker {
             generation,
             key,
             syn: [None, None],
+            syn_sequence_len: [0; 2],
             anchors: [None, None],
             fin: [false, false],
             fin_next: [None, None],
@@ -669,29 +684,29 @@ impl TcpTracker {
         disposition: HeaderDisposition,
     ) -> Result<()> {
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
-        if let Some(previous) = self
-            .unretained
-            .get_mut(&key)
-            .and_then(|set| set.get_mut(&packet))
-        {
-            if disposition == HeaderDisposition::Omitted {
-                previous.disposition = disposition;
+        let previous = self.unretained.get(&key).and_then(|set| set.get(&packet));
+        if let Some(previous) = previous {
+            if previous.disposition == HeaderDisposition::Omitted
+                || disposition == HeaderDisposition::AwaitingReassembly
+            {
+                return Ok(());
             }
-            return Ok(());
-        }
-        if self.loss_count >= self.limits.max_records {
+            // The completed segment was omitted. Its completion time and
+            // generation history now replace the provisional fragment evidence.
+        } else if self.loss_count >= self.limits.max_records {
             return Err(Error::limit("unretained_tcp_headers"));
         }
+        let replacing = previous.is_some();
         if !self.unretained.contains_key(&key) && self.unretained.len() >= self.limits.max_flows {
             return Err(Error::limit("unretained_tcp_keys"));
         }
         let header = self.match_header(&key, direction, packet, when, segment, disposition)?;
         let headers = self.unretained.entry(key).or_default();
-        if headers.len() >= self.limits.max_segments_per_flow {
+        if !replacing && headers.len() >= self.limits.max_segments_per_flow {
             return Err(Error::limit("unretained_tcp_headers"));
         }
         headers.insert(packet, header);
-        self.loss_count += 1;
+        self.loss_count += usize::from(!replacing);
         Ok(())
     }
 
@@ -926,6 +941,13 @@ impl TcpTracker {
         for id in history {
             let f = &self.flows[*id];
             if !self.active_at(f, when) {
+                continue;
+            }
+            if segment.syn()
+                && segment.ack()
+                && f.acknowledges_syn(1 - direction, segment.acknowledgement) == Some(false)
+            {
+                conflicting_syn |= f.closed_at.is_none() && self.plausible(f, direction, segment);
                 continue;
             }
             if segment.syn()

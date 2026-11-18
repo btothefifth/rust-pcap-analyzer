@@ -977,9 +977,13 @@ impl State<'_> {
             )?;
         }
         if let Transport::Tcp(segment) = &transport {
-            if packets.len() > 1 && segment.payload.is_empty() {
-                // Adjudicate the fragment set before a capacity or idle cut can
-                // publish a transaction based on a provisional payload loss.
+            if packets.len() > 1
+                && (segment.payload.is_empty()
+                    || bytes > self.c.window_payload
+                    || packets.len() > self.c.window_packets)
+            {
+                // Replace all provisional witnesses before cutting the window or
+                // recording the completed segment as one confirmed omission.
                 self.resolve_header(scope.clone(), path.clone(), segment.header(), &packets);
             }
         }

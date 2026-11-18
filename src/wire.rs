@@ -214,12 +214,17 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
             )
         })?
         .packet;
+    let complete = d.fragment.is_none() && d.payload.len() == d.declared_payload_len;
+    let checksum_allowed = d.ip_checksum != Checksum::Invalid
+        && checksum_context != ChecksumContext::Unsupported
+        && (!complete
+            || checked_transport_checksum(d, checksum_context, 6, &d.payload.data()[offset..])?
+                == Checksum::Valid);
     Ok(Some(TcpHeaderObservation {
         header,
         packet,
         possible_payload: d.fragment.is_some() || d.declared_payload_len > offset + header_len,
-        checksum_allowed: d.ip_checksum != Checksum::Invalid
-            && checksum_context != ChecksumContext::Unsupported,
+        checksum_allowed,
     }))
 }
 
@@ -684,11 +689,8 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
                 ));
             }
             require(data, len, 0, "udp_payload")?;
-            let checksum = match udp_header_checksum(datagram, checksum_context, be16(&data[6..8]))
-            {
-                Some(verdict) => verdict,
-                None => checked_transport_checksum(datagram, checksum_context, 17, &data[..len])?,
-            };
+            let checksum = udp_checksum_if_captured(datagram, checksum_context, data)?
+                .ok_or_else(|| bad("udp_checksum", "missing complete UDP extent"))?;
             require_supported_checksum(checksum, policy)?;
             if policy == ChecksumPolicy::RequireValid && checksum == Checksum::Invalid {
                 return Err(Error::new(
@@ -738,6 +740,27 @@ pub fn udp_header_checksum(
     } else {
         None
     }
+}
+
+/// A UDP prefix can establish a checksum verdict from the header or once
+/// every byte covered by the UDP length has arrived.
+pub fn udp_checksum_if_captured(
+    datagram: &Datagram,
+    context: ChecksumContext,
+    bytes: &[u8],
+) -> Result<Option<Checksum>> {
+    require(bytes, 8, 0, "udp")?;
+    let len = usize::from(be16(&bytes[4..6]));
+    if len < 8 {
+        return Err(bad("udp_length", "UDP length smaller than header"));
+    }
+    if let Some(verdict) = udp_header_checksum(datagram, context, be16(&bytes[6..8])) {
+        return Ok(Some(verdict));
+    }
+    bytes
+        .get(..len)
+        .map(|udp| checked_transport_checksum(datagram, context, 17, udp))
+        .transpose()
 }
 
 fn checked_transport_checksum(
