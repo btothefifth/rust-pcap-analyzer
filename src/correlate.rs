@@ -212,11 +212,9 @@ pub(crate) fn transactions_with_flows(
                     if discontinuous
                         || application.direction > 1
                         || application.protocol != "modbus"
-                        || !message.shape_valid
-                        || !message.semantics_supported
-                        || message.role == Role::Unknown
                         || !mbap_matches
                         || capture.is_none()
+                        || !message.pairable_pdu()
                     {
                         if let Some(capture) = capture {
                             incomplete

@@ -207,6 +207,10 @@ receive the confirmed omission. Tunnel loss
 attribution honors enclosing IP and UDP lengths. Both captured and omitted payload must start at or after a
 generation's first payload sequence when that direction has an observed SYN.
 The comparison uses TCP sequence arithmetic and applies in either arrival order.
+If a snapped FIN lacks options but its declared lengths establish an empty
+payload, its sequence still supplies a possible stream end. A discrepancy with
+the retained data end or an admitted FIN withholds the affected mapping. A FIN
+at the established end preserves it.
 A late handshake rechecks earlier stream positions and loss observations against
 the observed initial sequence and configured span. Excluded packets remain in
 diagnostics. A SYN-ACK must acknowledge the peer SYN when it was observed.

@@ -18,7 +18,9 @@ generations through `Analysis::flows()`. Read the producing configuration with `
 Callers editing observations can use `applications().to_vec()` and pass the
 edited list to `correlate::transactions`. If a message’s transaction ID, unit,
 or function disagrees with its captured ADU, correlation marks it unclassified
-and uses the wire header to identify competing observations.
+and uses the wire header to identify competing observations. Correlation checks
+PDU shape and support against the current bytes and role, including after an
+edit to `raw`.
 
 The root crate is consumed through path dependencies within this repository and is unpublished.
 The change affects Rust source compatibility. Captures, the v1 semantic report

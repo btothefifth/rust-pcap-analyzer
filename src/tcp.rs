@@ -349,6 +349,8 @@ struct Flow {
     // FIN data positions in directions whose SYN has not yet supplied an origin.
     provisional_fin_starts: [BTreeSet<u32>; 2],
     fin_next: [Option<u32>; 2],
+    // Furthest retained payload end per direction, in TCP sequence space.
+    payload_end: [Option<u32>; 2],
     closed_at: Option<usize>,
     rst_seen: bool,
     first_payload_at: Option<usize>,
@@ -374,7 +376,7 @@ pub struct FlowResult {
     pub streams: [Option<StreamResult>; 2],
     pub reconstruction_errors: Vec<Error>,
     pub anomalies: Vec<&'static str>,
-    /// Earliest observed packet that could carry unretained data for this generation.
+    /// Earliest observed packet indicating possible missing data or a conflicting stream end.
     pub uncertain_payload: Option<PacketId>,
     /// Previously assigned segments excluded when a later SYN established the sequence range.
     pub outside_syn_span: Vec<PacketId>,
@@ -421,6 +423,7 @@ impl Flow {
         self.anchors = [None; 2];
         self.provisional_fin_starts = Default::default();
         self.fin_next = [None; 2];
+        self.payload_end = [None; 2];
         self.closed_at = None;
         self.rst_seen = false;
         self.first_payload_at = None;
@@ -452,6 +455,14 @@ impl Flow {
         }
         if !segment.payload.is_empty() {
             self.first_payload_at.get_or_insert(input.arrival.ordinal);
+            let end = segment
+                .data_sequence()
+                .wrapping_add(segment.payload.len() as u32);
+            if self.payload_end[direction]
+                .is_none_or(|last| sequence_delta(end, last).is_ok_and(|n| n > 0))
+            {
+                self.payload_end[direction] = Some(end);
+            }
         }
         if segment.fin() {
             if self.syn[direction].is_none() {
@@ -523,7 +534,18 @@ impl Flow {
             .or_else(|| ack.zip(self.anchors[1 - direction]));
         pair.is_none_or(|(seq, base)| sequence_delta(seq, base).is_ok_and(|d| d.abs() <= max_span))
     }
-    fn note_uncertain(&mut self, packet: PacketId) {
+    fn note_uncertain(&mut self, header: &UnretainedHeader) {
+        if header.empty_fin {
+            let direction = header.direction;
+            let end = self.payload_end[direction]
+                .or_else(|| self.syn[direction].map(|s| s.wrapping_add(1)));
+            let fin = self.fin_next[direction].map(|n| n.wrapping_sub(1));
+            if end.is_none_or(|n| n == header.sequence) && fin.is_none_or(|n| n == header.sequence)
+            {
+                return;
+            }
+        }
+        let packet = header.packet;
         self.uncertain_payload = Some(self.uncertain_payload.map_or(packet, |p| p.min(packet)));
     }
 }
@@ -548,6 +570,7 @@ struct UnretainedHeader {
     time: Option<i128>,
     direction: usize,
     sequence: u32,
+    empty_fin: bool,
     ack: Option<u32>,
     syn_isn: Option<u32>,
     arrival: Arrival,
@@ -565,6 +588,7 @@ impl UnretainedHeader {
             packet,
             time: when,
             direction,
+            empty_fin: segment.flags & 1 != 0 && segment.payload_len == Some(0),
             sequence: segment
                 .sequence
                 .wrapping_add(u32::from(segment.flags & 2 != 0)),
@@ -598,7 +622,7 @@ impl UnretainedHeader {
                         && self.candidate(flow, max_span) == Some(HeaderCandidate::Open)
                 });
             if let Some(id) = owner {
-                flows[id].note_uncertain(self.packet);
+                flows[id].note_uncertain(self);
             }
             return owner.is_some();
         }
@@ -615,7 +639,7 @@ impl UnretainedHeader {
         });
         if open {
             for candidate in &candidates {
-                flows[*candidate].note_uncertain(self.packet);
+                flows[*candidate].note_uncertain(self);
             }
         }
         open
@@ -711,6 +735,7 @@ impl TcpTracker {
             anchors: [None, None],
             provisional_fin_starts: Default::default(),
             fin_next: [None, None],
+            payload_end: [None; 2],
             closed_at: None,
             rst_seen: false,
             first_payload_at: None,
@@ -1309,7 +1334,7 @@ impl TcpTracker {
                         && header.within_final_idle(flow, self.idle_ns)
                         && header.candidate(flow, max_span).is_some()
                     {
-                        flow.note_uncertain(header.packet);
+                        flow.note_uncertain(&header);
                     }
                 }
             }

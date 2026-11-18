@@ -530,6 +530,10 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
         ("future", 1),
         ("tcp-options", 1),
         ("ack-options", 2),
+        ("fin-gap", 1),
+        ("fin-gap-snapped", 1),
+        ("fin-contiguous", 2),
+        ("fin-contiguous-snapped", 2),
         ("first-fragment", 1),
         ("noninitial-fragment", 2),
         ("incomplete-reassembly", 1),
@@ -558,16 +562,29 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
                     second
                 };
             }
+            name if name.starts_with("fin-") => {
+                let end = if name.starts_with("fin-gap") {
+                    1018
+                } else {
+                    1013
+                };
+                tail = tiny_capture::tcp_with_options(false, end, 5012, 0x11, &[1; 4], &[]);
+                if name.ends_with("snapped") {
+                    snapped_length = Some(tail.len() as u32);
+                    tail.truncate(54);
+                }
+            }
             "incomplete-reassembly" => tail = tiny_capture::ipv4_fragment(&tail, 0..24, true),
             "future" => tail = tcp(false, start + 13, peer + 12, 0x18, &request),
             "oversized" => tail = tcp(false, 1013, 5012, 0x18, &request.repeat(3)),
             "tcp-options" | "ack-options" | "first-fragment" | "noninitial-fragment" => {
                 if case.ends_with("options") {
-                    if case == "ack-options" {
-                        tail = tcp(false, 1013, 5012, 0x10, &[]);
-                    }
-                    tail[46] = 0x60;
-                    tail.splice(54..54, [1; 4]);
+                    let (flags, data) = if case == "ack-options" {
+                        (0x10, &[][..])
+                    } else {
+                        (0x18, &request[..])
+                    };
+                    tail = tiny_capture::tcp_with_options(false, 1013, 5012, flags, &[1; 4], data);
                 } else {
                     tail.truncate(58);
                     let bits = if case == "first-fragment" {
@@ -601,6 +618,9 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
         let mut limits = config.clone();
         if case != "oversized" {
             limits.window_payload = 4096;
+        }
+        if case.starts_with("fin-") || case.ends_with("options") {
+            limits.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
         }
         let snapshot = pcap_evidence::engine::analyze(&raw, limits.base.clone()).unwrap();
         assert_eq!(

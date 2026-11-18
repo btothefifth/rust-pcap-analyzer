@@ -95,6 +95,17 @@ pub fn tcp(
     flags: u8,
     payload: &[u8],
 ) -> Vec<u8> {
+    tcp_with_options(reverse, sequence, acknowledgment, flags, &[], payload)
+}
+pub fn tcp_with_options(
+    reverse: bool,
+    sequence: u32,
+    acknowledgment: u32,
+    flags: u8,
+    options: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    assert!(options.len() <= 40 && options.len() % 4 == 0);
     let (source, destination, a, b) = if reverse {
         ([10, 0, 0, 2], [10, 0, 0, 1], 2000u16, 1000u16)
     } else {
@@ -105,7 +116,9 @@ pub fn tcp(
     segment.extend_from_slice(&b.to_be_bytes());
     segment.extend_from_slice(&sequence.to_be_bytes());
     segment.extend_from_slice(&acknowledgment.to_be_bytes());
-    segment.extend_from_slice(&[0x50, flags, 0x20, 0, 0, 0, 0, 0]);
+    let data_offset = ((20 + options.len()) / 4) as u8;
+    segment.extend_from_slice(&[data_offset << 4, flags, 0x20, 0, 0, 0, 0, 0]);
+    segment.extend_from_slice(options);
     segment.extend_from_slice(payload);
     let mut pseudo = Vec::from(source);
     pseudo.extend_from_slice(&destination);

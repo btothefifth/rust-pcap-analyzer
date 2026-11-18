@@ -66,6 +66,8 @@ pub struct TcpHeader {
     pub sequence: u32,
     pub acknowledgement: u32,
     pub flags: u8,
+    /// Declared TCP payload size when the enclosing datagram extent is known.
+    pub payload_len: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +88,7 @@ impl TcpSegment {
             sequence: self.sequence,
             acknowledgement: self.acknowledgement,
             flags: self.flags,
+            payload_len: Some(self.payload.len()),
         }
     }
 
@@ -178,13 +181,13 @@ pub struct TcpHeaderObservation {
     pub packet_start: usize,
     pub header: TcpHeader,
     pub packet: PacketId,
-    possible_payload: bool,
+    possible_extent: bool,
     checksum_allowed: bool,
 }
 
 impl TcpHeaderObservation {
     pub fn possible_loss(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
-        (self.possible_payload && (policy == ChecksumPolicy::Observe || self.checksum_allowed))
+        (self.possible_extent && (policy == ChecksumPolicy::Observe || self.checksum_allowed))
             .then_some(self.header)
     }
 }
@@ -203,7 +206,7 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
     if protocol != 6 {
         return Ok(None);
     }
-    let (header, header_len) = tcp_identity(d, &d.payload.data()[offset..])?;
+    let (header, header_len) = tcp_identity(d, offset)?;
     let spans = d.payload.spans();
     let span = spans
         .get(spans.partition_point(|s| s.end <= offset))
@@ -228,7 +231,9 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
             .packet_start
             .checked_add(offset - span.start)
             .ok_or_else(|| Error::limit("tcp_header_offset"))?,
-        possible_payload: d.fragment.is_some() || d.declared_payload_len > offset + header_len,
+        possible_extent: d.fragment.is_some()
+            || d.declared_payload_len > offset + header_len
+            || (header.flags & 1 != 0 && header.payload_len == Some(0)),
         checksum_allowed,
     }))
 }
@@ -575,7 +580,8 @@ pub fn ipv6_checksum_context(protocol: u8, header: &[u8]) -> Result<ChecksumCont
 /// Bytes through the TCP flags, required for generation attribution.
 pub const TCP_IDENTITY_BYTES: usize = 14;
 
-fn tcp_identity(datagram: &Datagram, data: &[u8]) -> Result<(TcpHeader, usize)> {
+fn tcp_identity(datagram: &Datagram, offset: usize) -> Result<(TcpHeader, usize)> {
+    let data = &datagram.payload.data()[offset..];
     require(data, TCP_IDENTITY_BYTES, 0, "tcp_identity")?;
     let header = usize::from(data[12] >> 4) * 4;
     if header < 20 {
@@ -594,6 +600,11 @@ fn tcp_identity(datagram: &Datagram, data: &[u8]) -> Result<(TcpHeader, usize)> 
             sequence: be32(&data[4..8]),
             acknowledgement: be32(&data[8..12]),
             flags: data[13],
+            payload_len: if datagram.fragment.is_none() {
+                datagram.declared_payload_len.checked_sub(offset + header)
+            } else {
+                None
+            },
         },
         header,
     ))
@@ -665,7 +676,7 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
     match protocol {
         6 => {
             require(data, 20, 0, "tcp")?;
-            let (fixed, header) = tcp_identity(datagram, data)?;
+            let (fixed, header) = tcp_identity(datagram, prefix)?;
             require(data, header, 0, "tcp_options")?;
             let checksum = checked_transport_checksum(datagram, checksum_context, 6, data)?;
             require_supported_checksum(checksum, policy)?;

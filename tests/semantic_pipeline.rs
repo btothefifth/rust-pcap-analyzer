@@ -270,34 +270,40 @@ fn snapshot_line_enforces_a_shared_byte_budget_across_decoded_messages() {
     }
 }
 
+fn read_message(
+    key: (u16, u8, u8),
+    role: pcap_evidence::modbus::Role,
+    frame: u64,
+) -> pcap_evidence::modbus::ModbusMessage {
+    use pcap_evidence::{
+        modbus::{ModbusMessage, Role},
+        provenance::{EvidenceBytes, PacketId},
+    };
+    let (tx, unit, function) = key;
+    let [hi, lo] = tx.to_be_bytes();
+    let mut adu = vec![hi, lo, 0, 0, 0, 6, unit, function];
+    if role == Role::Request {
+        adu.extend([0, 9, 0, 1]);
+    } else {
+        adu[5] = 5;
+        adu.extend([2, 0, 42]);
+    }
+    let packet = PacketId {
+        capture: [7; 32],
+        frame,
+        record_offset: frame * 100,
+    };
+    ModbusMessage::from_adu(EvidenceBytes::from_packet(&adu, packet, 54), role, 0, true).unwrap()
+}
+
 #[test]
 fn edited_mbap_fields_compete_under_the_observed_key() {
     use pcap_evidence::{
         correlate::{transactions, MessageRef},
         engine::{ApplicationAnalysis, ApplicationData},
-        modbus::{ModbusMessage, ModbusResult, Role},
-        provenance::{EvidenceBytes, PacketId},
+        modbus::{ModbusResult, Role},
         Limits,
     };
-
-    fn message(key: (u16, u8, u8), role: Role, frame: u64) -> ModbusMessage {
-        let (tx, unit, function) = key;
-        let [hi, lo] = tx.to_be_bytes();
-        let mut adu = vec![hi, lo, 0, 0, 0, 6, unit, function];
-        if role == Role::Request {
-            adu.extend([0, 9, 0, 1]);
-        } else {
-            adu[5] = 5;
-            adu.extend([2, 0, 42]);
-        }
-        let packet = PacketId {
-            capture: [7; 32],
-            frame,
-            record_offset: frame * 100,
-        };
-        ModbusMessage::from_adu(EvidenceBytes::from_packet(&adu, packet, 54), role, 0, true)
-            .unwrap()
-    }
 
     let wire = (1, 2, 3);
     for peer in [(11, 2, 3), (1, 12, 3), (1, 2, 4)] {
@@ -306,10 +312,10 @@ fn edited_mbap_fields_compete_under_the_observed_key() {
             for (direction, side) in [Role::Request, Role::Response].into_iter().enumerate() {
                 let mut result = ModbusResult::default();
                 let frame = direction as u64 + 1;
-                result.messages.push(message(wire, side, frame));
-                result.messages.push(message(peer, side, frame + 2));
+                result.messages.push(read_message(wire, side, frame));
+                result.messages.push(read_message(peer, side, frame + 2));
                 if side == role {
-                    let mut edited = message(wire, side, 5);
+                    let mut edited = read_message(wire, side, 5);
                     (edited.transaction, edited.unit, edited.function) = peer;
                     result.messages.push(edited);
                 }
@@ -351,6 +357,86 @@ fn edited_mbap_fields_compete_under_the_observed_key() {
                     .collect::<Vec<_>>(),
                 [witness]
             );
+        }
+    }
+}
+
+#[test]
+fn edited_pdu_shape_is_classified_like_a_fresh_observation() {
+    use pcap_evidence::{
+        correlate::transactions,
+        engine::{ApplicationAnalysis, ApplicationData},
+        modbus::{ModbusMessage, ModbusResult, Role},
+        provenance::EvidenceBytes,
+        Limits,
+    };
+    let key = (1, 2, 3);
+    for role in [Role::Request, Role::Response] {
+        let good = read_message(key, role, 1);
+        let mut bytes = good.raw.data().to_vec();
+        match role {
+            Role::Request => bytes[11] = 0, // Zero register quantity.
+            Role::Response => bytes[8] = 4, // Only two register bytes follow.
+            Role::Unknown => unreachable!(),
+        }
+        let raw = EvidenceBytes::from_packet(&bytes, good.raw.spans()[0].packet, 54);
+        let fresh = ModbusMessage::from_adu(raw.clone(), role, 0, true).unwrap();
+        let mut restored = fresh.clone();
+        restored.raw = good.raw.clone();
+        let matches_peer = |message: &ModbusMessage| match role {
+            Role::Request => pcap_evidence::modbus::response_matches(
+                message,
+                &read_message(key, Role::Response, 2),
+            ),
+            Role::Response => pcap_evidence::modbus::response_matches(
+                &read_message(key, Role::Request, 2),
+                message,
+            ),
+            Role::Unknown => unreachable!(),
+        };
+        let mut edited = good;
+        edited.raw = raw;
+        assert!(!fresh.shape_valid && edited.shape_valid);
+        assert!(!matches_peer(&edited));
+        assert!(!restored.shape_valid && matches_peer(&restored));
+        for peer_present in [false, true] {
+            for observed in [&fresh, &edited] {
+                let mut apps = Vec::new();
+                for (direction, side) in [Role::Request, Role::Response].into_iter().enumerate() {
+                    let mut result = ModbusResult::default();
+                    result
+                        .messages
+                        .push(read_message((2, 2, 3), side, 3 + direction as u64));
+                    if side == role {
+                        result.messages.push(observed.clone());
+                    } else if peer_present {
+                        result.messages.push(read_message(key, side, 2));
+                    }
+                    apps.push(ApplicationAnalysis {
+                        flow: 0,
+                        direction,
+                        protocol: "modbus",
+                        data: ApplicationData::Modbus(result),
+                    });
+                }
+                let rows = transactions(&apps, &Limits::default()).unwrap();
+                let statuses: Vec<_> = rows.iter().map(|r| r.status).collect();
+                assert_eq!(statuses.iter().filter(|&&s| s == "unclassified").count(), 1);
+                assert_eq!(
+                    statuses.iter().filter(|&&s| s == "candidate_pair").count(),
+                    1
+                );
+                let pair = rows.iter().find(|r| r.status == "candidate_pair").unwrap();
+                assert_eq!(pair.requests[0].message, 0);
+                assert_eq!(pair.responses[0].message, 0);
+                assert_eq!(rows.len(), if peer_present { 3 } else { 2 });
+                if peer_present {
+                    assert!(rows
+                        .iter()
+                        .any(|r| r.reason == "competing_modbus_observation"
+                            && r.status == "ambiguous"));
+                }
+            }
         }
     }
 }

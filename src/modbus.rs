@@ -117,19 +117,38 @@ impl ModbusMessage {
             && self.function == raw[7]
     }
 
-    pub(crate) fn interpretation(&self, role: Role) -> Result<pdu::Pdu> {
-        if self.raw.data() == self.parsed.bytes.as_ref() {
-            if self.parsed.role == role {
-                return self.parsed.pdu.clone();
-            }
-            if role == Role::Response {
-                if let Some(result) = &self.parsed.other_role {
-                    return result.clone();
-                }
-            }
+    fn cached_interpretation(&self, role: Role) -> Option<&Result<pdu::Pdu>> {
+        if self.raw.data() != self.parsed.bytes.as_ref() {
+            return None;
         }
-        pdu::parse(self.raw.data().get(7..).unwrap_or_default(), role)
+        if self.parsed.role == role {
+            Some(&self.parsed.pdu)
+        } else if role == Role::Response {
+            self.parsed.other_role.as_ref()
+        } else {
+            None
+        }
     }
+
+    pub(crate) fn interpretation(&self, role: Role) -> Result<pdu::Pdu> {
+        self.cached_interpretation(role)
+            .cloned()
+            .unwrap_or_else(|| pdu::parse(self.raw.data().get(7..).unwrap_or_default(), role))
+    }
+
+    pub(crate) fn pairable_pdu(&self) -> bool {
+        let bytes = self.raw.data().get(7..).unwrap_or_default();
+        if self.role == Role::Unknown || !pdu::supported(bytes) {
+            return false;
+        }
+        match self.cached_interpretation(self.role) {
+            Some(result) => result.as_ref().is_ok_and(pdu::Pdu::complete),
+            None => pdu::parse(bytes, self.role)
+                .as_ref()
+                .is_ok_and(pdu::Pdu::complete),
+        }
+    }
+
     pub(crate) fn binding(&self) -> MessageBinding {
         MessageBinding {
             parsed: self.parsed.clone(),
@@ -408,15 +427,10 @@ pub(crate) fn pair_summaries(
     request: &ModbusMessage,
     response: &ModbusMessage,
 ) -> Option<(transaction::Summary, transaction::Summary)> {
-    if !pdu::supported(request.raw.data().get(7..).unwrap_or_default())
-        || !request.raw.validate()
+    if !request.raw.validate()
         || !response.raw.validate()
         || request.role != Role::Request
         || response.role != Role::Response
-        || !request.shape_valid
-        || !response.shape_valid
-        || !request.semantics_supported
-        || !response.semantics_supported
         || request.transaction != response.transaction
         || request.unit != response.unit
         || request.function != (response.function & 0x7f)
@@ -428,6 +442,9 @@ pub(crate) fn pair_summaries(
     }
     let req = request.raw.data();
     let rsp = response.raw.data();
+    if !pdu::supported(&req[7..]) || !pdu::supported(&rsp[7..]) {
+        return None;
+    }
     Some((
         transaction::Summary::from_pdu(&req[7..], &request.interpretation(Role::Request).ok()?)?,
         transaction::Summary::from_pdu(&rsp[7..], &response.interpretation(Role::Response).ok()?)?,
