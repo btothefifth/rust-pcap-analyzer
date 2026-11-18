@@ -269,3 +269,88 @@ fn snapshot_line_enforces_a_shared_byte_budget_across_decoded_messages() {
         }
     }
 }
+
+#[test]
+fn edited_mbap_fields_compete_under_the_observed_key() {
+    use pcap_evidence::{
+        correlate::{transactions, MessageRef},
+        engine::{ApplicationAnalysis, ApplicationData},
+        modbus::{ModbusMessage, ModbusResult, Role},
+        provenance::{EvidenceBytes, PacketId},
+        Limits,
+    };
+
+    fn message(key: (u16, u8, u8), role: Role, frame: u64) -> ModbusMessage {
+        let (tx, unit, function) = key;
+        let [hi, lo] = tx.to_be_bytes();
+        let mut adu = vec![hi, lo, 0, 0, 0, 6, unit, function];
+        if role == Role::Request {
+            adu.extend([0, 9, 0, 1]);
+        } else {
+            adu[5] = 5;
+            adu.extend([2, 0, 42]);
+        }
+        let packet = PacketId {
+            capture: [7; 32],
+            frame,
+            record_offset: frame * 100,
+        };
+        ModbusMessage::from_adu(EvidenceBytes::from_packet(&adu, packet, 54), role, 0, true)
+            .unwrap()
+    }
+
+    let wire = (1, 2, 3);
+    for peer in [(11, 2, 3), (1, 12, 3), (1, 2, 4)] {
+        for role in [Role::Request, Role::Response] {
+            let mut apps = Vec::new();
+            for (direction, side) in [Role::Request, Role::Response].into_iter().enumerate() {
+                let mut result = ModbusResult::default();
+                let frame = direction as u64 + 1;
+                result.messages.push(message(wire, side, frame));
+                result.messages.push(message(peer, side, frame + 2));
+                if side == role {
+                    let mut edited = message(wire, side, 5);
+                    (edited.transaction, edited.unit, edited.function) = peer;
+                    result.messages.push(edited);
+                }
+                apps.push(ApplicationAnalysis {
+                    flow: 0,
+                    direction,
+                    protocol: "modbus",
+                    data: ApplicationData::Modbus(result),
+                });
+            }
+            let rows = transactions(&apps, &Limits::default()).unwrap();
+            let at = |application, message| MessageRef {
+                application,
+                message,
+            };
+            assert_eq!(rows.len(), 3);
+            let pair = rows
+                .iter()
+                .find(|row| row.status == "candidate_pair")
+                .unwrap();
+            assert_eq!(pair.requests, [at(0, 1)]);
+            assert_eq!(pair.responses, [at(1, 1)]);
+            let ambiguous = rows.iter().find(|row| row.status == "ambiguous").unwrap();
+            assert_eq!(ambiguous.reason, "competing_modbus_observation");
+            assert_eq!(ambiguous.requests, [at(0, 0)]);
+            assert_eq!(ambiguous.responses, [at(1, 0)]);
+            let edited = rows
+                .iter()
+                .find(|row| row.status == "unclassified")
+                .unwrap();
+            assert_eq!(edited.reason, "modbus_mbap_metadata_mismatch");
+            let witness = at(usize::from(role == Role::Response), 2);
+            assert_eq!(
+                edited
+                    .requests
+                    .iter()
+                    .chain(&edited.responses)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [witness]
+            );
+        }
+    }
+}

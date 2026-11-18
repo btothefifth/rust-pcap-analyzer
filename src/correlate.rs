@@ -208,12 +208,14 @@ pub(crate) fn transactions_with_flows(
                         .filter(|work| *work <= limits.max_correlation_checks)
                         .ok_or_else(|| Error::limit("transaction_capture_scope_work"))?;
                     let capture = message.raw.capture_scope();
+                    let mbap_matches = message.mbap_matches_fields();
                     if discontinuous
                         || application.direction > 1
                         || application.protocol != "modbus"
                         || !message.shape_valid
                         || !message.semantics_supported
                         || message.role == Role::Unknown
+                        || !mbap_matches
                         || capture.is_none()
                     {
                         if let Some(capture) = capture {
@@ -248,6 +250,8 @@ pub(crate) fn transactions_with_flows(
                                 "modbus_transport_discontinuity"
                             } else if capture.is_none() {
                                 "modbus_transaction_capture_scope_invalid"
+                            } else if !mbap_matches {
+                                "modbus_mbap_metadata_mismatch"
                             } else {
                                 "invalid_or_unsupported_pdu_shape_or_endpoint_role"
                             },

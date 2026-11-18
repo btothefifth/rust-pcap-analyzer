@@ -16,7 +16,9 @@ For a complete datagram constructed by a caller, use the payload's byte length.
 Read finalized snapshot observations through `Analysis::applications()` and transport
 generations through `Analysis::flows()`. Read the producing configuration with `Analysis::config()`.
 Callers editing observations can use `applications().to_vec()` and pass the
-edited list to `correlate::transactions`.
+edited list to `correlate::transactions`. If a message’s transaction ID, unit,
+or function disagrees with its captured ADU, correlation marks it unclassified
+and uses the wire header to identify competing observations.
 
 The root crate is consumed through path dependencies within this repository and is unpublished.
 The change affects Rust source compatibility. Captures, the v1 semantic report

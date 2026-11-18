@@ -109,6 +109,14 @@ impl ModbusMessage {
             raw,
         })
     }
+    pub(crate) fn mbap_matches_fields(&self) -> bool {
+        let raw = self.raw.data();
+        crate::semantics::modbus::envelope(raw).is_ok()
+            && self.transaction == be16(&raw[..2])
+            && self.unit == raw[6]
+            && self.function == raw[7]
+    }
+
     pub(crate) fn interpretation(&self, role: Role) -> Result<pdu::Pdu> {
         if self.raw.data() == self.parsed.bytes.as_ref() {
             if self.parsed.role == role {
@@ -415,16 +423,7 @@ pub(crate) fn pair_summaries(
     {
         return None;
     }
-    fn metadata_agrees(message: &ModbusMessage) -> bool {
-        let raw = message.raw.data();
-        raw.len() >= 8
-            && be16(&raw[2..4]) == 0
-            && usize::from(be16(&raw[4..6])) + 6 == raw.len()
-            && message.transaction == be16(&raw[..2])
-            && message.unit == raw[6]
-            && message.function == raw[7]
-    }
-    if !metadata_agrees(request) || !metadata_agrees(response) {
+    if !request.mbap_matches_fields() || !response.mbap_matches_fields() {
         return None;
     }
     let req = request.raw.data();

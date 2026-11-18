@@ -221,6 +221,7 @@
     "semantic_pipeline::moving_a_pair_to_another_flow_or_capture_invalidates_its_mapping",
     "semantic_pipeline::partial_mbap_requires_one_capture_to_compete_with_a_pair",
     "semantic_pipeline::snapshot_line_enforces_a_shared_byte_budget_across_decoded_messages",
+    "semantic_pipeline::edited_mbap_fields_compete_under_the_observed_key",
     "semantic_subset::dnp_read_classes_have_no_invented_values",
     "semantic_subset::dnp_packed_range_does_not_emit_padding_points",
     "semantic_subset::dnp_flags_retained_and_bit_seven_decoded",
