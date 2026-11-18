@@ -439,8 +439,7 @@ fn a_sparse_selection_obeys_the_same_work_limit_at_any_page_size() {
     }
 }
 
-#[test]
-fn a_paged_gap_emits_one_boundary_with_the_discarded_prefix() {
+fn history_with_gap(config: Config) -> (Temp, History, [u8; 32]) {
     let temp = Temp::new();
     let source = temp.source(&[
         tcp(false, 100, 0, 2, &[]),
@@ -448,15 +447,132 @@ fn a_paged_gap_emits_one_boundary_with_the_discarded_prefix() {
         tcp(false, 105, 0, 0x18, &[0, 1, 0, 0, 0, 4, 1, 24, 0, 7]),
     ]);
     let workspace = temp.0.join("history");
-    analyze_file(
-        &source,
-        &workspace,
-        Config::default(),
-        &Cancellation::default(),
-    )
-    .unwrap();
+    analyze_file(&source, &workspace, config, &Cancellation::default()).unwrap();
     let mut history = History::open(&source, &workspace).unwrap();
     let generation = history.generations(None, 10).unwrap()[0];
+    (temp, history, generation)
+}
+
+#[test]
+fn mixed_sparse_pages_fit_the_work_limit_without_changing_the_event_chain() {
+    let (_temp, mut history, generation) = history_with_gap(Config {
+        max_query_work: 512,
+        ..Config::default()
+    });
+    assert_eq!(
+        history.range(generation, 0, 0, 512).unwrap_err().field,
+        "query_work"
+    );
+    assert_eq!(
+        history
+            .evidence_range(generation, 0, 0, 512)
+            .unwrap_err()
+            .field,
+        "query_work"
+    );
+    for (end, budget) in [(512, 512), (120, 127)] {
+        history.config.max_query_work = budget;
+        let mut reference = None;
+        for page_bytes in [1, 16, 512] {
+            let request = Request {
+                generation,
+                direction: 0,
+                start: 0,
+                end,
+                page_bytes,
+                max_output_bytes: 65536,
+                protocol: "modbus".into(),
+                ua_security_none: false,
+            };
+            let mut output = Vec::new();
+            let result = analyze(
+                &mut history,
+                &request,
+                Limits::default(),
+                &mut output,
+                &AtomicBool::new(false),
+            );
+            let events = String::from_utf8(output).unwrap();
+            if end == 512 {
+                result.unwrap();
+                assert_eq!(events.matches(r#""kind":"protocol.message""#).count(), 1);
+                assert!(events.contains(r#""start":"14","end":"512""#));
+                assert!(events.contains("analysis.complete"));
+            } else {
+                assert_eq!(result.unwrap_err().field, "query_work");
+                assert!(events.contains(r#""consumed_until":"0""#));
+            }
+            assert_eq!(reference.get_or_insert_with(|| events.clone()), &events);
+        }
+    }
+}
+
+#[test]
+fn cancellation_from_the_event_writer_aborts_at_the_published_prefix() {
+    use std::io::{self, Write};
+    use std::sync::atomic::Ordering;
+
+    struct CancelOnEvent<'a> {
+        flag: &'a AtomicBool,
+        trigger: String,
+        output: Vec<u8>,
+    }
+    impl Write for CancelOnEvent<'_> {
+        fn write(&mut self, line: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(line);
+            if std::str::from_utf8(line).unwrap().contains(&self.trigger) {
+                self.flag.store(true, Ordering::Relaxed);
+            }
+            Ok(line.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let (_temp, mut history, generation) = history_with_gap(Config::default());
+    for (start, end, trigger, until) in [
+        (4, 128, "protocol.message", 14),
+        (4, 14, "protocol.message", 14),
+        (4, 128, "application.boundary", 128),
+        (0, 2, "application.incomplete", 2),
+    ] {
+        let request = Request {
+            generation,
+            direction: 0,
+            start,
+            end,
+            page_bytes: 16,
+            max_output_bytes: 65536,
+            protocol: "modbus".into(),
+            ua_security_none: false,
+        };
+        let cancel = AtomicBool::new(false);
+        let mut writer = CancelOnEvent {
+            flag: &cancel,
+            trigger: format!(r#""kind":"{trigger}""#),
+            output: Vec::new(),
+        };
+        let result = analyze(
+            &mut history,
+            &request,
+            Limits::default(),
+            &mut writer,
+            &cancel,
+        );
+        assert_eq!(result.unwrap_err().field, "history_app_cancelled");
+        let events = String::from_utf8(writer.output).unwrap();
+        let mut lines = events.lines().rev();
+        let abort = lines.next().unwrap();
+        assert!(abort.contains(r#""kind":"analysis.aborted""#));
+        assert!(abort.contains(&format!(r#""consumed_until":"{until}""#)));
+        assert!(lines.next().unwrap().contains(&writer.trigger));
+        assert!(!events.contains("analysis.complete"));
+    }
+}
+
+#[test]
+fn a_paged_gap_emits_one_boundary_with_the_discarded_prefix() {
+    let (_temp, mut history, generation) = history_with_gap(Config::default());
     for end in [4, 14] {
         let mut request = Request {
             generation,

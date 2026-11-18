@@ -1,7 +1,7 @@
 //! Finalized disk history -> bounded stateful application interpretation.
 //! Does not assert complete endpoint execution or repair an ambiguous transport.
 #![forbid(unsafe_code)]
-use pcap_evidence::{json::Json, sha256, Error, Result};
+use pcap_evidence::{json::Json, sha256, Error, ErrorCode, Result};
 use pcap_evidence_history::query::History;
 use pcap_evidence_product::deep::{continuation::Parser, Context, Limits, Report};
 use std::io::Write;
@@ -24,8 +24,8 @@ struct Boundary {
 }
 
 impl Boundary {
-    fn emit(self, emit: &mut impl FnMut(&'static str, Json) -> Result<()>) -> Result<i64> {
-        emit(
+    fn emit(self, publish: &mut impl FnMut(&'static str, Json, i64) -> Result<()>) -> Result<()> {
+        publish(
             "application.boundary",
             Json::object([
                 ("start", self.start.to_string().into()),
@@ -33,10 +33,23 @@ impl Boundary {
                 ("transport_status", self.status.into()),
                 ("report", self.discarded.json()),
             ]),
-        )?;
-        Ok(self.end)
+            self.end,
+        )
     }
 }
+
+fn page_limit(error: &Error) -> bool {
+    error.code == ErrorCode::LimitExceeded
+        && matches!(
+            error.field,
+            "query_work"
+                | "query_scan"
+                | "query_intervals"
+                | "query_evidence_references"
+                | "report_bytes"
+        )
+}
+
 pub fn analyze<W: Write>(
     history: &mut History,
     request: &Request,
@@ -109,26 +122,50 @@ pub fn analyze<W: Write>(
             ("page_boundaries_reset_protocol", false.into()),
         ]),
     )?;
-    let mut remaining_frames = l.elements;
+    let check_cancelled = || {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            Err(Error::limit("history_app_cancelled"))
+        } else {
+            Ok(())
+        }
+    };
     let mut completed_until = request.start;
+    let mut publish = |kind, data, through| {
+        check_cancelled()?;
+        emit(kind, data)?;
+        completed_until = through;
+        check_cancelled()
+    };
+    let mut remaining_frames = l.elements;
     let mut at = request.start;
     let mut boundary: Option<Boundary> = None;
     let read_result = (|| -> Result<()> {
+        check_cancelled()?;
         if request.start.abs_diff(request.end) > history.config.max_query_work {
             return Err(Error::limit("history_app_range_work"));
         }
+        let mut page_bytes = request.page_bytes;
         while at < request.end {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(Error::limit("history_app_cancelled"));
-            }
-            let pieces = history.evidence_page(
+            check_cancelled()?;
+            let width = at.abs_diff(request.end).min(page_bytes as u64) as usize;
+            let pieces = match history.evidence_page(
                 request.generation,
                 request.direction,
                 at,
                 request.end,
-                request.page_bytes,
-            )?;
+                width,
+            ) {
+                Ok(pieces) => pieces,
+                Err(error) if width > 1 && page_limit(&error) => {
+                    // A refused read produced no pieces. Keep the smaller size
+                    // for later reads so a selection only pays for each retry once.
+                    page_bytes = width / 2;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             for p in pieces {
+                check_cancelled()?;
                 at = p.end;
                 if let Some(gap) = &mut boundary {
                     if p.bytes.is_none() && gap.end == p.start && gap.status == p.status {
@@ -137,7 +174,7 @@ pub fn analyze<W: Write>(
                     }
                 }
                 if let Some(gap) = boundary.take() {
-                    completed_until = gap.emit(&mut emit)?;
+                    gap.emit(&mut publish)?;
                 }
                 if let Some(bytes) = p.bytes {
                     parser.feed_with_quota(
@@ -145,7 +182,7 @@ pub fn analyze<W: Write>(
                         &bytes,
                         &mut remaining_frames,
                         &mut |record| {
-                            emit(
+                            publish(
                                 "protocol.message",
                                 Json::object([
                                     (
@@ -162,9 +199,8 @@ pub fn analyze<W: Write>(
                                     ),
                                     ("report", record.report.json()),
                                 ]),
-                            )?;
-                            completed_until = record.stream_end;
-                            Ok(())
+                                record.stream_end,
+                            )
                         },
                     )?;
                 } else {
@@ -181,13 +217,14 @@ pub fn analyze<W: Write>(
     })();
     let result = (|| -> Result<()> {
         if let Some(gap) = boundary {
-            completed_until = gap.emit(&mut emit)?;
+            gap.emit(&mut publish)?;
         }
         read_result?;
+        check_cancelled()?;
         if let Some(report) = parser.finish()? {
-            emit("application.incomplete", report.json())?;
+            publish("application.incomplete", report.json(), request.end)?;
         }
-        Ok(())
+        check_cancelled()
     })();
     match result {
         Ok(()) => emit(

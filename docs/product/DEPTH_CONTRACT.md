@@ -176,8 +176,13 @@ placement in that direction or the end of the selection. Before reading the
 first page, the consumer checks the selection length against the history's
 `max_query_work` allowance (one unit per selected byte, including gaps).
 An oversized selection aborts at its starting offset with
-`history_app_range_work`. The index and witness work limits still apply to each
-page.
+`history_app_range_work`. Each history query still enforces its own limits.
+If a page exceeds its scan, work, evidence-reference, interval or encoded-report
+limit, the application reader halves the read size and retries at the same
+offset. It keeps the smaller size for the rest of the selection. If a single
+byte cannot be queried within the limit, the analysis aborts with the query
+error. Direct `range` and `evidence_range` calls evaluate the requested interval
+in one query.
 
 The history application consumer emits a hash-chained NDJSON sequence:
 analysis.start, zero or more message/boundary events, optional incomplete or
@@ -185,6 +190,12 @@ aborted evidence, and analysis.complete. A complete event means that the
 selected verified range was consumed; it never means complete endpoint history.
 The output is no-clobber and uses a partial file until the final hard-link
 publication succeeds.
+
+Library cancellation is cooperative. The reader checks the flag between pages,
+between pieces, and before publishing further results. If an event writer
+requests cancellation while writing a nonterminal event, that event stays in
+the chain. The reader returns
+`history_app_cancelled` and appends an abort event if output space permits.
 
 The history application CLI selects the full direction and allows 1,024 framed
 units across that range. If a 1,025th unit is reached, the CLI exits with code 4
