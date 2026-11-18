@@ -173,6 +173,10 @@ enum WindowInput<'a> {
     Udp,
     Header(wire::TcpHeader, HeaderDisposition),
 }
+enum LayerReassembly {
+    Complete(wire::Datagram, Vec<PacketId>),
+    Incomplete { quarantined: bool },
+}
 struct LayerContext<'a> {
     ancestors: &'a [PacketId],
     path: Vec<String>,
@@ -365,7 +369,7 @@ impl State<'_> {
             '_,
             Option<network::PrefixHeader>,
         >,
-    ) -> Result<Option<(wire::Datagram, Vec<PacketId>)>> {
+    ) -> Result<LayerReassembly> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
                 let oldest = self
@@ -396,6 +400,7 @@ impl State<'_> {
             );
         }
         let contributors = d.payload.packets();
+        let mut quarantined = false;
         let result = {
             let slot = self
                 .fragments
@@ -408,7 +413,8 @@ impl State<'_> {
                 ancestors,
                 Some(inspect),
                 |_, previous, packets| {
-                    if let Some(header) = previous {
+                    quarantined = true;
+                    if let Some(header) = previous.flatten() {
                         let (scope, path, segment, _) = header.path;
                         if segment.payload_len == Some(0) {
                             let (key, _) = Key::new(
@@ -429,11 +435,11 @@ impl State<'_> {
             )
         };
         match result {
-            Ok(FragmentOutcome::Pending) => Ok(None),
-            Ok(FragmentOutcome::Complete(d, ids)) => Ok(Some((d, ids))),
+            Ok(FragmentOutcome::Pending) => Ok(LayerReassembly::Incomplete { quarantined }),
+            Ok(FragmentOutcome::Complete(d, ids)) => Ok(LayerReassembly::Complete(d, ids)),
             Ok(FragmentOutcome::Rejected(n)) => {
                 self.fragment_notice(n)?;
-                Ok(None)
+                Ok(LayerReassembly::Incomplete { quarantined })
             }
             Err(error) => {
                 // Never silently discard a contradictory fragment and continue
@@ -450,7 +456,7 @@ impl State<'_> {
                     contributors,
                     EvidenceStatus::Incomplete,
                 )?;
-                Ok(None)
+                Ok(LayerReassembly::Incomplete { quarantined })
             }
         }
     }
@@ -693,32 +699,39 @@ impl State<'_> {
                 }
             }
         };
-        let Some((datagram, mut contributors)) =
-            self.reassemble(d, &path, frame, ancestors, &mut inspect)?
-        else {
-            if let Some((scope, path, segment, packets)) = resolved {
-                self.resolve_header(scope, path, segment, &packets);
-            }
-            if let Some(header) = header {
-                if !refine_packets.is_empty() {
-                    let (scope, path, segment, _) = &header;
-                    let (key, _) = Key::new(
-                        scope.clone(),
-                        path.clone(),
-                        6,
-                        segment.source,
-                        segment.destination,
-                    );
-                    if let Some(tracker) =
-                        self.active.get_mut(&key).and_then(|a| a.tracker.as_mut())
-                    {
-                        tracker.refine_reassembly_extent(scope, *segment, &refine_packets);
+        let (datagram, mut contributors) =
+            match self.reassemble(d, &path, frame, ancestors, &mut inspect)? {
+                LayerReassembly::Complete(d, ids) => (d, ids),
+                LayerReassembly::Incomplete { quarantined } => {
+                    if let Some((scope, path, segment, packets)) = resolved {
+                        self.resolve_header(scope, path, segment, &packets);
                     }
+                    if let Some(mut header) = header {
+                        // The header still identifies possible owners. The disputed
+                        // outer bytes cannot establish the inner payload length.
+                        if quarantined {
+                            header.2.payload_len = None;
+                        }
+                        if !refine_packets.is_empty() {
+                            let (scope, path, segment, _) = &header;
+                            let (key, _) = Key::new(
+                                scope.clone(),
+                                path.clone(),
+                                6,
+                                segment.source,
+                                segment.destination,
+                            );
+                            if let Some(tracker) =
+                                self.active.get_mut(&key).and_then(|a| a.tracker.as_mut())
+                            {
+                                tracker.refine_reassembly_extent(scope, *segment, &refine_packets);
+                            }
+                        }
+                        self.observe_tcp_header(header, frame, time, disposition)?;
+                    }
+                    return Ok(());
                 }
-                self.observe_tcp_header(header, frame, time, disposition)?;
-            }
-            return Ok(());
-        };
+            };
         if contributors.is_empty() {
             contributors.push(id);
         }

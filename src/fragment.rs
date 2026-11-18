@@ -185,15 +185,15 @@ impl<V> FragmentReassembler<V> {
         self.push_with_invalidation(datagram, frame, ancestors, observer, |_, _, _| {})
     }
 
-    /// Notify the consumer when a quarantined set invalidates its cached verdict.
-    /// The packet list identifies witnesses previously inspected for that set.
+    /// Notify the consumer whenever the arriving fragment belongs to a quarantined
+    /// set. The first notification also returns any cached verdict to retract.
     pub fn push_with_invalidation(
         &mut self,
         mut datagram: Datagram,
         frame: u64,
         ancestors: &[PacketId],
         observer: Option<&mut CachedPrefixObserver<'_, V>>,
-        mut invalidate: impl FnMut(&Scope, V, &[PacketId]),
+        mut invalidate: impl FnMut(&Scope, Option<V>, &[PacketId]),
     ) -> Result<FragmentOutcome> {
         self.limits.validate()?;
         datagram.require_complete()?;
@@ -251,13 +251,12 @@ impl<V> FragmentReassembler<V> {
         };
         if too_many || new_size > self.limits.max_retained_payload {
             if let Some(set) = self.sets.get_mut(&key) {
-                if !set.poisoned
-                    && (observer.is_some() || set.verdict.is_some())
-                    && set.reusable_verdict(&datagram, &info).is_none()
-                {
-                    if set.conflict(&datagram, &info, end).is_some() {
-                        set.quarantine(&mut invalidate);
-                    } else if let Some(inspect) = observer {
+                let inspect_new = (observer.is_some() || set.verdict.is_some())
+                    && set.reusable_verdict(&datagram, &info).is_none();
+                if set.poisoned || (inspect_new && set.conflict(&datagram, &info, end).is_some()) {
+                    set.quarantine(&mut invalidate);
+                } else if inspect_new {
+                    if let Some(inspect) = observer {
                         set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
                     }
                 }
@@ -315,14 +314,13 @@ impl<V> FragmentReassembler<V> {
                 .get_mut(&key)
                 .ok_or_else(|| Error::limit("fragment_state"))?;
             set.packets = admitted_packets;
-            if set.poisoned {
-                return Ok(FragmentOutcome::Rejected(FragmentNotice {
-                    code: "fragment_set_quarantined",
-                    packets: set.packets.clone(),
-                }));
-            }
             let learned_end = !info.more && set.end.is_none();
-            if let Some(code) = set.conflict(&datagram, &info, end) {
+            let conflict = if set.poisoned {
+                Some("fragment_set_quarantined")
+            } else {
+                set.conflict(&datagram, &info, end)
+            };
+            if let Some(code) = conflict {
                 set.quarantine(&mut invalidate);
                 return Ok(FragmentOutcome::Rejected(FragmentNotice {
                     code,
@@ -431,11 +429,9 @@ impl<V> FragmentReassembler<V> {
 }
 
 impl<V> Assembly<V> {
-    fn quarantine(&mut self, invalidate: &mut impl FnMut(&Scope, V, &[PacketId])) {
+    fn quarantine(&mut self, invalidate: &mut impl FnMut(&Scope, Option<V>, &[PacketId])) {
         self.poisoned = true;
-        if let Some(verdict) = self.verdict.take() {
-            invalidate(&self.prefix.scope, verdict, &self.packets);
-        }
+        invalidate(&self.prefix.scope, self.verdict.take(), &self.packets);
     }
 
     fn reusable_metadata(&self, d: &Datagram, info: &FragmentInfo) -> bool {

@@ -213,8 +213,10 @@ the retained data end or an admitted FIN withholds the affected mapping. A FIN
 at the established end preserves it. A terminal IP fragment can establish this
 extent while TCP options are still missing. A pending ACK with a known empty
 payload contributes no stream end. Both decisions depend on the fragment set.
-If conflicting fragments quarantine it, the original headers again represent
-possible payload loss for their candidate generations. A reassembled FIN refused at the
+If conflicting fragments quarantine it, both earlier headers and a TCP header
+first identified on the conflicting arrival represent possible payload loss
+for their candidate generations. This also applies to inner TCP headers in a
+fragmented tunnel. A reassembled FIN refused at the
 window’s packet-reference limit supplies the same end-position evidence.
 A late handshake rechecks earlier stream positions and loss observations against
 the observed initial sequence and configured span. Excluded packets remain in

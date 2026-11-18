@@ -662,23 +662,102 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
     }
 }
 
+fn mapping_addresses<'a>(rows: impl Iterator<Item = &'a Json>) -> Vec<u64> {
+    rows.filter_map(|row| {
+        let Json::Object(fields) = row else {
+            panic!("expected a transaction")
+        };
+        let (_, mapping) = fields.iter().find(|(name, _)| *name == "read_mapping")?;
+        let Json::Number(address) = field(mapping, "starting_address_zero_based") else {
+            panic!("expected a numeric address")
+        };
+        Some(*address)
+    })
+    .collect()
+}
+
+#[test]
+fn tunneled_control_uses_the_fragment_set_disposition_in_both_orders() {
+    use tiny_capture::{capture, ipv4_fragment, tcp, tcp_with_options, tunneled};
+
+    let exchange = |key, address| {
+        let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, address, 0, 1];
+        [
+            (false, tcp(false, 100, 0, 2, &[])),
+            (true, tcp(true, 500, 101, 0x12, &[])),
+            (false, tcp(false, 101, 501, 0x18, &request)),
+            (
+                true,
+                tcp(true, 501, 113, 0x18, &[0, 1, 0, 0, 0, 5, 1, 3, 2, 0, 7]),
+            ),
+        ]
+        .map(|(reverse, p)| tunneled("gre", key, reverse, &p))
+    };
+    for flags in [0x10, 0x11] {
+        let control = tunneled(
+            "gre",
+            7,
+            false,
+            &tcp_with_options(false, 113, 512, flags, &[1; 28], &[]),
+        );
+        let head = ipv4_fragment(&control, 0..56, true);
+        let tail = ipv4_fragment(&control, 48..control.len() - 34, false);
+        let mut conflicting = tail.clone();
+        conflicting[34] ^= 1;
+        for (pieces, eligible, cap) in [
+            (vec![head.clone()], true, 4),
+            (vec![head.clone(), tail.clone()], true, 4),
+            (vec![tail.clone(), head.clone()], true, 4),
+            (vec![head.clone(), conflicting.clone()], false, 4),
+            (vec![conflicting.clone(), head.clone()], false, 4),
+            (vec![conflicting.clone(), head.clone()], false, 1),
+            (vec![head.clone(), conflicting.clone()], false, 1),
+            (
+                vec![tail.clone(), conflicting.clone(), head.clone()],
+                false,
+                4,
+            ),
+            (
+                vec![tail.clone(), conflicting.clone(), head.clone()],
+                false,
+                2,
+            ),
+        ] {
+            let mut frames = exchange(7, 9).to_vec();
+            let witness_frame = pieces.iter().position(|p| p == &head).unwrap() as u64 + 5;
+            frames.extend(pieces);
+            frames.extend(exchange(17, 17));
+            let mut config = StreamConfig::default();
+            config.base.modbus_ports = vec![2000];
+            config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+            config.base.limits.max_fragments_per_set = cap;
+            let out = run(&capture(&frames), config);
+            let addresses = mapping_addresses(
+                out.events
+                    .iter()
+                    .filter(|e| e.kind == EventKind::Transaction)
+                    .map(|e| &e.data),
+            );
+            let expected: &[u64] = if eligible { &[9, 17] } else { &[17] };
+            assert_eq!(
+                addresses, expected,
+                "head at {witness_frame}, cap {cap}, flags {flags}"
+            );
+            let witness = out
+                .events
+                .iter()
+                .find(|e| e.data.encode().contains("tcp_generation_payload_uncertain"));
+            assert_eq!(
+                witness.map(|e| e.evidence.packets[0].frame),
+                (!eligible).then_some(witness_frame)
+            );
+        }
+    }
+}
+
 #[test]
 fn fragmented_fin_extent_matches_the_retained_stream_end() {
     use tiny_capture::{capture, ipv4_fragment, tcp, tcp_with_options};
-    fn mapping_addresses<'a>(rows: impl Iterator<Item = &'a Json>) -> Vec<u64> {
-        rows.filter_map(|row| {
-            let Json::Object(fields) = row else {
-                panic!("expected a transaction")
-            };
-            let (_, mapping) = fields.iter().find(|(name, _)| *name == "read_mapping")?;
-            let Json::Number(address) = field(mapping, "starting_address_zero_based") else {
-                panic!("expected a numeric address")
-            };
-            Some(*address)
-        })
-        .collect()
-    }
-
     let exchange = |address, seq, peer| {
         let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, address, 0, 1];
         let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0, 7];
@@ -2406,6 +2485,16 @@ mod provisional_transport {
             tcp(false, 113, 512, 0x11, &[]),
             tcp(true, 512, 114, 0x11, &[]),
         ];
+        let empty_syn_ack = tiny_capture::tcp_with_options(true, 512, 101, 0x12, &[1; 4], &[]);
+        let mut frames = exchange.to_vec();
+        frames.push(empty_syn_ack[..54].to_vec());
+        let mut source = capture(&frames);
+        let last_record = source.len() - 54 - 16;
+        source[last_record + 12..last_record + 16]
+            .copy_from_slice(&(empty_syn_ack.len() as u32).to_le_bytes());
+        let root = assert_pair(&source, config(), true);
+        assert!(root.flows()[0].uncertain_payload.is_none());
+
         for (isn, ack, paired) in [(512, 101, false), (500, 101, true), (512, 100, true)] {
             let syn_ack = tcp(true, isn, ack, 0x12, RESPONSE);
             for snapped in [false, true] {

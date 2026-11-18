@@ -110,41 +110,45 @@ fn omitted_handshake_checks_all_provisional_fin_positions_across_wrap() {
     let first = u32::MAX - 3;
     for (offset, survives) in [(0u32, true), (8, true), (9, false)] {
         for reverse_fins in [false, true] {
-            let mut tracker = TcpTracker::new(
-                Limits {
-                    max_stream_span: 8,
-                    ..Limits::default()
-                },
-                100,
-            )
-            .unwrap();
-            let reverse = |mut segment: TcpSegment| {
-                std::mem::swap(&mut segment.source, &mut segment.destination);
-                segment
-            };
-            let mut fins = [first - 1, first.wrapping_add(offset)];
-            if reverse_fins {
-                fins.reverse();
-            }
-            let packets = [
-                segment(100, 0, 2, b"", 1),
-                reverse(segment(first.wrapping_add(4), 101, 0x10, b"", 2)),
-                reverse(segment(fins[0], 101, 0x11, b"", 3)),
-                reverse(segment(fins[1], 101, 0x11, b"", 4)),
-                segment(101, 0, 0x11, b"", 5),
-            ];
-            for (i, packet) in packets.into_iter().enumerate() {
-                let assigned = tracker
-                    .ingest(scope(), id(i as u64 + 1), None, packet)
-                    .unwrap();
-                assert!(matches!(assigned, Assignment::Assigned { flow_id: 0, .. }));
-            }
-            let header = reverse(segment(first - 1, 101, 0x12, b"", 6)).header();
-            tracker
-                .observe_header(scope(), id(6), None, header, HeaderDisposition::Omitted)
+            let witness = |omitted: &[u8]| {
+                let mut tracker = TcpTracker::new(
+                    Limits {
+                        max_stream_span: 8,
+                        ..Limits::default()
+                    },
+                    100,
+                )
                 .unwrap();
-            let flows = tracker.finish(OverlapPolicy::RejectConflict).unwrap();
-            assert_eq!(flows[0].uncertain_payload, (!survives).then_some(id(6)));
+                let reverse = |mut segment: TcpSegment| {
+                    std::mem::swap(&mut segment.source, &mut segment.destination);
+                    segment
+                };
+                let mut fins = [first - 1, first.wrapping_add(offset)];
+                if reverse_fins {
+                    fins.reverse();
+                }
+                let packets = [
+                    segment(100, 0, 2, b"", 1),
+                    reverse(segment(first.wrapping_add(4), 101, 0x10, b"", 2)),
+                    reverse(segment(fins[0], 101, 0x11, b"", 3)),
+                    reverse(segment(fins[1], 101, 0x11, b"", 4)),
+                    segment(101, 0, 0x11, b"", 5),
+                ];
+                for (i, packet) in packets.into_iter().enumerate() {
+                    let assigned = tracker
+                        .ingest(scope(), id(i as u64 + 1), None, packet)
+                        .unwrap();
+                    assert!(matches!(assigned, Assignment::Assigned { flow_id: 0, .. }));
+                }
+                let header = reverse(segment(first - 1, 101, 0x12, omitted, 6)).header();
+                tracker
+                    .observe_header(scope(), id(6), None, header, HeaderDisposition::Omitted)
+                    .unwrap();
+                let flows = tracker.finish(OverlapPolicy::RejectConflict).unwrap();
+                flows[0].uncertain_payload
+            };
+            assert_eq!(witness(b"x"), (!survives).then_some(id(6)));
+            assert_eq!(witness(b""), None);
         }
     }
 }

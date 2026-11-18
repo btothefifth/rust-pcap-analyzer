@@ -402,10 +402,13 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             metadata.frame,
             &[],
             Some(&mut inspect),
-            |scope, verdict, _| invalidated = Some((scope.clone(), verdict)),
+            |scope, verdict, _| invalidated = verdict.map(|header| (scope.clone(), header)),
         )?;
         if !matches!(outcome, FragmentOutcome::Complete(..)) {
-            if let Some((scope, packet, segment)) = header {
+            if let Some((scope, packet, mut segment)) = header {
+                if matches!(outcome, FragmentOutcome::Rejected(_)) {
+                    segment.payload_len = None;
+                }
                 tracker.observe_header(
                     scope,
                     packet,
