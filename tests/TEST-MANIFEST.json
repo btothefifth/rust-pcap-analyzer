@@ -195,6 +195,7 @@
     "reconstruction::no_payload_with_observed_syn_fin_still_reports_missing_bytes",
     "reconstruction::data_after_fin_position_cannot_be_called_a_valid_stream",
     "reconstruction::payload_before_syn_and_excessive_span_rejected",
+    "reconstruction::omitted_handshake_checks_all_provisional_fin_positions_across_wrap",
     "reconstruction::failed_handshake_reconciliation_preserves_retained_inputs",
     "reconstruction::connection_reuse_creates_generation_and_same_syn_is_not_recounted",
     "reconstruction::closed_generation_does_not_absorb_post_close_non_syn",

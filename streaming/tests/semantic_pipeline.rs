@@ -2158,6 +2158,55 @@ mod provisional_transport {
     }
 
     #[test]
+    fn omitted_syn_ack_can_disprove_a_provisional_close() {
+        use pcap_evidence::engine::ApplicationData;
+
+        // The server SYN is missing, but both FINs and a contiguous exchange were captured.
+        let exchange = [
+            tcp(false, 100, 0, 2, &[]),
+            tcp(false, 101, 501, 0x18, REQUEST),
+            tcp(true, 501, 113, 0x18, RESPONSE),
+            tcp(false, 113, 512, 0x11, &[]),
+            tcp(true, 512, 114, 0x11, &[]),
+        ];
+        for (isn, ack, paired) in [(512, 101, false), (500, 101, true), (512, 100, true)] {
+            let syn_ack = tcp(true, isn, ack, 0x12, RESPONSE);
+            for snapped in [false, true] {
+                let mut frames = exchange.to_vec();
+                frames.push(if snapped {
+                    syn_ack[..48].to_vec()
+                } else {
+                    ipv4_fragment(&syn_ack, 0..24, true)
+                });
+                let mut source = capture(&frames);
+                if snapped {
+                    let record = source.len() - 48 - 16;
+                    source[record + 12..record + 16]
+                        .copy_from_slice(&(syn_ack.len() as u32).to_le_bytes());
+                }
+                for slots in [5, 32] {
+                    let mut c = config();
+                    c.window_packets = slots;
+                    let root = assert_pair(&source, c, paired);
+                    assert_eq!(
+                        root.flows()[0].uncertain_payload.map(|p| p.frame),
+                        (!paired).then_some(6)
+                    );
+                    let messages: usize = root
+                        .applications()
+                        .iter()
+                        .filter_map(|app| match &app.data {
+                            ApplicationData::Modbus(m) => Some(m.messages.len()),
+                            _ => None,
+                        })
+                        .sum();
+                    assert_eq!(messages, 2);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_delayed_syn_ack_can_disprove_a_provisional_close() {
         for (server_fin, acknowledgement, count) in [(480, 101, 1), (512, 101, 2), (480, 99, 2)] {
             let frames = [

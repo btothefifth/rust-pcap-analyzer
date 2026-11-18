@@ -346,7 +346,8 @@ struct Flow {
     syn: [Option<u32>; 2],
     syn_sequence_len: [usize; 2],
     anchors: [Option<u32>; 2],
-    fin: [bool; 2],
+    // FIN data positions in directions whose SYN has not yet supplied an origin.
+    provisional_fin_starts: [BTreeSet<u32>; 2],
     fin_next: [Option<u32>; 2],
     closed_at: Option<usize>,
     rst_seen: bool,
@@ -418,7 +419,7 @@ impl Flow {
         self.syn = [None; 2];
         self.syn_sequence_len = [0; 2];
         self.anchors = [None; 2];
-        self.fin = [false; 2];
+        self.provisional_fin_starts = Default::default();
         self.fin_next = [None; 2];
         self.closed_at = None;
         self.rst_seen = false;
@@ -433,6 +434,7 @@ impl Flow {
         let when = input.when;
         if segment.syn() {
             self.syn[direction] = Some(segment.sequence);
+            self.provisional_fin_starts[direction].clear();
             self.syn_sequence_len[direction] = self.syn_sequence_len[direction]
                 .max(1 + segment.payload.len() + usize::from(segment.fin()));
             self.anchors[direction] = Some(segment.data_sequence());
@@ -452,7 +454,9 @@ impl Flow {
             self.first_payload_at.get_or_insert(input.arrival.ordinal);
         }
         if segment.fin() {
-            self.fin[direction] = true;
+            if self.syn[direction].is_none() {
+                self.provisional_fin_starts[direction].insert(segment.data_sequence());
+            }
             self.fin_next[direction].get_or_insert(
                 segment
                     .data_sequence()
@@ -461,7 +465,7 @@ impl Flow {
             );
         }
         self.rst_seen |= segment.rst();
-        if self.rst_seen || (self.fin[0] && self.fin[1]) {
+        if self.rst_seen || self.fin_next.iter().all(Option::is_some) {
             self.closed_at.get_or_insert(input.arrival.ordinal);
         }
     }
@@ -482,14 +486,15 @@ impl Flow {
         {
             return false;
         }
-        self.closed_at.is_none()
-            || self
-                .inputs
-                .iter()
-                .filter(|input| input.direction == direction && input.segment.fin())
-                .all(|input| {
-                    !within_syn_span(input.segment.data_sequence(), isn.wrapping_add(1), max_span)
-                })
+        if self.closed_at.is_none() {
+            return true;
+        }
+        // The first FIN at or after the proposed origin in sequence space
+        // decides whether any FIN survives, including across u32 wraparound.
+        let first = isn.wrapping_add(1);
+        let starts = &self.provisional_fin_starts[direction];
+        let nearest = starts.range(first..).next().or_else(|| starts.first());
+        nearest.is_none_or(|&fin| !within_syn_span(fin, first, max_span))
     }
 
     fn admits_stream_start(&self, direction: usize, sequence: u32) -> bool {
@@ -519,6 +524,12 @@ impl Flow {
 pub enum HeaderDisposition {
     AwaitingReassembly,
     Omitted,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HeaderCandidate {
+    Open,
+    Closed,
 }
 
 struct UnretainedHeader {
@@ -575,9 +586,8 @@ impl UnretainedHeader {
                 .chain(simultaneous)
                 .find(|&id| {
                     let flow = &flows[id];
-                    flow.open_at(self.arrival.ordinal)
-                        && self.within_final_idle(flow, idle_ns)
-                        && self.matches(flow, max_span)
+                    self.within_final_idle(flow, idle_ns)
+                        && self.candidate(flow, max_span) == Some(HeaderCandidate::Open)
                 });
             if let Some(id) = owner {
                 flows[id].note_uncertain(self.packet);
@@ -588,11 +598,12 @@ impl UnretainedHeader {
         let mut open = false;
         candidates.retain(|candidate| {
             let flow = &flows[*candidate];
-            if !self.within_final_idle(flow, idle_ns) || !self.matches(flow, max_span) {
+            if !self.within_final_idle(flow, idle_ns) {
                 return false;
             }
-            open |= flow.open_at(self.arrival.ordinal);
-            true
+            let candidate = self.candidate(flow, max_span);
+            open |= candidate == Some(HeaderCandidate::Open);
+            candidate.is_some()
         });
         if open {
             for candidate in &candidates {
@@ -620,16 +631,28 @@ impl UnretainedHeader {
             && flow.admits_stream_start(self.direction, self.sequence)
     }
 
-    fn matches(&self, flow: &Flow, max_span: i64) -> bool {
-        flow.inputs
-            .first()
-            .and_then(|input| input.packets.first())
-            .is_some_and(|p| p.capture == self.packet.capture)
-            && self.handshake_allows(flow)
-            && (flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span)
-                || self.syn_isn.zip(self.ack).is_some_and(|(isn, ack)| {
-                    flow.completes_handshake(self.direction, isn, ack, max_span)
-                }))
+    fn candidate(&self, flow: &Flow, max_span: i64) -> Option<HeaderCandidate> {
+        let packet = flow.inputs.first()?.packets.first()?;
+        if packet.capture != self.packet.capture || !self.handshake_allows(flow) {
+            return None;
+        }
+        if self
+            .syn_isn
+            .zip(self.ack)
+            .is_some_and(|(isn, ack)| flow.completes_handshake(self.direction, isn, ack, max_span))
+        {
+            // The observed header could invalidate the provisional close just
+            // as a retained SYN-ACK would. Its missing bytes remain uncertain.
+            return Some(HeaderCandidate::Open);
+        }
+        if !flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span) {
+            return None;
+        }
+        Some(if flow.open_at(self.arrival.ordinal) {
+            HeaderCandidate::Open
+        } else {
+            HeaderCandidate::Closed
+        })
     }
 }
 pub struct TcpTracker {
@@ -680,7 +703,7 @@ impl TcpTracker {
             syn: [None, None],
             syn_sequence_len: [0; 2],
             anchors: [None, None],
-            fin: [false, false],
+            provisional_fin_starts: Default::default(),
             fin_next: [None, None],
             closed_at: None,
             rst_seen: false,
@@ -714,8 +737,6 @@ impl TcpTracker {
     }
     fn is_final_ack(flow: &Flow, direction: usize, segment: &TcpSegment) -> bool {
         if flow.rst_seen
-            || !flow.fin[0]
-            || !flow.fin[1]
             || segment.syn()
             || segment.fin()
             || segment.rst()
@@ -1279,7 +1300,7 @@ impl TcpTracker {
                         .is_some_and(|(seen, start)| start.saturating_sub(seen) > self.idle_ns);
                     if !expired
                         && header.within_final_idle(flow, self.idle_ns)
-                        && header.matches(flow, max_span)
+                        && header.candidate(flow, max_span).is_some()
                     {
                         flow.note_uncertain(header.packet);
                     }
