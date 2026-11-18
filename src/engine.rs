@@ -1,8 +1,10 @@
 //! Capture analysis, transport reconstruction, and protocol correlation.
+mod fragments;
+
 use crate::capture::{CaptureIter, PacketMeta, ParseMode, RecordKind};
 use crate::correlate::{AttemptMatch, Transaction};
 use crate::dnp3::{self, Dnp3Result};
-use crate::fragment::{FragmentNotice, FragmentOutcome, FragmentReassembler};
+use crate::fragment::{FragmentNotice, FragmentOutcome};
 use crate::modbus::{self, ModbusResult, Role};
 use crate::provenance::PacketId;
 use crate::sha256;
@@ -247,7 +249,8 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         return Err(Error::limit("input_bytes"));
     }
     let identity = sha256::digest(input);
-    let mut fragments = FragmentReassembler::with_prefix_cache(config.limits.clone());
+    let mut fragments =
+        fragments::SnapshotFragments::new(config.limits.clone(), config.checksum_policy);
     let mut tracker = TcpTracker::new(config.limits.clone(), config.idle_timeout_ns)?;
     let mut packets = Vec::new();
     let mut notices = Vec::new();
@@ -269,7 +272,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                 continue;
             }
         };
-        for notice in fragments.expire(metadata.frame) {
+        for notice in fragments.expire(metadata.frame, &mut tracker) {
             fragment_notice(&mut packets, &notice)?;
             notices.push(notice);
         }
@@ -353,86 +356,19 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             };
             continue;
         }
-        let loss_header = |d: &wire::Datagram| {
-            let observation = wire::tcp_header_observation(d)?;
-            Some((
-                d.scope.clone(),
-                observation.packet,
-                observation.possible_loss(config.checksum_policy)?,
-            ))
-        };
-        let mut header = network
-            .fragment
-            .as_ref()
-            .and_then(|_| loss_header(&network));
-        // An identical first fragment keeps its own packet ID and the extent
-        // already established for this set.
-        if let (Some((_, _, h)), Some(cached)) = (&mut header, fragments.cached_prefix(&network)) {
-            *h = *cached;
-        }
-        let mut inspect =
-            |prefix: &wire::Datagram, contributors: &[PacketId]| match wire::inspect_tcp_header(
-                prefix,
-            ) {
-                Ok(Some(observation)) => {
-                    let candidate = observation.pending_extent(config.checksum_policy);
-                    if let Some(candidate) = candidate {
-                        tracker.refine_reassembly_extent(&prefix.scope, candidate, contributors);
-                        let packet = header.as_ref().map_or(observation.packet, |(_, id, _)| *id);
-                        header = Some((prefix.scope.clone(), packet, candidate));
-                    } else {
-                        header = None;
-                        tracker.resolve_reassembly(
-                            prefix.scope.clone(),
-                            observation.header,
-                            contributors,
-                        );
-                    }
-                    (None, candidate.filter(|h| h.payload_len == Some(0)))
+        let (datagram, mut contributors) =
+            match fragments.push(network, metadata.frame, time, &mut tracker)? {
+                FragmentOutcome::Pending => {
+                    packets[at].disposition = Disposition::FragmentPending;
+                    continue;
                 }
-                Ok(None) => (None, None),
-                Err(error) => (
-                    (error.code == crate::ErrorCode::Truncated).then(|| prefix.payload.len() + 1),
-                    None,
-                ),
+                FragmentOutcome::Rejected(notice) => {
+                    fragment_notice(&mut packets, &notice)?;
+                    notices.push(notice);
+                    continue;
+                }
+                FragmentOutcome::Complete(d, ids) => (d, ids),
             };
-        let mut invalidated = None;
-        let outcome = fragments.push_with_invalidation(
-            network,
-            metadata.frame,
-            &[],
-            Some(&mut inspect),
-            |scope, verdict, _| invalidated = verdict.map(|header| (scope.clone(), header)),
-        )?;
-        if !matches!(outcome, FragmentOutcome::Complete(..)) {
-            if let Some((scope, packet, mut segment)) = header {
-                if matches!(outcome, FragmentOutcome::Rejected(_)) {
-                    segment.payload_len = None;
-                }
-                tracker.observe_header(
-                    scope,
-                    packet,
-                    time,
-                    segment,
-                    HeaderDisposition::AwaitingReassembly,
-                )?;
-            }
-        }
-        let (datagram, mut contributors) = match outcome {
-            FragmentOutcome::Pending => {
-                packets[at].disposition = Disposition::FragmentPending;
-                continue;
-            }
-            FragmentOutcome::Rejected(notice) => {
-                if let Some((scope, header)) = invalidated {
-                    tracker.invalidate_reassembly_extent(&scope, header, &notice.packets);
-                }
-                fragment_notice(&mut packets, &notice)?;
-                notices.push(notice);
-                continue;
-            }
-            FragmentOutcome::Complete(d, ids) => (d, ids),
-        };
         if contributors.is_empty() {
             contributors.push(id);
         }
