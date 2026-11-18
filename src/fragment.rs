@@ -44,6 +44,12 @@ impl Part {
         }
     }
 }
+struct Quarantine {
+    code: &'static str,
+    bound: usize,
+    // Only these arriving bytes would be stored on admission.
+    piece_len: usize,
+}
 struct Assembly<V> {
     verdict: Option<V>,
     prefix: Datagram,
@@ -262,48 +268,56 @@ impl<V> FragmentReassembler<V> {
         admitted_packets.dedup();
         let too_many = admitted_packets.len() > self.limits.max_fragments_per_set
             || existing.is_some_and(|set| set.parts.len() >= self.limits.max_fragments_per_set);
-        let retained_arrival =
-            match existing.and_then(|set| set.disputed_at.map(|bound| (set, bound))) {
-                Some((set, bound)) => {
-                    let stop = bound.min(end);
-                    if observer.is_some()
-                        && set.next_inspection_len.is_some()
-                        && stop > set.prefix.payload.len()
-                    {
-                        stop.saturating_sub(info.offset)
-                    } else {
-                        0
-                    }
-                }
-                _ => datagram.payload.len(),
-            };
-        let new_size = self
+        // Plain replay journals capacity refusals before it classifies the
+        // arrival. Keep that v1 ordering when no prefix consumer is attached.
+        if observer.is_none() && existing.is_none_or(|set| set.verdict.is_none()) {
+            if too_many {
+                return Err(Error::limit("fragments_per_set"));
+            }
+            if existing.is_none_or(|set| set.disputed_at.is_none())
+                && datagram.payload.len() > self.limits.max_retained_payload - self.retained
+            {
+                return Err(Error::limit("fragment_payload"));
+            }
+        }
+        let quarantine =
+            existing.and_then(|set| set.quarantine_plan(&datagram, &info, end, observer.is_some()));
+        let charge = quarantine
+            .as_ref()
+            .map_or(datagram.payload.len(), |plan| plan.piece_len);
+        let total = self
             .retained
-            .checked_add(retained_arrival)
+            .checked_add(charge)
             .ok_or_else(|| Error::limit("fragment_payload"))?;
-        if too_many || new_size > self.limits.max_retained_payload {
-            if let Some(set) = self.sets.get_mut(&key) {
-                let inspect_new = (observer.is_some() || set.verdict.is_some())
-                    && set.reusable_verdict(&datagram, &info).is_none();
-                let conflict = inspect_new
-                    .then(|| set.conflict(&datagram, &info, end))
-                    .flatten();
-                if let Some((_, bound)) = set.dispute(conflict) {
-                    if observer.is_none() {
-                        set.next_inspection_len = None;
-                    }
-                    set.inspect_quarantine(datagram, &info, bound, false, &mut invalidate)?;
-                } else if inspect_new {
-                    if let Some(inspect) = observer {
-                        set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
-                    }
+        let refusal = if too_many {
+            Some("fragments_per_set")
+        } else if total > self.limits.max_retained_payload {
+            Some("fragment_payload")
+        } else {
+            None
+        };
+
+        if let Some(plan) = quarantine {
+            let set = self.sets.get_mut(&key).expect("disputed set exists");
+            let code = plan.code;
+            let packets = refusal.is_none().then_some(admitted_packets);
+            set.inspect_quarantine(datagram, &info, plan, packets, &mut invalidate)?;
+            if let Some(reason) = refusal {
+                return Err(Error::limit(reason));
+            }
+            self.retained = total;
+            return Ok(FragmentOutcome::Rejected(FragmentNotice {
+                code,
+                packets: set.packets.clone(),
+            }));
+        }
+        if let Some(reason) = refusal {
+            if let (Some(set), Some(inspect)) = (existing, observer) {
+                if set.reusable_verdict(&datagram, &info).is_none() {
+                    set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
                 }
             }
-            return Err(Error::limit(if too_many {
-                "fragments_per_set"
-            } else {
-                "fragment_payload"
-            }));
+            return Err(Error::limit(reason));
         }
         if !self.sets.contains_key(&key) {
             if self.sets.len() >= self.limits.max_fragment_sets {
@@ -341,24 +355,6 @@ impl<V> FragmentReassembler<V> {
                 .ok_or_else(|| Error::limit("fragment_state"))?;
             set.packets = admitted_packets;
             let learned_end = !info.more && set.end.is_none();
-            let conflict = set.conflict(&datagram, &info, end);
-            if let Some((code, bound)) = set.dispute(conflict) {
-                if observer.is_none() {
-                    set.next_inspection_len = None;
-                }
-                self.retained += set.inspect_quarantine(
-                    datagram,
-                    &info,
-                    bound,
-                    observer.is_some(),
-                    &mut invalidate,
-                )?;
-                return Ok(FragmentOutcome::Rejected(FragmentNotice {
-                    code,
-                    packets: set.packets.clone(),
-                }));
-            }
-
             // Conflict checks above established equality on every overlap.
             let repeat = set.reusable_metadata(&datagram, &info);
             let previous_checksum = (set.prefix.ip_checksum, set.prefix.checksum_context);
@@ -368,7 +364,7 @@ impl<V> FragmentReassembler<V> {
             if !info.more {
                 set.end = Some(end);
             }
-            self.retained = new_size;
+            self.retained = total;
             let index = set.parts.partition_point(|part| part.start <= info.offset);
             let preferred_spans = if set
                 .parts
@@ -471,90 +467,110 @@ impl<V> FragmentReassembler<V> {
 }
 
 impl<V> Assembly<V> {
-    fn dispute(&self, conflict: Option<(&'static str, usize)>) -> Option<(&'static str, usize)> {
-        match self.disputed_at {
-            Some(bound) => Some((
+    fn quarantine_plan(
+        &self,
+        arrival: &Datagram,
+        info: &FragmentInfo,
+        end: usize,
+        observing: bool,
+    ) -> Option<Quarantine> {
+        let conflict = self.conflict(arrival, info, end);
+        let (code, bound) = match self.disputed_at {
+            Some(old) => (
                 "fragment_set_quarantined",
-                conflict.map_or(bound, |(_, new)| bound.min(new)),
-            )),
-            None => conflict,
-        }
+                conflict.map_or(old, |(_, new)| old.min(new)),
+            ),
+            None => conflict?,
+        };
+        let stop = end.min(bound);
+        let piece_len = if observing
+            && self.next_inspection_len.is_some_and(|next| next <= bound)
+            && stop > self.prefix.payload.len()
+        {
+            stop.saturating_sub(info.offset)
+        } else {
+            0
+        };
+        Some(Quarantine {
+            code,
+            bound,
+            piece_len,
+        })
     }
 
     fn inspect_quarantine(
         &mut self,
         arrival: Datagram,
         info: &FragmentInfo,
-        bound: usize,
-        retain: bool,
+        plan: Quarantine,
+        admitted_packets: Option<Vec<PacketId>>,
         invalidate: &mut impl FnMut(Option<&Datagram>, Option<V>, &[PacketId]) -> Option<usize>,
-    ) -> Result<usize> {
-        self.disputed_at = Some(bound);
-        let previous = self.verdict.take();
+    ) -> Result<()> {
+        let retained = admitted_packets.is_some();
         let start = self.prefix.payload.len();
-        let end = bound.min(info.offset + arrival.payload.len());
-        let Some(next) = self.next_inspection_len.filter(|next| *next <= bound) else {
-            invalidate(None, previous, &self.packets);
-            return Ok(0);
-        };
-        if end <= start.max(info.offset) {
-            invalidate(None, previous, &self.packets);
-            return Ok(0);
-        }
-        // Keep a refused arrival transient. Admitted, out-of-order pieces can
-        // supply the agreed prefix when a later arrival closes a hole.
-        let index = self.parts.partition_point(|part| part.start <= info.offset);
-        let part = Part {
-            start: info.offset,
-            end,
-            more: info.more,
-            pending: Some(arrival.payload.slice(0..end - info.offset)?),
-            preferred_spans: Vec::new(),
-        };
-        let charged = if retain { end - info.offset } else { 0 };
-        let mut transient;
-        let prefix = if retain {
-            self.parts.insert(index, part);
-            update_metadata(&mut self.prefix, &arrival, info);
-            self.extend_prefix(index)?;
-            &mut self.prefix
-        } else {
-            if info.offset > start {
-                invalidate(None, previous, &self.packets);
-                return Ok(0);
+        let mut preview = None;
+        if plan.piece_len > 0 && (retained || info.offset <= start) {
+            let index = self.parts.partition_point(|part| part.start <= info.offset);
+            let part = Part {
+                start: info.offset,
+                end: info.offset + plan.piece_len,
+                more: info.more,
+                pending: Some(arrival.payload.slice(0..plan.piece_len)?),
+                preferred_spans: Vec::new(),
+            };
+            // Build just the newly contiguous suffix. A failed slice, reserve,
+            // or append leaves the retained pieces and their charges intact.
+            let mut suffix = EvidenceBytes::default();
+            append_pending(
+                &mut suffix,
+                start,
+                std::iter::once(&part).chain(&self.parts[index..]),
+                plan.bound,
+            )?;
+            if retained {
+                self.parts
+                    .try_reserve(1)
+                    .map_err(|_| Error::limit("fragment_state"))?;
+                self.prefix.payload.append(&suffix, 65_535)?;
+                self.parts.insert(index, part);
+                for part in &mut self.parts[index..] {
+                    if part.start >= self.prefix.payload.len() {
+                        break;
+                    }
+                    if part.end <= self.prefix.payload.len() {
+                        part.pending = None;
+                    }
+                }
+                update_metadata(&mut self.prefix, &arrival, info);
+            } else if !suffix.is_empty() {
+                let mut candidate = self.prefix.clone();
+                candidate.payload.append(&suffix, 65_535)?;
+                update_metadata(&mut candidate, &arrival, info);
+                preview = Some(candidate);
             }
-            transient = self.prefix.clone();
-            update_metadata(&mut transient, &arrival, info);
-            let pieces = self.parts[..index]
-                .iter()
-                .chain([&part])
-                .chain(&self.parts[index..]);
-            append_pending(&mut transient.payload, pieces, bound)?;
-            &mut transient
-        };
-        let length = bound.min(prefix.payload.len());
-        if length <= start || length < next {
-            invalidate(None, previous, &self.packets);
-            return Ok(charged);
         }
-        // The bytes after the agreed prefix, including its terminal extent,
-        // cannot influence the classifier. Never expose the result as complete.
-        prefix.fragment = Some(FragmentInfo {
-            id: info.id,
-            offset: 0,
-            more: true,
-        });
-        prefix.declared_payload_len = length + 1;
-        let limited;
-        let view = if length < prefix.payload.len() {
-            limited = with_payload(prefix, prefix.payload.slice(0..length)?);
-            &limited
+        self.disputed_at = Some(plan.bound);
+        if let Some(packets) = admitted_packets {
+            self.packets = packets;
+        }
+        let previous = self.verdict.take();
+        let prefix = preview.as_mut().unwrap_or(&mut self.prefix);
+        let length = prefix.payload.len();
+        if length > start && self.next_inspection_len.is_some_and(|next| length >= next) {
+            prefix.fragment = Some(FragmentInfo {
+                id: info.id,
+                offset: 0,
+                more: true,
+            });
+            prefix.declared_payload_len = length + 1;
+            let next = invalidate(Some(prefix), previous, &self.packets);
+            if retained {
+                self.next_inspection_len = next.map(|n| n.max(length + 1));
+            }
         } else {
-            &*prefix
-        };
-        self.next_inspection_len =
-            invalidate(Some(view), previous, &self.packets).map(|n| n.max(length + 1));
-        Ok(charged)
+            invalidate(None, previous, &self.packets);
+        }
+        Ok(())
     }
 
     fn reusable_metadata(&self, d: &Datagram, info: &FragmentInfo) -> bool {
@@ -710,7 +726,7 @@ impl<V> Assembly<V> {
                 std::mem::take(&mut arrival.payload),
             )?;
         }
-        append_pending(&mut prefix.payload, &self.parts, 65_535)?;
+        append_pending(&mut prefix.payload, 0, &self.parts, 65_535)?;
         if prefix.payload.is_empty() {
             return Ok(());
         }
@@ -731,20 +747,19 @@ fn with_payload(template: &Datagram, payload: EvidenceBytes) -> Datagram {
 
 fn append_pending<'a>(
     prefix: &mut EvidenceBytes,
+    base: usize,
     parts: impl IntoIterator<Item = &'a Part>,
     bound: usize,
 ) -> Result<()> {
     for part in parts {
-        if part.start > prefix.len() || prefix.len() >= bound {
+        let start = base + prefix.len();
+        if part.start > start || start >= bound {
             break;
         }
         let stop = part.end.min(bound);
-        if stop > prefix.len() {
+        if stop > start {
             if let Some(bytes) = &part.pending {
-                prefix.append(
-                    &bytes.slice(prefix.len() - part.start..stop - part.start)?,
-                    65_535,
-                )?;
+                prefix.append(&bytes.slice(start - part.start..stop - part.start)?, 65_535)?;
             }
         }
     }

@@ -15,7 +15,8 @@ fn ev(data: &[u8]) -> EvidenceBytes {
     )
 }
 fn adu(pdu: &[u8]) -> EvidenceBytes {
-    let mut data = vec![0, 42, 0, 0, 0, (pdu.len() + 1) as u8, 1];
+    let length = u16::try_from(pdu.len() + 1).unwrap().to_be_bytes();
+    let mut data = vec![0, 42, 0, 0, length[0], length[1], 1];
     data.extend_from_slice(pdu);
     ev(&data)
 }
@@ -1493,6 +1494,21 @@ fn modbus_extended_role_and_pair_vectors() {
             &request, &exception
         ));
         for (data, role) in [(*req, Role::Request), (*rsp, Role::Response)] {
+            let wire = adu(data);
+            for end in 0..wire.len() {
+                let captured = wire.slice(0..end).unwrap();
+                let report = modbus::decode(&captured, role, Limits::default()).unwrap();
+                assert_eq!(report.status(), Status::Incomplete);
+                assert_eq!(report.consumed(), 0);
+                assert_eq!(
+                    report.issues()[0].code,
+                    if end < 8 {
+                        "modbus_mbap_truncated"
+                    } else {
+                        "modbus_adu_truncated"
+                    }
+                );
+            }
             for end in 0..data.len() {
                 let partial = adu(&data[..end]);
                 assert_ne!(
@@ -1514,6 +1530,35 @@ fn modbus_extended_boundaries() {
             .status()
             == Status::DecodedSubset
     };
+    // A write-file response echoes the entire request. A single subrecord
+    // with 122 words fills the 253-byte PDU exactly.
+    let record = |words: u8| {
+        let mut bytes = vec![6, 0, 1, 0, 0, 0, words];
+        bytes.resize(7 + 2 * usize::from(words), 0);
+        bytes
+    };
+    for (records, size, expected) in [
+        (record(122), 253, Status::DecodedSubset),
+        ([record(1), record(118)].concat(), 254, Status::Rejected),
+    ] {
+        let mut pdu = vec![21, u8::try_from(records.len()).unwrap()];
+        pdu.extend(records);
+        assert_eq!(pdu.len(), size);
+        let wire = adu(&pdu);
+        for role in [Role::Request, Role::Response] {
+            let report = modbus::decode(&wire, role, Limits::default()).unwrap();
+            assert_eq!(report.status(), expected);
+            if expected == Status::Rejected {
+                assert_eq!(report.issues()[0].code, "modbus_mbap_fields");
+            }
+        }
+        if expected == Status::DecodedSubset {
+            assert!(pcap_evidence::modbus::response_matches(
+                &root_message(&wire, Role::Request),
+                &root_message(&wire, Role::Response)
+            ));
+        }
+    }
     for (count, ok) in [(0, true), (31, true), (32, false)] {
         let mut p = vec![24, 0, 2 + count * 2, 0, count];
         p.resize(5 + 2 * count as usize, 0);

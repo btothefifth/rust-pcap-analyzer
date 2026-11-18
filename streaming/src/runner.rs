@@ -217,13 +217,9 @@ impl PrefixVerdict {
             }
             _ => {}
         }
-        match network::inspect_scheduled_tcp_path(
-            datagram,
-            path.to_vec(),
-            max_depth,
-            network::HeaderUse::Resolve,
-            &mut None,
-        ) {
+        // Recheck structural bounds before retaining an identity rejected by
+        // checksum policy. A permissive walk is only for retiring existing evidence.
+        match network::agreed_tcp_header(datagram, path.to_vec(), max_depth) {
             Ok(Some(header)) => (None, Self::Rejected(header)),
             Err(e) if e.code == pcap_evidence::ErrorCode::Truncated => {
                 (Some(datagram.payload.len() + 1), Self::Unidentified)
@@ -727,9 +723,13 @@ impl<'a> State<'a> {
         let policy = self.c.base.checksum_policy;
         let purpose = network::HeaderUse::Pending(policy);
         let slot = self.fragments.get(&path);
-        let was_rejected = slot
+        let previous = slot
             .and_then(|s| s.reassembler.last_prefix_verdict(&d))
-            .is_some_and(|v| matches!(v, PrefixVerdict::Rejected(_)));
+            .and_then(PrefixVerdict::observation)
+            .map(|(h, disposition)| (h.clone(), disposition));
+        let was_rejected = previous
+            .as_ref()
+            .is_some_and(|(_, d)| *d == HeaderDisposition::RejectedPrefix);
         let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
             let classified;
@@ -754,7 +754,12 @@ impl<'a> State<'a> {
             } else {
                 purpose
             };
-            let (next, verdict) = PrefixVerdict::inspect(prefix, &path, max_depth, purpose);
+            let (next, mut verdict) = PrefixVerdict::inspect(prefix, &path, max_depth, purpose);
+            if next.is_none() && matches!(verdict, PrefixVerdict::Unidentified) {
+                if let Some((earlier, _)) = &previous {
+                    verdict = PrefixVerdict::Rejected(earlier.clone());
+                }
+            }
             let arriving = header.take().map(|h| h.3);
             if let Some((candidate, current)) = verdict.observation() {
                 let (scope, path, segment, packet) = &candidate.path;
@@ -785,14 +790,9 @@ impl<'a> State<'a> {
         };
         let mut agreed_header = None;
         let reassembly = self.reassemble(d, &path, frame, ancestors, &mut inspect, |prefix| {
-            match network::inspect_tcp_path(
-                prefix,
-                path.clone(),
-                max_depth,
-                network::HeaderUse::Resolve,
-            ) {
+            match network::agreed_tcp_header(prefix, path.clone(), max_depth) {
                 Ok(observation) => {
-                    agreed_header = observation;
+                    agreed_header = observation.map(|h| h.path);
                     None
                 }
                 Err(e) => (e.code == pcap_evidence::ErrorCode::Truncated)

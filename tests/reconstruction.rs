@@ -470,6 +470,79 @@ fn quarantine_exposes_only_the_contiguous_agreed_prefix() {
 }
 
 #[test]
+fn quarantine_charges_only_retained_bytes_and_schedules_only_retained_progress() {
+    fn neighbor(offset: usize, more: bool, bytes: &[u8], frame: u64) -> Datagram {
+        let mut d = fragment(offset, more, bytes, frame, false);
+        d.fragment.as_mut().unwrap().id += 1;
+        d
+    }
+    for next in [5, 10] {
+        let limits = Limits {
+            max_retained_payload: 13,
+            ..Limits::default()
+        };
+        let mut sets = FragmentReassembler::<()>::with_prefix_cache(limits);
+        let mut inspect =
+            |_: &Datagram, _: &[pcap_evidence::provenance::PacketId]| (Some(next), None);
+        for (i, d) in [
+            fragment(0, true, b"abcd", 1, false),
+            fragment(8, true, b"ijkl", 2, false),
+            neighbor(0, true, b"1234", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(matches!(
+                sets.push_caching_prefix(d, i as u64 + 1, &[], Some(&mut inspect))
+                    .unwrap(),
+                FragmentOutcome::Pending
+            ));
+        }
+        let mut previews = Vec::new();
+        let mut disputed = |sets: &mut FragmentReassembler<()>, bytes: &[u8], frame| {
+            sets.push_with_invalidation(
+                fragment(4, true, bytes, frame, false),
+                frame,
+                &[],
+                Some(&mut inspect),
+                |prefix, _, _| {
+                    if let Some(d) = prefix {
+                        previews.push(d.payload.data().to_vec());
+                    }
+                    None
+                },
+            )
+        };
+        let first = disputed(&mut sets, b"efghX", 4);
+        if next == 5 {
+            assert!(matches!(first, Err(e) if e.field == "fragment_payload"));
+        } else {
+            // The new disagreement is before the scheduled inspector. It
+            // costs nothing even though the input exceeds the free byte.
+            assert!(matches!(first.unwrap(), FragmentOutcome::Rejected(_)));
+            assert!(matches!(
+                disputed(&mut sets, b"efghY", 5).unwrap(),
+                FragmentOutcome::Rejected(_)
+            ));
+        }
+        let FragmentOutcome::Complete(d, _) = sets.push(neighbor(4, false, b"5", 6), 6).unwrap()
+        else {
+            panic!("independent set must complete at the cap")
+        };
+        assert_eq!(d.payload.data(), b"12345");
+        assert!(matches!(
+            disputed(&mut sets, b"EFGHZ", 7).unwrap(),
+            FragmentOutcome::Rejected(_)
+        ));
+        if next == 5 {
+            assert_eq!(previews, [b"abcdefgh", b"abcdEFGH"]);
+        } else {
+            assert!(previews.is_empty());
+        }
+    }
+}
+
+#[test]
 fn identical_ipv6_overlaps_are_still_rejected() {
     let mut r = FragmentReassembler::new(Limits::default());
     r.push(fragment(0, true, b"abcdefgh", 1, true), 1).unwrap();

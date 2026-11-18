@@ -223,7 +223,9 @@ first identified on the conflicting arrival represent possible payload loss
 for their candidate generations. This also applies to inner TCP headers in a
 fragmented tunnel. A fragment that closes a header gap can establish its
 identity from contiguous, agreeing bytes before the first disputed byte. This
-also applies at the fragment capacity limit. The disputed set supplies no
+also applies at the fragment capacity limit. Any declared enclosing UDP or
+inner IP length still bounds that header. A refused prefix is transient. A later
+admitted fragment can supply fresh evidence at the same position. The disputed set supplies no
 application bytes. A reassembled FIN refused at the
 window’s packet-reference limit supplies the same end-position evidence.
 A late handshake rechecks earlier stream positions and loss observations against

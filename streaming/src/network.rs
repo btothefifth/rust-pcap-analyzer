@@ -699,6 +699,22 @@ pub(crate) fn tcp_prefix_path(
         .flatten()
 }
 
+/// Identify a new loss witness from agreed bytes. Checksums can depend on
+/// disputed bytes outside the prefix; declared tunnel lengths still apply.
+pub(crate) fn agreed_tcp_header(
+    d: &Datagram,
+    path: Vec<String>,
+    max_depth: usize,
+) -> Result<Option<PrefixHeader>> {
+    inspect_scheduled_tcp_path(
+        d,
+        path,
+        max_depth,
+        HeaderUse::Pending(wire::ChecksumPolicy::Observe),
+        &mut None,
+    )
+}
+
 pub(crate) fn inspect_tcp_path(
     first: &Datagram,
     path: Vec<String>,
@@ -879,6 +895,23 @@ mod tests {
             vlans: vec![],
         };
         wire::decode_packet(1, &bytes, id, scope).unwrap()
+    }
+
+    #[test]
+    fn agreed_header_requires_room_for_the_declared_inner_datagram() {
+        let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 32]);
+        let mut frame = tiny_capture::tunneled("vxlan", 7, false, &inner);
+        let length = (frame.len() - 34) as u16;
+        for udp_bytes in [length, length - 1] {
+            frame[38..40].copy_from_slice(&udp_bytes.to_be_bytes());
+            let prefix = fragment_input(&frame, 0..72, true, 1);
+            let header = agreed_tcp_header(&prefix, vec![], 4);
+            if udp_bytes == length {
+                assert_eq!(header.unwrap().unwrap().path.3.frame, 1);
+            } else {
+                assert!(matches!(header, Err(e) if e.field == "tunnel"));
+            }
+        }
     }
 
     #[test]
