@@ -305,6 +305,11 @@ impl<V> FragmentReassembler<V> {
             if let Some(reason) = refusal {
                 return Err(Error::limit(reason));
             }
+            // Replay still records contributors, but has no prefix inspection
+            // to schedule after this set has entered quarantine.
+            if observer.is_none() {
+                set.next_inspection_len = None;
+            }
             self.retained = total;
             return Ok(FragmentOutcome::Rejected(FragmentNotice {
                 code,
@@ -626,6 +631,8 @@ impl<V> Assembly<V> {
                 let incoming = &datagram.payload.data()[start - info.offset..stop - info.offset];
                 let retained =
                     &part.data(&self.prefix.payload)[start - part.start..stop - part.start];
+                #[cfg(test)]
+                tests::OVERLAP_COMPARISONS.set(tests::OVERLAP_COMPARISONS.get() + 1);
                 if incoming != retained {
                     let first = incoming
                         .iter()
@@ -799,5 +806,84 @@ fn set_prefix_extent(prefix: &mut Datagram, end: Option<usize>) {
     } else {
         // At least one byte follows the contiguous part of an unfinished datagram.
         prefix.declared_payload_len = prefix.payload.len() + 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    thread_local! { pub(super) static OVERLAP_COMPARISONS: Cell<usize> = const { Cell::new(0) }; }
+
+    #[test]
+    fn plain_quarantine_keeps_notices_without_comparing_payload_again() {
+        let mut sets = FragmentReassembler::new(Limits {
+            max_fragments_per_set: 4,
+            max_retained_payload: 16,
+            ..Limits::default()
+        });
+        let mut packets = Vec::new();
+        OVERLAP_COMPARISONS.set(0);
+        for frame in 1..=5 {
+            let packet = PacketId {
+                capture: [0; 32],
+                frame,
+                record_offset: frame * 32,
+            };
+            let data = if frame == 1 { b"abcdefgh" } else { b"abcdefgH" };
+            let d = Datagram {
+                scope: Scope {
+                    section: 0,
+                    interface: 0,
+                    link_interface: None,
+                    vlans: vec![],
+                },
+                source: [192, 0, 2, 1].into(),
+                destination: [192, 0, 2, 2].into(),
+                protocol: 17,
+                ipv6: false,
+                network_header_len: 20,
+                fragment: Some(FragmentInfo {
+                    id: 1,
+                    offset: 0,
+                    more: true,
+                }),
+                payload: EvidenceBytes::from_packet(data, packet, 0),
+                declared_payload_len: data.len(),
+                ip_checksum: Checksum::Valid,
+                checksum_context: ChecksumContext::BaseAddresses,
+            };
+            let result = sets.push(d, frame);
+            if frame == 5 {
+                assert!(matches!(result, Err(e) if e.field == "fragments_per_set"));
+            } else {
+                packets.push(packet);
+                if frame == 1 {
+                    assert!(matches!(result.unwrap(), FragmentOutcome::Pending));
+                } else {
+                    let FragmentOutcome::Rejected(notice) = result.unwrap() else {
+                        panic!("expected quarantine notice");
+                    };
+                    assert_eq!(
+                        notice.code,
+                        if frame == 2 {
+                            "conflicting_fragment_bytes"
+                        } else {
+                            "fragment_set_quarantined"
+                        }
+                    );
+                    assert_eq!(notice.packets, packets);
+                }
+            }
+            assert_eq!(
+                OVERLAP_COMPARISONS.get(),
+                usize::from(frame >= 2),
+                "frame {frame}"
+            );
+        }
+        let notices = sets.finish();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].code, "fragment_quarantine_at_eof");
+        assert_eq!(notices[0].packets, packets);
     }
 }
