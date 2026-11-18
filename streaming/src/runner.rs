@@ -148,7 +148,6 @@ struct Active {
     tracker: Option<TcpTracker>,
     flow_ids: BTreeMap<usize, u64>,
     udp_id: Option<u64>,
-    payload: usize,
     packet_refs: usize,
     // Pending fragments consume packet slots but cannot renew an idle window.
     last_frame: u64,
@@ -157,13 +156,21 @@ struct Active {
     dnp3_confirmations: Vec<Dnp3StreamingConfirmationRecord>,
     remaining: usize,
 }
+impl Active {
+    fn payload(&self) -> usize {
+        self.tracker
+            .as_ref()
+            .map_or(0, TcpTracker::retained_payload_bytes)
+    }
+}
 struct FragSlot {
     reassembler: FragmentReassembler,
     last_frame: u64,
 }
 #[derive(Clone, Copy)]
-enum WindowInput {
-    Payload(usize, Option<wire::TcpHeader>),
+enum WindowInput<'a> {
+    Tcp(&'a wire::TcpSegment),
+    Udp,
     Header(wire::TcpHeader, HeaderDisposition),
 }
 struct LayerContext<'a> {
@@ -221,7 +228,6 @@ impl State<'_> {
             tracker,
             flow_ids: BTreeMap::new(),
             udp_id,
-            payload: 0,
             packet_refs: 0,
             last_frame: frame,
             last_ns: None,
@@ -253,13 +259,13 @@ impl State<'_> {
     fn take(&mut self, key: &Key) -> Option<Active> {
         let a = self.active.remove(key)?;
         self.order.remove(&(a.last_frame, key.clone()));
-        self.retained -= a.payload;
+        self.retained -= a.payload();
         Some(a)
     }
     fn put(&mut self, a: Active) -> Result<()> {
         self.retained = self
             .retained
-            .checked_add(a.payload)
+            .checked_add(a.payload())
             .ok_or_else(|| Error::limit("active_payload"))?;
         if self.retained > self.c.max_active_payload || self.active.len() >= self.c.max_active_keys
         {
@@ -295,7 +301,7 @@ impl State<'_> {
         }
         Ok(())
     }
-    fn expire(&mut self, frame: u64) -> Result<()> {
+    fn expire_windows(&mut self, frame: u64) -> Result<()> {
         loop {
             let expired = self
                 .order
@@ -306,6 +312,9 @@ impl State<'_> {
             }
             self.evict_oldest("idle_frame_boundary")?;
         }
+        Ok(())
+    }
+    fn expire_fragments(&mut self, frame: u64) -> Result<()> {
         let keys: Vec<_> = self.fragments.keys().cloned().collect();
         for key in keys {
             let notices = self
@@ -426,7 +435,7 @@ impl State<'_> {
         record_offset: u64,
         warnings: Vec<String>,
     ) -> Result<()> {
-        self.expire(meta.frame)?;
+        self.expire_fragments(meta.frame)?;
         let id = PacketId {
             capture: self.namespace,
             frame: meta.frame,
@@ -865,11 +874,13 @@ impl State<'_> {
         frame: u64,
         time: Option<i128>,
         packets: &[PacketId],
-        input: WindowInput,
+        input: WindowInput<'_>,
     ) -> Result<Active> {
+        self.expire_windows(frame)?;
         let (bytes, header) = match input {
             WindowInput::Header(h, _) => (0, Some(h)),
-            WindowInput::Payload(bytes, header) => (bytes, header),
+            WindowInput::Tcp(s) => (s.payload.len(), Some(s.header())),
+            WindowInput::Udp => (0, None),
         };
         let mut a = match self.take(key) {
             Some(a) => a,
@@ -891,13 +902,21 @@ impl State<'_> {
             tracker.provisional_count(key.scope.clone(), h, packets)
         });
         let mut packet_refs = packets.len() - already_charged;
+        let mut projected = a.payload().saturating_add(bytes);
+        // Most arrivals fit without a second assignment check. At a byte limit,
+        // ask the tracker whether this segment actually increases retention.
+        if projected > self.c.window_payload
+            || self.retained.saturating_add(projected) > self.c.max_active_payload
+        {
+            if let (WindowInput::Tcp(segment), Some(tracker)) = (input, &a.tracker) {
+                projected = tracker.projected_payload_bytes(key.scope.clone(), time, segment)?;
+            }
+        }
         if idle
             || a.packet_refs
                 .checked_add(packet_refs)
                 .is_none_or(|n| n > self.c.window_packets)
-            || a.payload
-                .checked_add(bytes)
-                .is_none_or(|n| n > self.c.window_payload)
+            || projected > self.c.window_payload
         {
             if !idle {
                 if let (WindowInput::Header(header, _), Some(tracker)) = (input, &mut a.tracker) {
@@ -905,6 +924,7 @@ impl State<'_> {
                 }
             }
             packet_refs = packets.len();
+            projected = bytes;
             self.flush(
                 a,
                 if idle {
@@ -915,7 +935,7 @@ impl State<'_> {
             )?;
             a = self.create(key.clone(), frame)?;
         }
-        self.room(a.payload + bytes)?;
+        self.room(projected)?;
         if !provisional && matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
             self.diagnostic(
                 "capture_clock_reversal",
@@ -982,17 +1002,11 @@ impl State<'_> {
             return Ok(());
         }
         let (key, direction) = Key::new(scope.clone(), path, protocol, source, destination);
-        let header = match &transport {
-            Transport::Tcp(segment) => Some(segment.header()),
-            _ => None,
+        let input = match &transport {
+            Transport::Tcp(segment) => WindowInput::Tcp(segment),
+            Transport::Udp(_) => WindowInput::Udp,
         };
-        let mut a = self.admit_window(
-            &key,
-            frame,
-            time,
-            &packets,
-            WindowInput::Payload(bytes, header),
-        )?;
+        let mut a = self.admit_window(&key, frame, time, &packets, input)?;
         match transport {
             Transport::Tcp(segment) => {
                 let syn = segment.syn();
@@ -1017,6 +1031,7 @@ impl State<'_> {
                                 .observe_at_cut(scope.clone(), packets[0], time, retry.header())?;
                         }
                         self.flush(a, "tracker_admission_boundary")?;
+                        self.room(bytes)?;
                         a = self.create(key.clone(), frame)?;
                         a.packet_refs = packets.len();
                         a.last_ns = time;
@@ -1044,7 +1059,6 @@ impl State<'_> {
                             )?;
                             id
                         };
-                        a.payload += bytes;
                         (Some(id), "assigned", vec![])
                     }
                     Assignment::Ambiguous { candidate_flow_ids } => {
@@ -1459,6 +1473,9 @@ pub fn analyze_reader<R: Read>(
                         .map(|w| w.code.to_owned())
                         .collect(),
                 )?;
+                // A rejection on this record can release a fragment witness
+                // before the idle window publishes its final transactions.
+                state.expire_windows(meta.frame)?;
             } else {
                 let secrets = matches!(record.kind(), RecordKind::Secrets { .. });
                 state.sink.emit(&Event::new(

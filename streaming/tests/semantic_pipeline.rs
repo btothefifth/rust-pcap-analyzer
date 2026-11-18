@@ -1497,6 +1497,195 @@ mod provisional_transport {
         root
     }
 
+    fn timed_capture(frames: &[Vec<u8>], seconds: &[u32]) -> Vec<u8> {
+        assert_eq!(frames.len(), seconds.len());
+        let mut source = capture(frames);
+        let mut record = 24;
+        for (frame, time) in frames.iter().zip(seconds) {
+            source[record..record + 4].copy_from_slice(&time.to_le_bytes());
+            record += 16 + frame.len();
+        }
+        source
+    }
+
+    #[test]
+    fn completing_fragment_is_adjudicated_before_idle_frame_expiry() {
+        let mut duplicate = tcp(false, 113, 501, 0x18, REQUEST);
+        duplicate[50] ^= 1;
+        let first = ipv4_fragment(&duplicate, 0..24, true);
+        let last = ipv4_fragment(&duplicate, 24..32, false);
+        let unrelated = tiny_capture::tunneled("gre", 7, false, &tcp(false, 200, 0, 2, &[]));
+        for (tail, paired) in [
+            (vec![first.clone(), last], true),
+            (vec![first, unrelated], false),
+            (vec![duplicate.clone(), duplicate], true),
+        ] {
+            let mut frames = vec![
+                tcp(false, 100, 0, 2, &[]),
+                tcp(true, 500, 101, 0x12, &[]),
+                tcp(false, 101, 501, 0x18, REQUEST),
+                tcp(true, 501, 113, 0x18, RESPONSE),
+            ];
+            frames.extend(tail);
+            let mut c = config();
+            c.idle_frames = 1;
+            c.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+            assert_pair(&capture(&frames), c, paired);
+        }
+    }
+
+    #[test]
+    fn provisional_loss_uses_the_final_admitted_idle_interval() {
+        let extra = tcp(false, 113, 501, 0x18, REQUEST);
+        let first = ipv4_fragment(&extra, 0..24, true);
+        for response_first in [false, true] {
+            for (fragment_time, response_time, paired) in [
+                (124, 123, false),
+                (243, 123, false),
+                (244, 123, true),
+                (124, 124, false),
+            ] {
+                let mut frames = vec![
+                    tcp(false, 100, 0, 2, &[]),
+                    tcp(true, 500, 101, 0x12, &[]),
+                    tcp(false, 101, 501, 0x18, REQUEST),
+                    first.clone(),
+                    tcp(true, 501, 113, 0x18, RESPONSE),
+                ];
+                let mut seconds = [0, 1, 3, fragment_time, response_time];
+                if response_first {
+                    frames.swap(3, 4);
+                    seconds.swap(3, 4);
+                }
+                let root = assert_pair(&timed_capture(&frames, &seconds), config(), paired);
+                if response_time == 123 {
+                    assert_eq!(root.flows().len(), 1);
+                    assert_eq!(root.flows()[0].uncertain_payload.is_some(), !paired);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn peer_syn_ack_replaces_a_provisional_origin_beyond_the_span() {
+        for fin_seq in [372, 373, 630] {
+            for fin_first in [true, false] {
+                let mut frames = vec![
+                    tcp(false, 100, 0, 2, &[]),
+                    tcp(true, 500, 101, 0x12, &[]),
+                    tcp(true, fin_seq, 101, 0x11, &[]),
+                    tcp(false, 101, 501, 0x18, REQUEST),
+                    tcp(true, 501, 113, 0x18, RESPONSE),
+                ];
+                if fin_first {
+                    frames.swap(1, 2);
+                }
+                let mut c = config();
+                c.base.limits.max_stream_span = 128;
+                c.window_payload = 128;
+                assert_eq!(assert_pair(&capture(&frames), c, true).flows().len(), 1);
+            }
+        }
+        let frames = [
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 372, 101, 0x11, &[]),
+            tcp(false, 107, 0, 2, &[]),
+            tcp(true, 501, 108, 0x10, &[]),
+            tcp(true, 500, 101, 0x12, &[]),
+        ];
+        let mut c = config();
+        c.base.limits.max_stream_span = 128;
+        c.window_payload = 128;
+        let root = pcap_evidence::engine::analyze(&capture(&frames), c.base.clone()).unwrap();
+        assert!(matches!(&root.packets.last().unwrap().disposition,
+            pcap_evidence::engine::Disposition::Ambiguous { flows } if flows == &[0,1]));
+        assert!(run(&capture(&frames), c)
+            .events
+            .iter()
+            .any(|e| e.data.encode().contains("ambiguous_generation")));
+    }
+
+    #[test]
+    fn pending_syn_ack_uses_the_same_peer_handshake_as_a_complete_segment() {
+        for (ack, belongs) in [(101, true), (102, false)] {
+            let syn_ack = tcp(true, 500, ack, 0x12, RESPONSE);
+            let frames = [
+                tcp(false, 100, 0, 2, &[]),
+                tcp(true, 372, 101, 0x11, &[]),
+                ipv4_fragment(&syn_ack, 0..24, true),
+            ];
+            let mut c = config();
+            c.base.limits.max_stream_span = 128;
+            c.window_payload = 128;
+            let source = capture(&frames);
+            let root = pcap_evidence::engine::analyze(&source, c.base.clone()).unwrap();
+            assert_eq!(root.flows()[0].uncertain_payload.is_some(), belongs);
+            assert_eq!(
+                run(&source, c)
+                    .events
+                    .iter()
+                    .any(|e| { e.data.encode().contains("tcp_generation_payload_uncertain") }),
+                belongs
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_handshake_releases_window_bytes_before_admission() {
+        for on_syn in [false, true] {
+            for window in [22, 23, 34] {
+                let old = tcp(true, 470, 101, 0x18, RESPONSE);
+                let mut frames = vec![
+                    tcp(false, 100, 0, 2, &[]),
+                    old,
+                    tcp(false, 101, 501, 0x18, REQUEST),
+                    tcp(true, 500, 101, 0x12, if on_syn { RESPONSE } else { &[] }),
+                ];
+                if !on_syn {
+                    frames.push(tcp(true, 501, 113, 0x18, RESPONSE));
+                }
+                let mut c = config();
+                c.window_payload = window;
+                let events = run(&capture(&frames), c).events;
+                assert_eq!(
+                    events
+                        .iter()
+                        .any(|e| e.data.encode().contains("read_mapping")),
+                    window >= 23,
+                    "window {window}, data on SYN {on_syn}"
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .any(|e| e.data.encode().contains("reconstruction_window_budget")),
+                    window < 23
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn correcting_one_window_does_not_evict_an_independent_tuple() {
+        let frames = [
+            tiny_capture::tunneled("gre", 7, false, &tcp(false, 100, 0, 2, &[])),
+            tiny_capture::tunneled("gre", 7, false, &tcp(false, 101, 501, 0x18, REQUEST)),
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 470, 101, 0x18, RESPONSE),
+            tcp(false, 101, 501, 0x18, REQUEST),
+            tcp(true, 500, 101, 0x12, RESPONSE),
+        ];
+        let mut c = config();
+        c.window_payload = 35;
+        c.max_active_payload = 35;
+        let events = run(&capture(&frames), c).events;
+        assert!(events
+            .iter()
+            .any(|e| e.data.encode().contains("read_mapping")));
+        assert!(!events
+            .iter()
+            .any(|e| e.data.encode().contains("active_state_budget")));
+    }
+
     #[test]
     fn loss_uses_the_final_syn_span_in_both_arrival_orders() {
         for after_syn in [false, true] {

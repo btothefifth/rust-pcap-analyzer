@@ -181,7 +181,9 @@ duplicate fragments in enclosing tunnels. Under strict checksum checking, a
 completed segment rejected for its checksum has the same disposition whether
 it arrived whole or in fragments. A provisional fragment consumes a packet slot until adjudication. Its timestamp cannot trigger or renew an idle cut in an existing
 window. Idle decisions use the timestamps of admitted segments and confirmed
-omissions.
+omissions. A pending header is matched against the final admitted activity of
+each candidate generation. A definitive rejection on the record that expires a
+window releases its fragment witness before the window publishes pairs.
 Identical IPv4 fragment overlaps retain the witness from the lowest starting
 offset, with arrival order breaking ties. Partial IP payloads can supply a header
 witness, but normal transport decoding and fragment admission require the
@@ -195,8 +197,11 @@ generation's first payload sequence when that direction has an observed SYN.
 The comparison uses TCP sequence arithmetic and applies in either arrival order.
 A late handshake rechecks earlier stream positions and loss observations against
 the observed initial sequence and configured span. Excluded packets remain in
-diagnostics. A SYN-ACK acknowledging the captured peer SYN can overturn a
-tentative two-FIN close when its sequence excludes the FIN that supplied it.
+diagnostics. When a SYN-ACK acknowledges the captured peer SYN, its sequence
+establishes the missing origin even if an earlier segment lay outside that span.
+It can overturn a tentative two-FIN close when its sequence excludes the FIN
+that supplied it. Window and active payload limits count the bytes the tracker
+retains after that correction.
 A complete payload-free control resolves provisional payload evidence even
 when its own generation assignment remains ambiguous.
 
