@@ -402,6 +402,74 @@ fn conflicting_ipv4_fragments_quarantine_set() {
     assert_eq!(r.finish()[0].code, "fragment_quarantine_at_eof");
 }
 #[test]
+fn quarantine_exposes_only_the_contiguous_agreed_prefix() {
+    // An opaque record spells the alphabet. The two suffix observations
+    // disagree at 'l'. Identify the agreed bytes independently of admission.
+    let pieces = [
+        (0, &b"abcd"[..]),
+        (4, &b"efghijkLm"[..]),
+        (8, &b"ijklm"[..]),
+        (0, &b"abc"[..]),
+    ];
+    for (order, capacity, expected) in [
+        ([0, 2, 1], 3, Some(&b"abcdefghijk"[..])),
+        ([0, 2, 1], 2, Some(&b"abcdefghijk"[..])),
+        ([2, 1, 0], 3, Some(&b"abcdefghijk"[..])),
+        ([1, 2, 0], 3, Some(&b"abcdefghijk"[..])),
+        ([3, 2, 1], 3, None),
+        ([3, 2, 1], 2, None),
+    ] {
+        let mut sets = FragmentReassembler::<()>::with_prefix_cache(Limits {
+            max_fragments_per_set: capacity,
+            ..Limits::default()
+        });
+        let mut observed = None;
+        for (index, piece) in order.into_iter().enumerate() {
+            let (offset, bytes) = pieces[piece];
+            let frame = index as u64 + 1;
+            let outcome = sets.push_with_invalidation(
+                fragment(offset, true, bytes, frame, false),
+                frame,
+                &[],
+                Some(&mut |_, _| (Some(5), None)),
+                |prefix, _, _| {
+                    if let Some(prefix) = prefix {
+                        assert!(prefix.fragment.is_some());
+                        assert!(prefix.declared_payload_len > prefix.payload.len());
+                        for span in prefix.payload.spans() {
+                            let (_, source) = pieces[order[span.packet.frame as usize - 1]];
+                            let source_start = span.packet_start - 54;
+                            let stop = source_start + span.end - span.start;
+                            assert_eq!(
+                                &prefix.payload.data()[span.start..span.end],
+                                &source[source_start..stop]
+                            );
+                        }
+                        assert!(prefix.payload.validate());
+                        observed = Some(prefix.payload.data().to_vec());
+                    }
+                    None
+                },
+            );
+            if index >= capacity {
+                assert!(matches!(outcome, Err(e) if e.code == ErrorCode::LimitExceeded));
+            } else {
+                assert!(matches!(
+                    outcome.unwrap(),
+                    FragmentOutcome::Pending | FragmentOutcome::Rejected(_)
+                ));
+            }
+        }
+        assert_eq!(
+            observed.as_deref(),
+            expected,
+            "{order:?} capacity {capacity}"
+        );
+        assert_eq!(sets.finish()[0].code, "fragment_quarantine_at_eof");
+    }
+}
+
+#[test]
 fn identical_ipv6_overlaps_are_still_rejected() {
     let mut r = FragmentReassembler::new(Limits::default());
     r.push(fragment(0, true, b"abcdefgh", 1, true), 1).unwrap();

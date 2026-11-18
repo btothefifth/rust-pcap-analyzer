@@ -122,14 +122,23 @@ impl SnapshotFragments {
         };
         let mut quarantined = false;
         let mut disputed = None;
+        let mut agreed_header = None;
         let outcome = self.sets.push_with_invalidation(
             datagram,
             frame,
             &[],
             Some(&mut inspect),
-            |_, previous, _| {
+            |agreed, previous, _| {
                 quarantined = true;
                 disputed = previous;
+                let prefix = agreed?;
+                match Prefix::inspect(prefix, self.policy) {
+                    Ok(observation) => {
+                        agreed_header = observation;
+                        None
+                    }
+                    Err(e) => (e.code == ErrorCode::Truncated).then(|| prefix.payload.len() + 1),
+                }
             },
         )?;
         if let FragmentOutcome::Complete(_, packets) = &outcome {
@@ -140,7 +149,7 @@ impl SnapshotFragments {
             if let (FragmentOutcome::Rejected(notice), Some(prefix)) = (&outcome, disputed) {
                 prefix.invalidate(tracker, &notice.packets);
             }
-            if let Some((packet, mut prefix)) = arriving {
+            if let Some((packet, mut prefix)) = arriving.or(agreed_header) {
                 if quarantined {
                     prefix.disposition = HeaderDisposition::AwaitingReassembly;
                     prefix.header.payload_len = None;

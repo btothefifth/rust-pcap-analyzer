@@ -205,6 +205,7 @@
     "reconstruction::unknown_time_does_not_trigger_idle_expiry_or_time_zero",
     "reconstruction::fragment_out_of_order_assembly_conserves_every_packet_reference",
     "reconstruction::conflicting_ipv4_fragments_quarantine_set",
+    "reconstruction::quarantine_exposes_only_the_contiguous_agreed_prefix",
     "reconstruction::identical_ipv6_overlaps_are_still_rejected",
     "reconstruction::identical_ipv4_fragment_duplicate_is_preserved_as_observation",
     "reconstruction::fragment_expiry_is_explicit_and_uses_capture_progress_not_wall_clock",

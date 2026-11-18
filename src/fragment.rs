@@ -51,7 +51,9 @@ struct Assembly<V> {
     end: Option<usize>,
     first_frame: u64,
     packets: Vec<PacketId>,
-    poisoned: bool,
+    // Earliest disputed byte or terminal boundary. Quarantined sets only expose
+    // evidence before this offset and never complete.
+    disputed_at: Option<usize>,
     // None once additional bytes cannot change the classification.
     next_inspection_len: Option<usize>,
 }
@@ -198,18 +200,20 @@ impl<V> FragmentReassembler<V> {
         ancestors: &[PacketId],
         observer: Option<&mut CachedPrefixObserver<'_, V>>,
     ) -> Result<FragmentOutcome> {
-        self.push_with_invalidation(datagram, frame, ancestors, observer, |_, _, _| {})
+        self.push_with_invalidation(datagram, frame, ancestors, observer, |_, _, _| None)
     }
 
     /// Notify the consumer whenever the arriving fragment belongs to a quarantined
-    /// set. The first notification also returns any cached verdict to retract.
+    /// set. The first notification returns any cached verdict to retract. When
+    /// the agreed prefix grows, it is available for loss attribution only.
+    /// Return the next useful prefix length, or None when identity is settled.
     pub fn push_with_invalidation(
         &mut self,
         mut datagram: Datagram,
         frame: u64,
         ancestors: &[PacketId],
         observer: Option<&mut CachedPrefixObserver<'_, V>>,
-        mut invalidate: impl FnMut(&Scope, Option<V>, &[PacketId]),
+        mut invalidate: impl FnMut(Option<&Datagram>, Option<V>, &[PacketId]) -> Option<usize>,
     ) -> Result<FragmentOutcome> {
         self.limits.validate()?;
         datagram.require_complete()?;
@@ -258,19 +262,37 @@ impl<V> FragmentReassembler<V> {
         admitted_packets.dedup();
         let too_many = admitted_packets.len() > self.limits.max_fragments_per_set
             || existing.is_some_and(|set| set.parts.len() >= self.limits.max_fragments_per_set);
-        let new_size = if existing.is_some_and(|set| set.poisoned) {
-            self.retained
-        } else {
-            self.retained
-                .checked_add(datagram.payload.len())
-                .ok_or_else(|| Error::limit("fragment_payload"))?
-        };
+        let retained_arrival =
+            match existing.and_then(|set| set.disputed_at.map(|bound| (set, bound))) {
+                Some((set, bound)) => {
+                    let stop = bound.min(end);
+                    if observer.is_some()
+                        && set.next_inspection_len.is_some()
+                        && stop > set.prefix.payload.len()
+                    {
+                        stop.saturating_sub(info.offset)
+                    } else {
+                        0
+                    }
+                }
+                _ => datagram.payload.len(),
+            };
+        let new_size = self
+            .retained
+            .checked_add(retained_arrival)
+            .ok_or_else(|| Error::limit("fragment_payload"))?;
         if too_many || new_size > self.limits.max_retained_payload {
             if let Some(set) = self.sets.get_mut(&key) {
                 let inspect_new = (observer.is_some() || set.verdict.is_some())
                     && set.reusable_verdict(&datagram, &info).is_none();
-                if set.poisoned || (inspect_new && set.conflict(&datagram, &info, end).is_some()) {
-                    set.quarantine(&mut invalidate);
+                let conflict = inspect_new
+                    .then(|| set.conflict(&datagram, &info, end))
+                    .flatten();
+                if let Some((_, bound)) = set.dispute(conflict) {
+                    if observer.is_none() {
+                        set.next_inspection_len = None;
+                    }
+                    set.inspect_quarantine(datagram, &info, bound, false, &mut invalidate)?;
                 } else if inspect_new {
                     if let Some(inspect) = observer {
                         set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
@@ -289,19 +311,7 @@ impl<V> FragmentReassembler<V> {
             }
 
             // Copy fixed metadata, not a full payload that is immediately discarded.
-            let prefix = Datagram {
-                scope: datagram.scope.clone(),
-                source: datagram.source,
-                destination: datagram.destination,
-                protocol: datagram.protocol,
-                ipv6: datagram.ipv6,
-                network_header_len: datagram.network_header_len,
-                declared_payload_len: datagram.declared_payload_len,
-                fragment: datagram.fragment.clone(),
-                payload: EvidenceBytes::default(),
-                ip_checksum: datagram.ip_checksum,
-                checksum_context: datagram.checksum_context,
-            };
+            let prefix = with_payload(&datagram, EvidenceBytes::default());
             if let Some(deadline) = frame
                 .checked_add(self.limits.fragment_frame_lifetime)
                 .and_then(|n| n.checked_add(1))
@@ -317,7 +327,7 @@ impl<V> FragmentReassembler<V> {
                     end: None,
                     first_frame: frame,
                     packets: Vec::new(),
-                    poisoned: false,
+                    disputed_at: None,
                     next_inspection_len: Some(1),
                     verdict: None,
                 },
@@ -331,13 +341,18 @@ impl<V> FragmentReassembler<V> {
                 .ok_or_else(|| Error::limit("fragment_state"))?;
             set.packets = admitted_packets;
             let learned_end = !info.more && set.end.is_none();
-            let conflict = if set.poisoned {
-                Some("fragment_set_quarantined")
-            } else {
-                set.conflict(&datagram, &info, end)
-            };
-            if let Some(code) = conflict {
-                set.quarantine(&mut invalidate);
+            let conflict = set.conflict(&datagram, &info, end);
+            if let Some((code, bound)) = set.dispute(conflict) {
+                if observer.is_none() {
+                    set.next_inspection_len = None;
+                }
+                self.retained += set.inspect_quarantine(
+                    datagram,
+                    &info,
+                    bound,
+                    observer.is_some(),
+                    &mut invalidate,
+                )?;
                 return Ok(FragmentOutcome::Rejected(FragmentNotice {
                     code,
                     packets: set.packets.clone(),
@@ -375,7 +390,8 @@ impl<V> FragmentReassembler<V> {
                 },
             );
             if let Err(error) = set.extend_prefix(index) {
-                set.quarantine(&mut invalidate);
+                set.disputed_at = Some(0);
+                invalidate(None, set.verdict.take(), &set.packets);
                 return Err(error);
             }
             let contiguous = set.prefix.payload.len();
@@ -388,7 +404,8 @@ impl<V> FragmentReassembler<V> {
                         set.prefix.network_header_len
                     };
                     if total + overhead > 65_535 {
-                        set.quarantine(&mut invalidate);
+                        set.disputed_at = Some(0);
+                        invalidate(None, set.verdict.take(), &set.packets);
                         return Ok(FragmentOutcome::Rejected(FragmentNotice {
                             code: "reassembled_ip_length_overflow",
                             packets: set.packets.clone(),
@@ -439,7 +456,7 @@ impl<V> FragmentReassembler<V> {
             .map(|set| {
                 retire(
                     FragmentNotice {
-                        code: if set.poisoned {
+                        code: if set.disputed_at.is_some() {
                             "fragment_quarantine_at_eof"
                         } else {
                             "incomplete_fragment_set_at_eof"
@@ -454,14 +471,95 @@ impl<V> FragmentReassembler<V> {
 }
 
 impl<V> Assembly<V> {
-    fn quarantine(&mut self, invalidate: &mut impl FnMut(&Scope, Option<V>, &[PacketId])) {
-        self.poisoned = true;
-        invalidate(&self.prefix.scope, self.verdict.take(), &self.packets);
+    fn dispute(&self, conflict: Option<(&'static str, usize)>) -> Option<(&'static str, usize)> {
+        match self.disputed_at {
+            Some(bound) => Some((
+                "fragment_set_quarantined",
+                conflict.map_or(bound, |(_, new)| bound.min(new)),
+            )),
+            None => conflict,
+        }
+    }
+
+    fn inspect_quarantine(
+        &mut self,
+        arrival: Datagram,
+        info: &FragmentInfo,
+        bound: usize,
+        retain: bool,
+        invalidate: &mut impl FnMut(Option<&Datagram>, Option<V>, &[PacketId]) -> Option<usize>,
+    ) -> Result<usize> {
+        self.disputed_at = Some(bound);
+        let previous = self.verdict.take();
+        let start = self.prefix.payload.len();
+        let end = bound.min(info.offset + arrival.payload.len());
+        let Some(next) = self.next_inspection_len.filter(|next| *next <= bound) else {
+            invalidate(None, previous, &self.packets);
+            return Ok(0);
+        };
+        if end <= start.max(info.offset) {
+            invalidate(None, previous, &self.packets);
+            return Ok(0);
+        }
+        // Keep a refused arrival transient. Admitted, out-of-order pieces can
+        // supply the agreed prefix when a later arrival closes a hole.
+        let index = self.parts.partition_point(|part| part.start <= info.offset);
+        let part = Part {
+            start: info.offset,
+            end,
+            more: info.more,
+            pending: Some(arrival.payload.slice(0..end - info.offset)?),
+            preferred_spans: Vec::new(),
+        };
+        let charged = if retain { end - info.offset } else { 0 };
+        let mut transient;
+        let prefix = if retain {
+            self.parts.insert(index, part);
+            update_metadata(&mut self.prefix, &arrival, info);
+            self.extend_prefix(index)?;
+            &mut self.prefix
+        } else {
+            if info.offset > start {
+                invalidate(None, previous, &self.packets);
+                return Ok(0);
+            }
+            transient = self.prefix.clone();
+            update_metadata(&mut transient, &arrival, info);
+            let pieces = self.parts[..index]
+                .iter()
+                .chain([&part])
+                .chain(&self.parts[index..]);
+            append_pending(&mut transient.payload, pieces, bound)?;
+            &mut transient
+        };
+        let length = bound.min(prefix.payload.len());
+        if length <= start || length < next {
+            invalidate(None, previous, &self.packets);
+            return Ok(charged);
+        }
+        // The bytes after the agreed prefix, including its terminal extent,
+        // cannot influence the classifier. Never expose the result as complete.
+        prefix.fragment = Some(FragmentInfo {
+            id: info.id,
+            offset: 0,
+            more: true,
+        });
+        prefix.declared_payload_len = length + 1;
+        let limited;
+        let view = if length < prefix.payload.len() {
+            limited = with_payload(prefix, prefix.payload.slice(0..length)?);
+            &limited
+        } else {
+            &*prefix
+        };
+        self.next_inspection_len =
+            invalidate(Some(view), previous, &self.packets).map(|n| n.max(length + 1));
+        Ok(charged)
     }
 
     fn reusable_metadata(&self, d: &Datagram, info: &FragmentInfo) -> bool {
         self.verdict.is_some()
-            && !self.poisoned
+            && self.disputed_at.is_none()
             && !d.ipv6
             && info.offset == 0
             && info.more
@@ -488,22 +586,42 @@ impl<V> Assembly<V> {
         datagram: &Datagram,
         info: &FragmentInfo,
         end: usize,
-    ) -> Option<&'static str> {
+    ) -> Option<(&'static str, usize)> {
+        if self
+            .disputed_at
+            .is_some_and(|bound| self.next_inspection_len.is_none_or(|next| next > bound))
+        {
+            return None;
+        }
         // A fragment can violate more than one rule. V1 history records the
         // overlap verdict first, then a range violation, then a disputed end.
+        let boundary = self
+            .end
+            .unwrap_or(65_535)
+            .min(if info.more { 65_535 } else { end });
+        let mut disagreement = None;
         for part in &self.parts {
             let start = info.offset.max(part.start);
-            let stop = end.min(part.end);
+            let stop = end.min(part.end).min(disagreement.unwrap_or(end));
             if start < stop {
                 if datagram.ipv6 {
-                    return Some("ipv6_overlapping_fragments");
+                    return Some(("ipv6_overlapping_fragments", start.min(boundary)));
                 }
-                if datagram.payload.data()[start - info.offset..stop - info.offset]
-                    != part.data(&self.prefix.payload)[start - part.start..stop - part.start]
-                {
-                    return Some("conflicting_fragment_bytes");
+                let incoming = &datagram.payload.data()[start - info.offset..stop - info.offset];
+                let retained =
+                    &part.data(&self.prefix.payload)[start - part.start..stop - part.start];
+                if incoming != retained {
+                    let first = incoming
+                        .iter()
+                        .zip(retained)
+                        .position(|(a, b)| a != b)
+                        .unwrap();
+                    disagreement = Some(start + first);
                 }
             }
+        }
+        if let Some(first) = disagreement {
+            return Some(("conflicting_fragment_bytes", first.min(boundary)));
         }
         let terminal = if info.more { self.end } else { Some(end) };
         if let Some(total) = terminal {
@@ -514,11 +632,11 @@ impl<V> Assembly<V> {
                     .iter()
                     .any(|p| p.end > total || (p.more && p.end == total))
             {
-                return Some("fragment_outside_terminal_length");
+                return Some(("fragment_outside_terminal_length", boundary));
             }
         }
         if !info.more && self.end.is_some_and(|total| total != end) {
-            return Some("conflicting_fragment_terminal_length");
+            return Some(("conflicting_fragment_terminal_length", boundary));
         }
         None
     }
@@ -592,17 +710,7 @@ impl<V> Assembly<V> {
                 std::mem::take(&mut arrival.payload),
             )?;
         }
-        for part in &self.parts {
-            if part.start > prefix.payload.len() {
-                break;
-            }
-            if part.end > prefix.payload.len() {
-                if let Some(bytes) = &part.pending {
-                    let suffix = bytes.slice(prefix.payload.len() - part.start..bytes.len())?;
-                    prefix.payload.append(&suffix, 65_535)?;
-                }
-            }
-        }
+        append_pending(&mut prefix.payload, &self.parts, 65_535)?;
         if prefix.payload.is_empty() {
             return Ok(());
         }
@@ -610,6 +718,37 @@ impl<V> Assembly<V> {
         inspect(&prefix, packets);
         Ok(())
     }
+}
+
+fn with_payload(template: &Datagram, payload: EvidenceBytes) -> Datagram {
+    Datagram {
+        scope: template.scope.clone(),
+        fragment: template.fragment.clone(),
+        payload,
+        ..*template
+    }
+}
+
+fn append_pending<'a>(
+    prefix: &mut EvidenceBytes,
+    parts: impl IntoIterator<Item = &'a Part>,
+    bound: usize,
+) -> Result<()> {
+    for part in parts {
+        if part.start > prefix.len() || prefix.len() >= bound {
+            break;
+        }
+        let stop = part.end.min(bound);
+        if stop > prefix.len() {
+            if let Some(bytes) = &part.pending {
+                prefix.append(
+                    &bytes.slice(prefix.len() - part.start..stop - part.start)?,
+                    65_535,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_contiguous(prefix: &mut EvidenceBytes, start: usize, bytes: EvidenceBytes) -> Result<()> {

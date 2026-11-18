@@ -475,6 +475,7 @@ impl<'a> State<'a> {
         frame: u64,
         ancestors: &[PacketId],
         inspect: &mut pcap_evidence::fragment::CachedPrefixObserver<'_, PrefixVerdict>,
+        mut inspect_disputed: impl FnMut(&wire::Datagram) -> Option<usize>,
     ) -> Result<LayerReassembly> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
@@ -518,11 +519,12 @@ impl<'a> State<'a> {
                 frame,
                 ancestors,
                 Some(inspect),
-                |_, previous, packets| {
+                |agreed, previous, packets| {
                     quarantined = true;
                     if let Some(verdict) = previous {
                         verdict.invalidate(&mut self.active, packets);
                     }
+                    agreed.and_then(&mut inspect_disputed)
                 },
             )
         };
@@ -781,38 +783,47 @@ impl<'a> State<'a> {
             }
             (next, Some(verdict))
         };
-        let (datagram, mut contributors) =
-            match self.reassemble(d, &path, frame, ancestors, &mut inspect)? {
-                LayerReassembly::Complete(d, ids) => (d, ids),
-                LayerReassembly::Incomplete {
-                    quarantined,
-                    retained,
-                } => {
-                    if let Some((scope, path, segment, packets)) = resolved {
-                        self.resolve_header(scope, path, segment, &packets);
-                    }
-                    if let Some(mut header) = header {
-                        // The header still identifies possible owners. The disputed
-                        // outer bytes cannot establish the inner payload length.
-                        if quarantined {
-                            header.2.payload_len = None;
-                            disposition = HeaderDisposition::AwaitingReassembly;
-                        } else if !retained && disposition == HeaderDisposition::RejectedPrefix {
-                            let (scope, path, segment, _) = header;
-                            self.resolve_header(scope, path, segment, &refine_packets);
-                            return Ok(());
-                        }
-                        self.apply_pending_header(
-                            header,
-                            disposition,
-                            &refine_packets,
-                            frame,
-                            time,
-                        )?;
-                    }
-                    return Ok(());
+        let mut agreed_header = None;
+        let reassembly = self.reassemble(d, &path, frame, ancestors, &mut inspect, |prefix| {
+            match network::inspect_tcp_path(
+                prefix,
+                path.clone(),
+                max_depth,
+                network::HeaderUse::Resolve,
+            ) {
+                Ok(observation) => {
+                    agreed_header = observation;
+                    None
                 }
-            };
+                Err(e) => (e.code == pcap_evidence::ErrorCode::Truncated)
+                    .then(|| prefix.payload.len() + 1),
+            }
+        })?;
+        let (datagram, mut contributors) = match reassembly {
+            LayerReassembly::Complete(d, ids) => (d, ids),
+            LayerReassembly::Incomplete {
+                quarantined,
+                retained,
+            } => {
+                if let Some((scope, path, segment, packets)) = resolved {
+                    self.resolve_header(scope, path, segment, &packets);
+                }
+                if let Some(mut header) = header.or(agreed_header) {
+                    // The header still identifies possible owners. The disputed
+                    // outer bytes cannot establish the inner payload length.
+                    if quarantined {
+                        header.2.payload_len = None;
+                        disposition = HeaderDisposition::AwaitingReassembly;
+                    } else if !retained && disposition == HeaderDisposition::RejectedPrefix {
+                        let (scope, path, segment, _) = header;
+                        self.resolve_header(scope, path, segment, &refine_packets);
+                        return Ok(());
+                    }
+                    self.apply_pending_header(header, disposition, &refine_packets, frame, time)?;
+                }
+                return Ok(());
+            }
+        };
         if contributors.is_empty() {
             contributors.push(id);
         }
