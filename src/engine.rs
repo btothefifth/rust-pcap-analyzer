@@ -375,7 +375,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                 prefix,
             ) {
                 Ok(Some(observation)) => {
-                    let candidate = observation.possible_loss(config.checksum_policy);
+                    let candidate = observation.pending_extent(config.checksum_policy);
                     if let Some(candidate) = candidate {
                         tracker.refine_reassembly_extent(&prefix.scope, candidate, contributors);
                         let packet = header.as_ref().map_or(observation.packet, |(_, id, _)| *id);
@@ -388,7 +388,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                             contributors,
                         );
                     }
-                    (None, candidate.filter(wire::TcpHeader::is_empty_fin))
+                    (None, candidate.filter(|h| h.payload_len == Some(0)))
                 }
                 Ok(None) => (None, None),
                 Err(error) => (
@@ -396,8 +396,14 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     None,
                 ),
             };
-        let outcome =
-            fragments.push_caching_prefix(network, metadata.frame, &[], Some(&mut inspect))?;
+        let mut invalidated = None;
+        let outcome = fragments.push_with_invalidation(
+            network,
+            metadata.frame,
+            &[],
+            Some(&mut inspect),
+            |scope, verdict, _| invalidated = Some((scope.clone(), verdict)),
+        )?;
         if !matches!(outcome, FragmentOutcome::Complete(..)) {
             if let Some((scope, packet, segment)) = header {
                 tracker.observe_header(
@@ -415,6 +421,9 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                 continue;
             }
             FragmentOutcome::Rejected(notice) => {
+                if let Some((scope, header)) = invalidated {
+                    tracker.invalidate_reassembly_extent(&scope, header, &notice.packets);
+                }
                 fragment_notice(&mut packets, &notice)?;
                 notices.push(notice);
                 continue;

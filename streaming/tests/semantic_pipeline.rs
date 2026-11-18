@@ -689,16 +689,66 @@ fn fragmented_fin_extent_matches_the_retained_stream_end() {
             tcp(true, peer + 1, seq + 13, 0x18, &response),
         ]
     };
-    for end in [1013, 1018] {
-        let fin = tcp_with_options(false, end, 5012, 0x11, &[1; 28], &[]);
+    for (flags, end) in [(0x11, 1013), (0x11, 1018), (0x10, 1013)] {
+        let fin = tcp_with_options(false, end, 5012, flags, &[1; 28], &[]);
         let head = ipv4_fragment(&fin, 0..24, true);
         let tail = ipv4_fragment(&fin, 40..48, false);
+        let longer_fin = tcp_with_options(false, end, 5012, flags, &[1; 28], &[0; 8]);
+        let longer = ipv4_fragment(&longer_fin, 40..56, false);
         let all: Vec<_> = (0..48)
             .step_by(8)
             .map(|i| ipv4_fragment(&fin, i..i + 8, i + 8 != 48))
             .collect();
         for (case, fragments, slots, known_end) in [
             ("unknown end", vec![head.clone()], 32, false),
+            (
+                "short terminal first",
+                vec![head.clone(), tail.clone(), longer.clone()],
+                32,
+                false,
+            ),
+            (
+                "long terminal first",
+                vec![head.clone(), longer.clone(), tail.clone()],
+                32,
+                false,
+            ),
+            (
+                "duplicate after dispute",
+                vec![head.clone(), tail.clone(), longer.clone(), head.clone()],
+                32,
+                false,
+            ),
+            (
+                "conflict after duplicate",
+                vec![head.clone(), tail.clone(), head.clone(), longer.clone()],
+                32,
+                false,
+            ),
+            (
+                "terminals before header",
+                vec![tail.clone(), longer.clone(), head.clone()],
+                32,
+                false,
+            ),
+            (
+                "terminals reversed before header",
+                vec![longer.clone(), tail.clone(), head.clone()],
+                32,
+                false,
+            ),
+            (
+                "conflict at fragment limit",
+                vec![head.clone(), tail.clone(), longer.clone()],
+                32,
+                false,
+            ),
+            (
+                "consistent duplicate terminal",
+                vec![head.clone(), tail.clone(), tail.clone()],
+                32,
+                true,
+            ),
             ("head first", vec![head.clone(), tail.clone()], 32, true),
             ("tail first", vec![tail.clone(), head.clone()], 32, true),
             (
@@ -717,6 +767,10 @@ fn fragmented_fin_extent_matches_the_retained_stream_end() {
             ("all fragments admitted", all.clone(), 32, true),
         ] {
             let mut frames = exchange(9, 1000, 5000);
+            let witness_frame = fragments
+                .iter()
+                .position(|f| f == &head)
+                .map(|i| (frames.len() + i + 1) as u64);
             frames.extend(fragments);
             // The other exchange uses a distinct VLAN and has its own window.
             for mut packet in exchange(17, 100, 800) {
@@ -733,7 +787,33 @@ fn fragmented_fin_extent_matches_the_retained_stream_end() {
             let Json::Array(rows) = field(&report, "transaction_candidates") else {
                 panic!("transactions array")
             };
+            if case == "conflict at fragment limit" {
+                config.base.limits.max_fragments_per_set = 2;
+            }
             let out = run(&bytes, config);
+            if !known_end {
+                let frame = witness_frame.expect("incomplete set has a TCP header");
+                assert_eq!(
+                    root.flows()[0].uncertain_payload.unwrap().frame,
+                    frame,
+                    "{case}"
+                );
+                let diagnostic = out
+                    .events
+                    .iter()
+                    .find(|e| {
+                        e.kind == EventKind::Diagnostic
+                            && e.data.encode().contains("tcp_generation_payload_uncertain")
+                    })
+                    .unwrap();
+                assert_eq!(diagnostic.evidence.packets[0].frame, frame, "{case}");
+            }
+            if case == "conflict at fragment limit" {
+                assert!(out
+                    .events
+                    .iter()
+                    .any(|e| e.data.encode().contains("fragment_context_reset")));
+            }
             let expected: &[u64] = if known_end && end == 1013 {
                 &[9, 17]
             } else {
@@ -747,12 +827,12 @@ fn fragmented_fin_extent_matches_the_retained_stream_end() {
             assert_eq!(
                 mapping_addresses(rows.iter()),
                 expected,
-                "snapshot {case}, FIN {end}"
+                "snapshot {case}, flags {flags}, sequence {end}"
             );
             assert_eq!(
                 mapping_addresses(stream),
                 expected,
-                "stream {case}, FIN {end}"
+                "stream {case}, flags {flags}, sequence {end}"
             );
             assert_eq!(
                 out.events.iter().any(|e| e

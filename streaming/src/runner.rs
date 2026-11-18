@@ -402,8 +402,31 @@ impl State<'_> {
                 .get_mut(path)
                 .ok_or_else(|| Error::limit("fragment_context"))?;
             slot.last_frame = frame;
-            slot.reassembler
-                .push_caching_prefix(d, frame, ancestors, Some(inspect))
+            slot.reassembler.push_with_invalidation(
+                d,
+                frame,
+                ancestors,
+                Some(inspect),
+                |_, previous, packets| {
+                    if let Some(header) = previous {
+                        let (scope, path, segment, _) = header.path;
+                        if segment.payload_len == Some(0) {
+                            let (key, _) = Key::new(
+                                scope.clone(),
+                                path,
+                                6,
+                                segment.source,
+                                segment.destination,
+                            );
+                            if let Some(tracker) =
+                                self.active.get_mut(&key).and_then(|a| a.tracker.as_mut())
+                            {
+                                tracker.invalidate_reassembly_extent(&scope, segment, packets);
+                            }
+                        }
+                    }
+                },
+            )
         };
         match result {
             Ok(FragmentOutcome::Pending) => Ok(None),
@@ -592,7 +615,8 @@ impl State<'_> {
         }
         let fragmented = d.fragment.is_some();
         let max_depth = self.c.max_tunnel_depth.saturating_sub(depth);
-        let purpose = network::HeaderUse::Loss(self.c.base.checksum_policy);
+        let policy = self.c.base.checksum_policy;
+        let purpose = network::HeaderUse::Pending(policy);
         let loss_header =
             |d: &wire::Datagram| network::tcp_prefix_path(d, path.clone(), max_depth, purpose);
         let mut header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
@@ -610,6 +634,13 @@ impl State<'_> {
         let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
             let mut next_check = None;
+            let complete =
+                prefix.fragment.is_none() && prefix.payload.len() == prefix.declared_payload_len;
+            let purpose = if complete {
+                network::HeaderUse::Loss(policy)
+            } else {
+                purpose
+            };
             match network::inspect_scheduled_tcp_path(
                 prefix,
                 path.clone(),
@@ -618,9 +649,7 @@ impl State<'_> {
                 &mut next_check,
             ) {
                 Ok(Some(candidate)) => {
-                    if prefix.fragment.is_none()
-                        && prefix.payload.len() == prefix.declared_payload_len
-                    {
+                    if complete {
                         // A complete prefix is observed here only when the set
                         // was refused. Replace its provisional contributors.
                         let (scope, path, segment, _) = &candidate.path;
@@ -633,7 +662,7 @@ impl State<'_> {
                         if let Some((_, _, _, packet)) = &header {
                             observed.3 = *packet;
                         }
-                        if observed.2.is_empty_fin() {
+                        if observed.2.payload_len == Some(0) {
                             refine_packets.extend_from_slice(contributors);
                         }
                         header = Some(observed);

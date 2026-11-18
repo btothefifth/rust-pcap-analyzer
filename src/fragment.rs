@@ -177,10 +177,23 @@ impl<V> FragmentReassembler<V> {
     /// must use the same classifier and policy throughout a fragment set.
     pub fn push_caching_prefix(
         &mut self,
+        datagram: Datagram,
+        frame: u64,
+        ancestors: &[PacketId],
+        observer: Option<&mut CachedPrefixObserver<'_, V>>,
+    ) -> Result<FragmentOutcome> {
+        self.push_with_invalidation(datagram, frame, ancestors, observer, |_, _, _| {})
+    }
+
+    /// Notify the consumer when a quarantined set invalidates its cached verdict.
+    /// The packet list identifies witnesses previously inspected for that set.
+    pub fn push_with_invalidation(
+        &mut self,
         mut datagram: Datagram,
         frame: u64,
         ancestors: &[PacketId],
         observer: Option<&mut CachedPrefixObserver<'_, V>>,
+        mut invalidate: impl FnMut(&Scope, V, &[PacketId]),
     ) -> Result<FragmentOutcome> {
         self.limits.validate()?;
         datagram.require_complete()?;
@@ -237,9 +250,16 @@ impl<V> FragmentReassembler<V> {
                 .ok_or_else(|| Error::limit("fragment_payload"))?
         };
         if too_many || new_size > self.limits.max_retained_payload {
-            if let (Some(set), Some(inspect)) = (existing, observer) {
-                if set.reusable_verdict(&datagram, &info).is_none() {
-                    set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
+            if let Some(set) = self.sets.get_mut(&key) {
+                if !set.poisoned
+                    && (observer.is_some() || set.verdict.is_some())
+                    && set.reusable_verdict(&datagram, &info).is_none()
+                {
+                    if set.conflict(&datagram, &info, end).is_some() {
+                        set.quarantine(&mut invalidate);
+                    } else if let Some(inspect) = observer {
+                        set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
+                    }
                 }
             }
             return Err(Error::limit(if too_many {
@@ -303,7 +323,7 @@ impl<V> FragmentReassembler<V> {
             }
             let learned_end = !info.more && set.end.is_none();
             if let Some(code) = set.conflict(&datagram, &info, end) {
-                set.poisoned = true;
+                set.quarantine(&mut invalidate);
                 return Ok(FragmentOutcome::Rejected(FragmentNotice {
                     code,
                     packets: set.packets.clone(),
@@ -341,7 +361,7 @@ impl<V> FragmentReassembler<V> {
                 },
             );
             if let Err(error) = set.extend_prefix(index) {
-                set.poisoned = true;
+                set.quarantine(&mut invalidate);
                 return Err(error);
             }
             let contiguous = set.prefix.payload.len();
@@ -354,7 +374,7 @@ impl<V> FragmentReassembler<V> {
                         set.prefix.network_header_len
                     };
                     if total + overhead > 65_535 {
-                        set.poisoned = true;
+                        set.quarantine(&mut invalidate);
                         return Ok(FragmentOutcome::Rejected(FragmentNotice {
                             code: "reassembled_ip_length_overflow",
                             packets: set.packets.clone(),
@@ -411,6 +431,13 @@ impl<V> FragmentReassembler<V> {
 }
 
 impl<V> Assembly<V> {
+    fn quarantine(&mut self, invalidate: &mut impl FnMut(&Scope, V, &[PacketId])) {
+        self.poisoned = true;
+        if let Some(verdict) = self.verdict.take() {
+            invalidate(&self.prefix.scope, verdict, &self.packets);
+        }
+    }
+
     fn reusable_metadata(&self, d: &Datagram, info: &FragmentInfo) -> bool {
         self.verdict.is_some()
             && !self.poisoned
@@ -421,6 +448,7 @@ impl<V> Assembly<V> {
             && d.network_header_len == self.prefix.network_header_len
             && d.ip_checksum == self.prefix.ip_checksum
             && d.checksum_context == self.prefix.checksum_context
+            && self.end.is_none_or(|total| d.payload.len() < total)
             && d.payload.len() <= self.prefix.payload.len()
     }
 
@@ -531,10 +559,7 @@ impl<V> Assembly<V> {
     ) -> Result<()> {
         let contiguous = self.prefix.payload.len();
         let extends = info.offset <= contiguous && end > contiguous;
-        if self.poisoned
-            || (!extends && info.more && info.offset != 0)
-            || self.conflict(&arrival, info, end).is_some()
-        {
+        if !extends && info.more && info.offset != 0 {
             return Ok(());
         }
         let mut prefix = self.prefix.clone();

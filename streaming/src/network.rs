@@ -646,7 +646,17 @@ pub(crate) fn snapped_tcp(
 #[derive(Clone, Copy)]
 pub(crate) enum HeaderUse {
     Loss(wire::ChecksumPolicy),
+    Pending(wire::ChecksumPolicy),
     Resolve,
+}
+
+impl HeaderUse {
+    fn policy(self) -> Option<wire::ChecksumPolicy> {
+        match self {
+            Self::Loss(policy) | Self::Pending(policy) => Some(policy),
+            Self::Resolve => None,
+        }
+    }
 }
 
 pub(crate) type TcpPath = (
@@ -717,14 +727,14 @@ pub(crate) fn inspect_scheduled_tcp_path(
     let mut next;
     let mut datagram = first;
     for depth in 0..=max_depth {
-        if matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
+        if purpose.policy() == Some(wire::ChecksumPolicy::RequireValid)
             && datagram.ip_checksum == wire::Checksum::Invalid
         {
             return Ok(None);
         }
         if let Some(observation) = wire::inspect_tcp_header(datagram)? {
             if datagram.fragment.is_none()
-                && matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
+                && purpose.policy() == Some(wire::ChecksumPolicy::RequireValid)
             {
                 recheck_after(
                     datagram
@@ -734,6 +744,7 @@ pub(crate) fn inspect_scheduled_tcp_path(
             }
             let header = match purpose {
                 HeaderUse::Loss(policy) => observation.possible_loss(policy),
+                HeaderUse::Pending(policy) => observation.pending_extent(policy),
                 HeaderUse::Resolve => Some(observation.header),
             };
             let Some(header) = header else {
@@ -777,17 +788,17 @@ pub(crate) fn inspect_scheduled_tcp_path(
         }
         // Normalization strips the fragment marker to walk extension headers.
         // Only the original datagram can establish the enclosing payload extent.
-        let extent = match purpose {
-            HeaderUse::Loss(_)
+        let extent = match purpose.policy() {
+            Some(_)
                 if datagram.fragment.is_none()
                     && datagram.declared_payload_len == datagram.payload.len() =>
             {
                 TunnelExtent::Complete
             }
-            HeaderUse::Loss(_) => TunnelExtent::Prefix {
+            Some(_) => TunnelExtent::Prefix {
                 ip_length_known: datagram.fragment.is_none(),
             },
-            HeaderUse::Resolve => TunnelExtent::Resolve,
+            None => TunnelExtent::Resolve,
         };
         let normalized;
         let outer = if matches!(datagram.protocol, 17 | 47) {
@@ -798,9 +809,7 @@ pub(crate) fn inspect_scheduled_tcp_path(
             normalized = normalize(extensions)?;
             &normalized
         };
-        if outer.protocol == 17
-            && matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
-        {
+        if outer.protocol == 17 && purpose.policy() == Some(wire::ChecksumPolicy::RequireValid) {
             let header = outer.payload.data();
             need_extent(header, 8, "udp_tunnel", true)?;
             match wire::udp_checksum_if_captured(outer, outer.checksum_context, header)? {

@@ -194,8 +194,17 @@ pub struct TcpHeaderObservation {
 
 impl TcpHeaderObservation {
     pub fn possible_loss(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
-        (self.possible_extent && (policy == ChecksumPolicy::Observe || self.checksum_allowed))
-            .then_some(self.header)
+        self.policy_allows(policy).filter(|_| self.possible_extent)
+    }
+
+    /// While a fragment set is pending, even a zero payload length can be disputed.
+    pub fn pending_extent(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
+        self.policy_allows(policy)
+            .filter(|h| self.possible_extent || h.payload_len == Some(0))
+    }
+
+    fn policy_allows(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
+        (policy == ChecksumPolicy::Observe || self.checksum_allowed).then_some(self.header)
     }
 }
 
