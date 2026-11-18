@@ -627,8 +627,8 @@ pub fn transport_metadata(d: &Datagram) -> Result<Option<(&'static str, Json)>> 
     }
 }
 
-/// Recover only the path and TCP header. Prefix decoding cannot admit a
-/// datagram, validate a transport checksum, or supply protocol payload.
+/// Recover the path and TCP header for loss attribution. A checksum can be
+/// adjudicated when its entire covered extent is captured.
 pub(crate) fn snapped_tcp(
     link: u32,
     raw: &EvidenceBytes,
@@ -673,10 +673,28 @@ pub(crate) fn tcp_prefix_path(
 
 pub(crate) fn inspect_tcp_path(
     first: &Datagram,
-    mut path: Vec<String>,
+    path: Vec<String>,
     max_depth: usize,
     purpose: HeaderUse,
 ) -> Result<Option<TcpPath>> {
+    inspect_scheduled_tcp_path(first, path, max_depth, purpose, &mut None)
+}
+
+pub(crate) fn inspect_scheduled_tcp_path(
+    first: &Datagram,
+    mut path: Vec<String>,
+    max_depth: usize,
+    purpose: HeaderUse,
+    next_check: &mut Option<usize>,
+) -> Result<Option<TcpPath>> {
+    // Nested lengths are relative to different headers. Their missing suffixes
+    // all start at the same captured end while the nested payload is partial.
+    let mut recheck_after = |missing: usize| {
+        if missing > 0 {
+            let at = first.payload.len() + missing;
+            *next_check = Some(next_check.map_or(at, |previous| previous.min(at)));
+        }
+    };
     let mut next;
     let mut datagram = first;
     for depth in 0..=max_depth {
@@ -686,6 +704,15 @@ pub(crate) fn inspect_tcp_path(
             return Ok(None);
         }
         if let Some(observation) = wire::inspect_tcp_header(datagram)? {
+            if datagram.fragment.is_none()
+                && matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
+            {
+                recheck_after(
+                    datagram
+                        .declared_payload_len
+                        .saturating_sub(datagram.payload.len()),
+                );
+            }
             let header = match purpose {
                 HeaderUse::Loss(policy) => observation.possible_loss(policy),
                 HeaderUse::Resolve => Some(observation.header),
@@ -719,12 +746,25 @@ pub(crate) fn inspect_tcp_path(
         {
             let header = outer.payload.data();
             need_extent(header, 8, "udp_tunnel", true)?;
-            if matches!(
-                wire::udp_checksum_if_captured(outer, outer.checksum_context, header)?,
-                Some(wire::Checksum::Invalid | wire::Checksum::NotChecked)
-            ) {
-                return Ok(None);
+            match wire::udp_checksum_if_captured(outer, outer.checksum_context, header)? {
+                Some(wire::Checksum::Invalid | wire::Checksum::NotChecked) => return Ok(None),
+                None => recheck_after(usize::from(u16be(header, 4)).saturating_sub(header.len())),
+                _ => {}
             }
+        }
+        if outer.protocol == 47
+            && datagram.fragment.is_none()
+            && outer
+                .payload
+                .data()
+                .first()
+                .is_some_and(|byte| byte & 0x80 != 0)
+        {
+            recheck_after(
+                outer
+                    .declared_payload_len
+                    .saturating_sub(outer.payload.len()),
+            );
         }
         let extent = match purpose {
             HeaderUse::Loss(_)
@@ -753,6 +793,10 @@ pub(crate) fn inspect_tcp_path(
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/tiny_capture.rs"]
+mod tiny_capture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pcap_evidence::{
@@ -761,6 +805,61 @@ mod tests {
         wire::{Checksum, ChecksumContext, FragmentInfo},
         Limits,
     };
+
+    #[test]
+    fn identified_tunnel_waits_for_the_checksum_extent() {
+        let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 512]);
+        let mut frame = tiny_capture::tunneled("vxlan", 7, false, &inner);
+        let udp_len = frame.len() - 34;
+        // A nonzero checksum needs the full UDP payload for a verdict.
+        frame[40..42].copy_from_slice(&1u16.to_be_bytes());
+        let covered_at = udp_len.next_multiple_of(8);
+        frame.resize(34 + covered_at + 16, 0);
+        let mut reassembler = FragmentReassembler::new(Limits::default());
+        let mut calls = Vec::new();
+        let mut inspect = |prefix: &Datagram, _: &[PacketId]| {
+            let mut next = None;
+            let found = inspect_scheduled_tcp_path(
+                prefix,
+                vec![],
+                4,
+                HeaderUse::Loss(wire::ChecksumPolicy::RequireValid),
+                &mut next,
+            )
+            .unwrap();
+            calls.push((prefix.payload.len(), found.is_some(), next));
+            next
+        };
+        // The initial fragment identifies the flow. Later fragments grow the
+        // prefix eight bytes at a time, including one beyond the UDP extent.
+        let ranges =
+            std::iter::once(0..72).chain((72..covered_at + 8).step_by(8).map(|n| n..n + 8));
+        for (i, range) in ranges.enumerate() {
+            let id = PacketId {
+                capture: [0; 32],
+                frame: i as u64 + 1,
+                record_offset: i as u64 * 128,
+            };
+            let fragment = tiny_capture::ipv4_fragment(&frame, range, true);
+            let scope = Scope {
+                section: 0,
+                interface: 0,
+                link_interface: None,
+                vlans: vec![],
+            };
+            let d = wire::decode_packet(1, &fragment, id, scope).unwrap();
+            assert!(matches!(
+                reassembler
+                    .push_with_prefix_schedule(d, id.frame, &[], Some(&mut inspect))
+                    .unwrap(),
+                FragmentOutcome::Pending
+            ));
+        }
+        assert_eq!(
+            calls,
+            [(72, true, Some(udp_len)), (covered_at, false, None)]
+        );
+    }
 
     #[test]
     fn ordinary_udp_prefix_is_classified_once() {

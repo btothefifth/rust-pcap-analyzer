@@ -361,7 +361,7 @@ impl State<'_> {
         path: &[String],
         frame: u64,
         ancestors: &[PacketId],
-        inspect: &mut pcap_evidence::fragment::PrefixObserver<'_>,
+        inspect: &mut pcap_evidence::fragment::ScheduledPrefixObserver<'_>,
     ) -> Result<Option<(wire::Datagram, Vec<PacketId>)>> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
@@ -400,7 +400,7 @@ impl State<'_> {
                 .ok_or_else(|| Error::limit("fragment_context"))?;
             slot.last_frame = frame;
             slot.reassembler
-                .push_observing_prefix(d, frame, ancestors, Some(inspect))
+                .push_with_prefix_schedule(d, frame, ancestors, Some(inspect))
         };
         match result {
             Ok(FragmentOutcome::Pending) => Ok(None),
@@ -599,12 +599,14 @@ impl State<'_> {
             .and_then(|_| loss_header(&d));
         let mut resolved = None;
         let mut disposition = HeaderDisposition::AwaitingReassembly;
-        let mut inspect =
-            |prefix: &wire::Datagram, contributors: &[PacketId]| match network::inspect_tcp_path(
+        let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
+            let mut next_check = None;
+            match network::inspect_scheduled_tcp_path(
                 prefix,
                 path.clone(),
                 max_depth,
                 purpose,
+                &mut next_check,
             ) {
                 Ok(Some(candidate)) => {
                     if prefix.fragment.is_none()
@@ -616,13 +618,15 @@ impl State<'_> {
                         resolved =
                             Some((scope.clone(), path.clone(), *segment, contributors.to_vec()));
                         disposition = HeaderDisposition::Omitted;
+                        header = Some(candidate);
+                    } else {
+                        header.get_or_insert(candidate);
                     }
-                    header = Some(candidate);
-                    true
+                    next_check
                 }
                 Err(error) if error.code == pcap_evidence::ErrorCode::Truncated => {
                     header = None;
-                    false
+                    Some(prefix.payload.len() + 1)
                 }
                 Ok(None) | Err(_) => {
                     header = None;
@@ -634,13 +638,15 @@ impl State<'_> {
                     ) {
                         Ok(Some((scope, path, segment, _))) => {
                             resolved = Some((scope, path, segment, contributors.to_vec()));
-                            true
+                            None
                         }
-                        Ok(None) => true,
-                        Err(error) => error.code != pcap_evidence::ErrorCode::Truncated,
+                        Ok(None) => None,
+                        Err(error) => (error.code == pcap_evidence::ErrorCode::Truncated)
+                            .then(|| prefix.payload.len() + 1),
                     }
                 }
-            };
+            }
+        };
         let Some((datagram, mut contributors)) =
             self.reassemble(d, &path, frame, ancestors, &mut inspect)?
         else {

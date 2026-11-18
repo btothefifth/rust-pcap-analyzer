@@ -40,7 +40,7 @@ struct Assembly {
     packets: Vec<PacketId>,
     poisoned: bool,
     // None once additional bytes cannot change the classification.
-    inspected_prefix: Option<usize>,
+    next_inspection_len: Option<usize>,
 }
 #[derive(Clone, Debug)]
 pub struct FragmentNotice {
@@ -54,6 +54,11 @@ pub enum FragmentOutcome {
 }
 /// The observed datagram prefix and all packets contributing to its fragment set.
 pub type PrefixObserver<'a> = dyn FnMut(&Datagram, &[PacketId]) -> bool + 'a;
+
+/// The callback returns the next contiguous payload length worth inspecting.
+/// A new terminal length, changed checksum context, or offset-zero contributor
+/// also triggers inspection, even after the callback returned `None`.
+pub type ScheduledPrefixObserver<'a> = dyn FnMut(&Datagram, &[PacketId]) -> Option<usize> + 'a;
 
 pub struct FragmentReassembler {
     sets: BTreeMap<Key, Assembly>,
@@ -122,10 +127,30 @@ impl FragmentReassembler {
     /// a successful Complete outcome delivers a datagram to the caller.
     pub fn push_observing_prefix(
         &mut self,
-        mut datagram: Datagram,
+        datagram: Datagram,
         frame: u64,
         ancestors: &[PacketId],
         observer: Option<&mut PrefixObserver<'_>>,
+    ) -> Result<FragmentOutcome> {
+        match observer {
+            Some(inspect) => self.push_with_prefix_schedule(
+                datagram,
+                frame,
+                ancestors,
+                Some(&mut |prefix, ids| (!inspect(prefix, ids)).then(|| prefix.payload.len() + 1)),
+            ),
+            None => self.push_with_prefix_schedule(datagram, frame, ancestors, None),
+        }
+    }
+
+    /// Inspect at a caller-supplied byte boundary. Complete admitted datagrams
+    /// are returned directly, including when they reach that boundary.
+    pub fn push_with_prefix_schedule(
+        &mut self,
+        mut datagram: Datagram,
+        frame: u64,
+        ancestors: &[PacketId],
+        observer: Option<&mut ScheduledPrefixObserver<'_>>,
     ) -> Result<FragmentOutcome> {
         self.limits.validate()?;
         datagram.require_complete()?;
@@ -233,7 +258,7 @@ impl FragmentReassembler {
                     first_frame: frame,
                     packets: Vec::new(),
                     poisoned: false,
-                    inspected_prefix: Some(0),
+                    next_inspection_len: Some(1),
                 },
             );
         }
@@ -310,19 +335,20 @@ impl FragmentReassembler {
                 }
             }
             // The terminal fragment can establish a decisive length while a hole
-            // remains. Recheck that bound even if the header was already identified.
-            let new_prefix = set.inspected_prefix.is_some_and(|seen| contiguous > seen);
+            // remains. An offset-zero retransmission also supplies a new header
+            // witness; adjudicate it against the longer prefix already captured.
+            let new_prefix = set
+                .next_inspection_len
+                .is_some_and(|next| contiguous >= next);
             if !ready
                 && contiguous > 0
-                && (new_prefix
-                    || learned_end
-                    || checksum_changed
-                    || (info.offset == 0 && set.end.is_some()))
+                && (new_prefix || learned_end || checksum_changed || info.offset == 0)
             {
                 if let Some(inspect) = observer {
                     let prefix = &mut set.prefix;
                     set_prefix_extent(prefix, set.end);
-                    set.inspected_prefix = (!inspect(prefix, &set.packets)).then_some(contiguous);
+                    set.next_inspection_len =
+                        inspect(prefix, &set.packets).map(|n| n.max(contiguous + 1));
                 }
             }
         }
@@ -443,11 +469,13 @@ impl Assembly {
         info: &FragmentInfo,
         end: usize,
         packets: &[PacketId],
-        inspect: &mut PrefixObserver<'_>,
+        inspect: &mut ScheduledPrefixObserver<'_>,
     ) -> Result<()> {
         let contiguous = self.prefix.payload.len();
         let extends = info.offset <= contiguous && end > contiguous;
-        if self.poisoned || (!extends && info.more) || self.conflict(&arrival, info, end).is_some()
+        if self.poisoned
+            || (!extends && info.more && info.offset != 0)
+            || self.conflict(&arrival, info, end).is_some()
         {
             return Ok(());
         }

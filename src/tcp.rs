@@ -350,7 +350,7 @@ struct Flow {
     fin_next: [Option<u32>; 2],
     closed_at: Option<usize>,
     rst_seen: bool,
-    has_payload: bool,
+    first_payload_at: Option<usize>,
     midstream: bool,
     first_ns: Option<i128>,
     last_ns: Option<i128>,
@@ -406,6 +406,14 @@ fn within_syn_span(sequence: u32, first: u32, max_span: i64) -> bool {
 }
 
 impl Flow {
+    fn open_at(&self, ordinal: usize) -> bool {
+        self.closed_at.is_none_or(|at| at >= ordinal)
+    }
+
+    fn can_accept_opposite_syn(&self, direction: usize) -> bool {
+        !self.midstream && self.syn[direction].is_none() && self.syn[1 - direction].is_some()
+    }
+
     fn reset_observations(&mut self) {
         self.syn = [None; 2];
         self.syn_sequence_len = [0; 2];
@@ -414,7 +422,7 @@ impl Flow {
         self.fin_next = [None; 2];
         self.closed_at = None;
         self.rst_seen = false;
-        self.has_payload = false;
+        self.first_payload_at = None;
         self.first_ns = None;
         self.last_ns = None;
         self.anomalies.clear();
@@ -440,7 +448,9 @@ impl Flow {
         } else {
             self.anomalies.push("packet_time_unavailable");
         }
-        self.has_payload |= !segment.payload.is_empty();
+        if !segment.payload.is_empty() {
+            self.first_payload_at.get_or_insert(input.arrival.ordinal);
+        }
         if segment.fin() {
             self.fin[direction] = true;
             self.fin_next[direction].get_or_insert(
@@ -514,6 +524,7 @@ pub enum HeaderDisposition {
 struct UnretainedHeader {
     disposition: HeaderDisposition,
     existing: Vec<usize>,
+    simultaneous_open: Option<usize>,
     packet: PacketId,
     time: Option<i128>,
     direction: usize,
@@ -542,11 +553,37 @@ impl UnretainedHeader {
             syn_isn: (segment.flags & 2 != 0).then_some(segment.sequence),
             arrival,
             existing: Vec::new(),
+            simultaneous_open: None,
             disposition,
         }
     }
 
     fn apply_existing(&mut self, flows: &mut [Flow], max_span: i64, idle_ns: i128) -> bool {
+        if self.syn_isn.is_some() && self.ack.is_none() {
+            // Prefer the newest matching retransmission. A simultaneous open is
+            // possible only if no payload had been admitted by its arrival.
+            let simultaneous = self.simultaneous_open.filter(|&id| {
+                flows[id]
+                    .first_payload_at
+                    .is_none_or(|at| at >= self.arrival.ordinal)
+            });
+            let owner = self
+                .existing
+                .iter()
+                .rev()
+                .copied()
+                .chain(simultaneous)
+                .find(|&id| {
+                    let flow = &flows[id];
+                    flow.open_at(self.arrival.ordinal)
+                        && self.within_final_idle(flow, idle_ns)
+                        && self.matches(flow, max_span)
+                });
+            if let Some(id) = owner {
+                flows[id].note_uncertain(self.packet);
+            }
+            return owner.is_some();
+        }
         let mut candidates = std::mem::take(&mut self.existing);
         let mut open = false;
         candidates.retain(|candidate| {
@@ -554,7 +591,7 @@ impl UnretainedHeader {
             if !self.within_final_idle(flow, idle_ns) || !self.matches(flow, max_span) {
                 return false;
             }
-            open |= flow.closed_at.is_none_or(|at| at >= self.arrival.ordinal);
+            open |= flow.open_at(self.arrival.ordinal);
             true
         });
         if open {
@@ -647,7 +684,7 @@ impl TcpTracker {
             fin_next: [None, None],
             closed_at: None,
             rst_seen: false,
-            has_payload: false,
+            first_payload_at: None,
             midstream,
             first_ns: None,
             last_ns: None,
@@ -760,10 +797,8 @@ impl TcpTracker {
             let f = &self.flows[*id];
             f.closed_at.is_none()
                 && self.active_at(f, when)
-                && !f.midstream
-                && !f.has_payload
-                && f.syn[direction].is_none()
-                && f.syn[1 - direction].is_some()
+                && f.first_payload_at.is_none()
+                && f.can_accept_opposite_syn(direction)
         });
         same_syn.or(simultaneous)
     }
@@ -794,14 +829,17 @@ impl TcpTracker {
             HeaderDisposition::Omitted => header.time,
         };
         if let Some(isn) = header.syn_isn.filter(|_| header.ack.is_none()) {
-            if let Some(id) = self.opening_syn_owner(ids, direction, isn, admission_time) {
-                if self.flows[id]
-                    .inputs
-                    .first()
-                    .and_then(|input| input.packets.first())
-                    .is_some_and(|p| p.capture == header.packet.capture)
-                {
+            // A missing handshake can later disprove a FIN and change the
+            // close ordinal. Retain the structural candidates until then.
+            for &id in ids {
+                let flow = &self.flows[id];
+                if !self.active_at(flow, admission_time) {
+                    continue;
+                }
+                if flow.syn[direction] == Some(isn) {
                     header.existing.push(id);
+                } else if Some(&id) == ids.last() && flow.can_accept_opposite_syn(direction) {
+                    header.simultaneous_open = Some(id);
                 }
             }
             return Ok(header);

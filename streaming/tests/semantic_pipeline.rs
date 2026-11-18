@@ -1509,6 +1509,114 @@ mod provisional_transport {
     }
 
     #[test]
+    fn omitted_opening_syn_uses_the_corrected_close() {
+        let syn = tcp(false, 100, 0, 2, &[]);
+        let request = tcp(false, 101, 501, 0x18, REQUEST);
+        let fin = tcp(false, 113, 501, 0x11, &[]);
+        let early_fin = tcp(true, 499, 114, 0x11, &[]);
+        let syn_ack = tcp(true, 500, 101, 0x12, &[]);
+        let response = tcp(true, 501, 114, 0x18, RESPONSE);
+        let tentative = vec![
+            syn.clone(),
+            request.clone(),
+            fin.clone(),
+            early_fin,
+            syn_ack.clone(),
+            response.clone(),
+        ];
+        let closed = vec![
+            syn,
+            syn_ack,
+            request,
+            response,
+            fin,
+            tcp(true, 512, 114, 0x11, &[]),
+        ];
+        assert_pair(&capture(&tentative), config(), true);
+        for (exchange, insert, isn, paired) in [
+            (&tentative, 3, 100, false),
+            (&tentative, 4, 100, false),
+            (&tentative, 5, 100, false),
+            (&tentative, 4, 200, true),
+            (&closed, 6, 100, true),
+        ] {
+            let full = tcp(false, isn, 0, 2, REQUEST);
+            for snapped in [false, true] {
+                let mut frames = exchange.clone();
+                let prefix = if snapped {
+                    full[..48].to_vec()
+                } else {
+                    ipv4_fragment(&full, 0..24, true)
+                };
+                frames.insert(insert, prefix);
+                let mut source = capture(&frames);
+                if snapped {
+                    let record = 24 + frames[..insert].iter().map(|p| 16 + p.len()).sum::<usize>();
+                    source[record + 12..record + 16]
+                        .copy_from_slice(&(full.len() as u32).to_le_bytes());
+                }
+                let root = assert_pair(&source, config(), paired);
+                assert_eq!(
+                    root.flows()[0].uncertain_payload.map(|p| p.frame),
+                    (!paired).then_some(insert as u64 + 1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_tunnel_checksums_use_the_covered_udp_bytes() {
+        use pcap_evidence::wire::{internet_checksum, ChecksumPolicy};
+
+        let wrap = |frame: Vec<u8>, reverse| tiny_capture::tunneled("vxlan", 7, reverse, &frame);
+        let exchange = [
+            wrap(tcp(false, 100, 0, 2, &[]), false),
+            wrap(tcp(true, 500, 101, 0x12, &[]), true),
+            wrap(tcp(false, 101, 501, 0x18, REQUEST), false),
+            wrap(tcp(true, 501, 113, 0x18, RESPONSE), true),
+        ];
+        for valid in [true, false] {
+            let mut frame = wrap(tcp(false, 113, 512, 0x18, REQUEST), false);
+            let mut covered = frame[26..34].to_vec();
+            covered.extend_from_slice(&[0, 17]);
+            covered.extend_from_slice(&frame[38..40]);
+            covered.extend_from_slice(&frame[34..]);
+            let sum = internet_checksum(&covered);
+            let sum = if sum == 0 { u16::MAX } else { sum };
+            let transmitted = if valid {
+                sum
+            } else if sum == 1 {
+                2
+            } else {
+                1
+            };
+            frame[40..42].copy_from_slice(&transmitted.to_be_bytes());
+            // The second fragment finishes the UDP extent. More IP bytes follow.
+            frame.resize(34 + 96, 0);
+            let first = ipv4_fragment(&frame, 0..64, true);
+            let next = ipv4_fragment(&frame, 64..88, true);
+            for (tail, covered) in [
+                (vec![first.clone()], false),
+                (vec![first.clone(), next.clone()], true),
+                (vec![next.clone(), first.clone()], true),
+                (vec![first.clone(), next, first], true),
+            ] {
+                let mut frames = exchange.to_vec();
+                frames.extend(tail);
+                let mut c = config();
+                c.base.checksum_policy = ChecksumPolicy::RequireValid;
+                assert_eq!(
+                    run(&capture(&frames), c)
+                        .events
+                        .iter()
+                        .any(|e| e.data.encode().contains("read_mapping")),
+                    covered && !valid
+                );
+            }
+        }
+    }
+
+    #[test]
     fn completing_fragment_is_adjudicated_before_idle_frame_expiry() {
         let mut duplicate = tcp(false, 113, 501, 0x18, REQUEST);
         duplicate[50] ^= 1;

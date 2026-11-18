@@ -193,6 +193,8 @@ unknown. If the fragment limit interrupts assembly, streaming can still use
 the arriving fragment and retained contiguous bytes to identify which TCP
 generation lost evidence. If the whole checksum-covered extent is available on
 a refused arrival, strict mode can resolve the loss witness from its checksum.
+For an incomplete UDP tunnel, strict mode rechecks the checksum when all declared
+UDP bytes become contiguous, even if the enclosing IP datagram still lacks bytes.
 An assembled segment replaces its provisional contributors before the window
 checks its idle and capacity limits. When a complete set is refused by the
 fragment or window allowance, the completion time determines which generations
@@ -210,7 +212,9 @@ uses wrapping sequence arithmetic ([RFC 9293 §3.10.7.3](https://www.rfc-editor.
 When the ACK is in range, the SYN-ACK sequence
 establishes the missing origin even if an earlier segment lay outside that span.
 It can overturn a tentative two-FIN close when its sequence excludes the FIN
-that supplied it. Window and active payload limits count the bytes the tracker
+that supplied it. Omitted opening SYN retransmissions are matched against the
+corrected close position at their arrival. A genuine earlier close excludes them.
+Window and active payload limits count the bytes the tracker
 retains after that correction. The tracker reserves loss observations for
 displaced payload before changing the flow. If the attribution exceeds its
 work or retention budget, streaming emits `capture.aborted` before publishing
