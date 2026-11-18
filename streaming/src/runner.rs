@@ -598,6 +598,7 @@ impl State<'_> {
             .filter(|f| f.offset == 0)
             .and_then(|_| loss_header(&d));
         let mut resolved = None;
+        let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut inspect =
             |prefix: &wire::Datagram, contributors: &[PacketId]| match network::inspect_tcp_path(
                 prefix,
@@ -606,7 +607,17 @@ impl State<'_> {
                 purpose,
             ) {
                 Ok(Some(candidate)) => {
-                    header.get_or_insert(candidate);
+                    if prefix.fragment.is_none()
+                        && prefix.payload.len() == prefix.declared_payload_len
+                    {
+                        // A complete prefix is observed here only when the set
+                        // was refused. Replace its provisional contributors.
+                        let (scope, path, segment, _) = &candidate;
+                        resolved =
+                            Some((scope.clone(), path.clone(), *segment, contributors.to_vec()));
+                        disposition = HeaderDisposition::Omitted;
+                    }
+                    header = Some(candidate);
                     true
                 }
                 Err(error) if error.code == pcap_evidence::ErrorCode::Truncated => {
@@ -637,12 +648,7 @@ impl State<'_> {
                 self.resolve_header(scope, path, segment, &packets);
             }
             if let Some(header) = header {
-                self.observe_tcp_header(
-                    header,
-                    frame,
-                    time,
-                    HeaderDisposition::AwaitingReassembly,
-                )?;
+                self.observe_tcp_header(header, frame, time, disposition)?;
             }
             return Ok(());
         };
@@ -977,13 +983,9 @@ impl State<'_> {
             )?;
         }
         if let Transport::Tcp(segment) = &transport {
-            if packets.len() > 1
-                && (segment.payload.is_empty()
-                    || bytes > self.c.window_payload
-                    || packets.len() > self.c.window_packets)
-            {
-                // Replace all provisional witnesses before cutting the window or
-                // recording the completed segment as one confirmed omission.
+            if packets.len() > 1 {
+                // Retire provisional evidence before any idle or capacity cut.
+                // The complete segment now has the same admission as a whole packet.
                 self.resolve_header(scope.clone(), path.clone(), segment.header(), &packets);
             }
         }
@@ -1022,6 +1024,17 @@ impl State<'_> {
                     .ingest_with_packets(scope.clone(), &packets, time, segment);
                 let assignment = match result {
                     Ok(x) => x,
+                    // A window may roll over at a transport capacity limit.
+                    // If loss attribution itself failed, the window cannot
+                    // establish unique transactions from the remaining inputs.
+                    Err(error)
+                        if !matches!(
+                            error.field,
+                            "flows" | "segments_per_flow" | "tcp_retained_payload"
+                        ) =>
+                    {
+                        return Err(error)
+                    }
                     Err(error) => {
                         self.diagnostic(
                             format!("tcp_window_reset:{error}"),

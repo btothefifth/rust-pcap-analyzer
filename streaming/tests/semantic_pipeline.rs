@@ -1749,6 +1749,143 @@ mod provisional_transport {
     }
 
     #[test]
+    fn omitted_syn_ack_matches_the_final_extent_of_the_peer_syn() {
+        for early_data in [false, true] {
+            for (ack, paired) in [(100, true), (101, false), (113, false), (114, true)] {
+                let syn = tcp(false, 100, 0, 2, REQUEST);
+                let partial = tcp(true, 500, ack, 0x12, RESPONSE);
+                let mut frames = vec![tcp(false, 100, 0, 2, &[]), tcp(true, 500, 101, 0x12, &[])];
+                if early_data {
+                    frames.push(syn.clone());
+                }
+                let record = capture(&frames).len();
+                frames.push(partial[..54].to_vec());
+                if !early_data {
+                    frames.push(syn);
+                }
+                frames.push(tcp(true, 501, 113, 0x18, RESPONSE));
+                let mut source = capture(&frames);
+                source[record + 12..record + 16]
+                    .copy_from_slice(&(partial.len() as u32).to_le_bytes());
+                assert_pair(&source, config(), paired);
+            }
+        }
+    }
+
+    #[test]
+    fn exhausted_loss_attribution_aborts_before_publishing_a_pair() {
+        for old_sequence in [498, 500] {
+            let mut request = REQUEST.to_vec();
+            request[9] = 17;
+            let mut frames = vec![
+                tcp(false, 1000, 0, 2, &[]),
+                tcp(true, old_sequence, 2013, 0x18, RESPONSE),
+                tcp(false, 2000, 0, 2, &request),
+                tcp(true, 499, 2013, 0x12, RESPONSE),
+            ];
+            let mut omitted = Vec::new();
+            for isn in [3000, 4000] {
+                let frame = tcp(false, isn, 0, 2, REQUEST);
+                omitted.push((capture(&frames).len(), frame.len() as u32));
+                frames.push(frame[..54].to_vec());
+            }
+            frames.push(tcp(true, 550, 1001, 0x12, &[]));
+            let mut source = capture(&frames);
+            for (pos, wire_len) in omitted {
+                source[pos + 12..pos + 16].copy_from_slice(&wire_len.to_le_bytes());
+            }
+            for checks in [5, 6, 32] {
+                let mut c = config();
+                c.base.limits.max_correlation_checks = checks;
+                let mut out = Collect::default();
+                let registry = Registry::builtins(&c).unwrap();
+                let result = analyze_reader(&source[..], c, &registry, &mut out);
+                if checks < 6 {
+                    assert_eq!(
+                        result.unwrap_err().field,
+                        "unretained_tcp_generation_checks"
+                    );
+                    assert_eq!(out.events.last().unwrap().kind, EventKind::CaptureAborted);
+                } else {
+                    result.unwrap();
+                    assert_eq!(out.events.last().unwrap().kind, EventKind::CaptureComplete);
+                }
+                assert_eq!(
+                    out.events
+                        .iter()
+                        .any(|e| e.data.encode().contains("read_mapping")),
+                    checks >= 6 && old_sequence < 500
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn displaced_payload_keeps_its_original_arrival_for_later_generations() {
+        let frames = [
+            tcp(false, 1000, 0, 2, &[]),
+            tcp(true, 500, 2013, 0x18, RESPONSE),
+            tcp(false, 2000, 0, 2, REQUEST),
+            tcp(true, 499, 2013, 0x12, RESPONSE),
+            tcp(true, 550, 1001, 0x12, &[]),
+        ];
+        // The correcting SYN-ACK arrives after the second exchange, but its
+        // timestamp and acknowledgement place it in the first generation.
+        for (second_syn, paired) in [(121, false), (122, true)] {
+            let source = timed_capture(&frames, &[0, 1, second_syn, second_syn + 1, 2]);
+            let root = pcap_evidence::engine::analyze(&source, config().base).unwrap();
+            assert_eq!(root.flows().len(), 2);
+            assert_eq!(root.flows()[1].uncertain_payload.is_none(), paired);
+            assert_eq!(
+                root.transactions
+                    .iter()
+                    .any(|t| t.status == "candidate_pair"),
+                paired
+            );
+        }
+    }
+
+    #[test]
+    fn completed_fragment_replaces_the_provisional_loss_before_a_cut() {
+        let extra = tcp(false, 113, 512, 0x18, REQUEST);
+        let first = ipv4_fragment(&extra, 0..24, true);
+        let last = ipv4_fragment(&extra, 24..32, false);
+        for (time, bytes, cap, paired) in [
+            (124, 512, 8, true),
+            (123, 512, 8, false),
+            (5, 28, 8, true),
+            (124, 512, 1, true),
+            (123, 512, 1, false),
+        ] {
+            for reverse in [false, true] {
+                let mut frames = vec![
+                    tcp(false, 100, 0, 2, &[]),
+                    tcp(true, 500, 101, 0x12, &[]),
+                    tcp(false, 101, 501, 0x18, REQUEST),
+                    tcp(true, 501, 113, 0x18, RESPONSE),
+                    first.clone(),
+                    last.clone(),
+                ];
+                if reverse {
+                    frames.swap(4, 5);
+                }
+                let mut c = config();
+                c.window_payload = bytes;
+                c.base.limits.max_fragments_per_set = cap;
+                let source = timed_capture(&frames, &[0, 1, 2, 3, 4, time]);
+                let events = run(&source, c).events;
+                assert_eq!(
+                    events
+                        .iter()
+                        .any(|e| e.data.encode().contains("read_mapping")),
+                    paired,
+                    "completion {time}, window {bytes}, cap {cap}, reverse {reverse}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pending_syn_ack_uses_the_same_peer_handshake_as_a_complete_segment() {
         for (ack, belongs) in [(101, true), (102, false)] {
             let syn_ack = tcp(true, 500, ack, 0x12, RESPONSE);

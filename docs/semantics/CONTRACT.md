@@ -193,21 +193,28 @@ unknown. If the fragment limit interrupts assembly, streaming can still use
 the arriving fragment and retained contiguous bytes to identify which TCP
 generation lost evidence. If the whole checksum-covered extent is available on
 a refused arrival, strict mode can resolve the loss witness from its checksum.
-When an assembled segment exceeds the window allowance, its completion time
-determines which generations receive the confirmed omission. Tunnel loss
+An assembled segment replaces its provisional contributors before the window
+checks its idle and capacity limits. When a complete set is refused by the
+fragment or window allowance, the completion time determines which generations
+receive the confirmed omission. Tunnel loss
 attribution honors enclosing IP and UDP lengths. Both captured and omitted payload must start at or after a
 generation's first payload sequence when that direction has an observed SYN.
 The comparison uses TCP sequence arithmetic and applies in either arrival order.
 A late handshake rechecks earlier stream positions and loss observations against
 the observed initial sequence and configured span. Excluded packets remain in
 diagnostics. A SYN-ACK must acknowledge the peer SYN when it was observed.
-The ACK can cover any prefix of data carried on that SYN. The comparison
+The ACK can cover any prefix of data carried on that SYN. A retransmission
+with the same initial sequence can extend that range. Omitted headers use the
+final observed range in either capture order. The comparison
 uses wrapping sequence arithmetic ([RFC 9293 §3.10.7.3](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.10.7.3)).
 When the ACK is in range, the SYN-ACK sequence
 establishes the missing origin even if an earlier segment lay outside that span.
 It can overturn a tentative two-FIN close when its sequence excludes the FIN
 that supplied it. Window and active payload limits count the bytes the tracker
-retains after that correction.
+retains after that correction. The tracker reserves loss observations for
+displaced payload before changing the flow. If the attribution exceeds its
+work or retention budget, streaming emits `capture.aborted` before publishing
+transactions from that window.
 A complete payload-free control resolves provisional payload evidence even
 when its own generation assignment remains ambiguous.
 

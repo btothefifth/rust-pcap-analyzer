@@ -318,8 +318,15 @@ impl FlowKey {
         }
     }
 }
-struct Input {
+// Capture order within this tracker. A later handshake can displace an input
+// after another generation has opened or closed.
+#[derive(Clone, Copy)]
+struct Arrival {
     ordinal: usize,
+    first_future_id: usize,
+}
+struct Input {
+    arrival: Arrival,
     packets: Vec<PacketId>,
     when: Option<i128>,
     direction: usize,
@@ -341,8 +348,6 @@ struct Flow {
     anchors: [Option<u32>; 2],
     fin: [bool; 2],
     fin_next: [Option<u32>; 2],
-    // Ordinals survive removal of inputs later excluded by the handshake.
-    next_input: usize,
     closed_at: Option<usize>,
     rst_seen: bool,
     has_payload: bool,
@@ -447,7 +452,7 @@ impl Flow {
         }
         self.rst_seen |= segment.rst();
         if self.rst_seen || (self.fin[0] && self.fin[1]) {
-            self.closed_at.get_or_insert(input.ordinal);
+            self.closed_at.get_or_insert(input.arrival.ordinal);
         }
     }
 
@@ -506,40 +511,55 @@ pub enum HeaderDisposition {
     Omitted,
 }
 
-struct GenerationAtArrival {
-    id: usize,
-    next_input: usize,
-}
-
 struct UnretainedHeader {
     disposition: HeaderDisposition,
-    // Active generations at header arrival, with their input cursor at that point.
-    // The final SYN anchors and any corrected close position govern attribution.
-    existing: Vec<GenerationAtArrival>,
+    existing: Vec<usize>,
     packet: PacketId,
     time: Option<i128>,
     direction: usize,
     sequence: u32,
     ack: Option<u32>,
     syn_isn: Option<u32>,
-    // Generations below this ID were already considered at packet admission.
-    first_future_id: usize,
+    arrival: Arrival,
 }
 impl UnretainedHeader {
+    fn new(
+        direction: usize,
+        packet: PacketId,
+        when: Option<i128>,
+        segment: TcpHeader,
+        disposition: HeaderDisposition,
+        arrival: Arrival,
+    ) -> Self {
+        Self {
+            packet,
+            time: when,
+            direction,
+            sequence: segment
+                .sequence
+                .wrapping_add(u32::from(segment.flags & 2 != 0)),
+            ack: (segment.flags & 0x10 != 0).then_some(segment.acknowledgement),
+            syn_isn: (segment.flags & 2 != 0).then_some(segment.sequence),
+            arrival,
+            existing: Vec::new(),
+            disposition,
+        }
+    }
+
     fn apply_existing(&mut self, flows: &mut [Flow], max_span: i64, idle_ns: i128) -> bool {
         let mut candidates = std::mem::take(&mut self.existing);
         let mut open = false;
         candidates.retain(|candidate| {
-            let flow = &flows[candidate.id];
+            let flow = &flows[*candidate];
             if !self.within_final_idle(flow, idle_ns) || !self.matches(flow, max_span) {
                 return false;
             }
-            open |= flow.closed_at.is_none_or(|at| at >= candidate.next_input);
+            open |= flow.closed_at.is_none_or(|at| at >= self.arrival.ordinal);
             true
         });
         if open {
             for candidate in &candidates {
-                flows[candidate.id].note_uncertain(self.packet);
+                flows[*candidate].note_uncertain(self.packet);
             }
         }
         open
@@ -576,6 +596,7 @@ impl UnretainedHeader {
     }
 }
 pub struct TcpTracker {
+    next_input: usize,
     unretained: BTreeMap<FlowKey, BTreeMap<PacketId, UnretainedHeader>>,
     loss_count: usize,
     remaining_loss_checks: usize,
@@ -601,6 +622,7 @@ impl TcpTracker {
             flows: Vec::new(),
             unretained: BTreeMap::new(),
             loss_count: 0,
+            next_input: 0,
             remaining_loss_checks: limits.max_correlation_checks,
             retained: 0,
             limits,
@@ -623,7 +645,6 @@ impl TcpTracker {
             anchors: [None, None],
             fin: [false, false],
             fin_next: [None, None],
-            next_input: 0,
             closed_at: None,
             rst_seen: false,
             has_payload: false,
@@ -685,28 +706,42 @@ impl TcpTracker {
     ) -> Result<()> {
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
         let previous = self.unretained.get(&key).and_then(|set| set.get(&packet));
-        if let Some(previous) = previous {
-            if previous.disposition == HeaderDisposition::Omitted
+        if previous.is_some_and(|h| {
+            h.disposition == HeaderDisposition::Omitted
                 || disposition == HeaderDisposition::AwaitingReassembly
-            {
-                return Ok(());
-            }
-            // The completed segment was omitted. Its completion time and
-            // generation history now replace the provisional fragment evidence.
-        } else if self.loss_count >= self.limits.max_records {
-            return Err(Error::limit("unretained_tcp_headers"));
+        }) {
+            return Ok(());
         }
         let replacing = previous.is_some();
-        if !self.unretained.contains_key(&key) && self.unretained.len() >= self.limits.max_flows {
-            return Err(Error::limit("unretained_tcp_keys"));
-        }
-        let header = self.match_header(&key, direction, packet, when, segment, disposition)?;
+        self.check_header_capacity(&key, usize::from(!replacing))?;
+        let header = self.match_header(
+            &key,
+            UnretainedHeader::new(
+                direction,
+                packet,
+                when,
+                segment,
+                disposition,
+                self.arrival(),
+            ),
+        )?;
         let headers = self.unretained.entry(key).or_default();
-        if !replacing && headers.len() >= self.limits.max_segments_per_flow {
-            return Err(Error::limit("unretained_tcp_headers"));
-        }
         headers.insert(packet, header);
         self.loss_count += usize::from(!replacing);
+        Ok(())
+    }
+
+    fn check_header_capacity(&self, key: &FlowKey, additional: usize) -> Result<()> {
+        if additional > self.limits.max_records - self.loss_count {
+            return Err(Error::limit("unretained_tcp_headers"));
+        }
+        let existing = self.unretained.get(key);
+        if additional > 0 && existing.is_none() && self.unretained.len() >= self.limits.max_flows {
+            return Err(Error::limit("unretained_tcp_keys"));
+        }
+        if additional > self.limits.max_segments_per_flow - existing.map_or(0, BTreeMap::len) {
+            return Err(Error::limit("unretained_tcp_headers"));
+        }
         Ok(())
     }
 
@@ -733,39 +768,30 @@ impl TcpTracker {
         same_syn.or(simultaneous)
     }
 
+    fn arrival(&self) -> Arrival {
+        Arrival {
+            ordinal: self.next_input,
+            first_future_id: self.flows.len(),
+        }
+    }
+
     fn match_header(
         &mut self,
         key: &FlowKey,
-        direction: usize,
-        packet: PacketId,
-        when: Option<i128>,
-        segment: TcpHeader,
-        disposition: HeaderDisposition,
+        mut header: UnretainedHeader,
     ) -> Result<UnretainedHeader> {
-        let mut header = UnretainedHeader {
-            packet,
-            time: when,
-            direction,
-            sequence: segment
-                .sequence
-                .wrapping_add(u32::from(segment.flags & 2 != 0)),
-            ack: (segment.flags & 0x10 != 0).then_some(segment.acknowledgement),
-            syn_isn: (segment.flags & 2 != 0).then_some(segment.sequence),
-            first_future_id: self.flows.len(),
-            existing: Vec::new(),
-            disposition,
-        };
-        let max_span = self.limits.max_stream_span as i64;
+        let direction = header.direction;
         let ids = self.keys.get(key).map_or(&[][..], Vec::as_slice);
+        let ids = &ids[..ids.partition_point(|&id| id < header.arrival.first_future_id)];
         self.remaining_loss_checks = self
             .remaining_loss_checks
             .checked_sub(ids.len())
             .ok_or_else(|| Error::limit("unretained_tcp_generation_checks"))?;
         // Fragment timestamps remain provisional until completion. Compare them
         // with admitted activity at finalization, including any later response.
-        let admission_time = match disposition {
+        let admission_time = match header.disposition {
             HeaderDisposition::AwaitingReassembly => None,
-            HeaderDisposition::Omitted => when,
+            HeaderDisposition::Omitted => header.time,
         };
         if let Some(isn) = header.syn_isn.filter(|_| header.ack.is_none()) {
             if let Some(id) = self.opening_syn_owner(ids, direction, isn, admission_time) {
@@ -773,27 +799,19 @@ impl TcpTracker {
                     .inputs
                     .first()
                     .and_then(|input| input.packets.first())
-                    .is_some_and(|p| p.capture == packet.capture)
+                    .is_some_and(|p| p.capture == header.packet.capture)
                 {
-                    header.existing.push(GenerationAtArrival {
-                        id,
-                        next_input: self.flows[id].next_input,
-                    });
+                    header.existing.push(id);
                 }
             }
             return Ok(header);
         }
         for &id in ids {
             let flow = &self.flows[id];
-            // An unanchored direction can acquire a different sequence origin.
-            // Keep temporal eligibility now and test that origin at finalization.
-            if self.active_at(flow, admission_time)
-                && (flow.syn[direction].is_none() || header.matches(flow, max_span))
-            {
-                header.existing.push(GenerationAtArrival {
-                    id,
-                    next_input: flow.next_input,
-                });
+            // Both the sequence origin and the peer SYN's observed data extent
+            // can change. Apply the sequence tests once, at finalization.
+            if self.active_at(flow, admission_time) {
+                header.existing.push(id);
             }
         }
         Ok(header)
@@ -811,11 +829,14 @@ impl TcpTracker {
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
         let mut header = self.match_header(
             &key,
-            direction,
-            packet,
-            when,
-            segment,
-            HeaderDisposition::Omitted,
+            UnretainedHeader::new(
+                direction,
+                packet,
+                when,
+                segment,
+                HeaderDisposition::Omitted,
+                self.arrival(),
+            ),
         )?;
         header.apply_existing(
             &mut self.flows,
@@ -886,16 +907,16 @@ impl TcpTracker {
         let assignment = self.assign(&key, direction, packets, when, segment)?;
         // The complete segment replaces all partial observations of its bytes,
         // including when a payload-free control has several possible owners.
-        self.resolve_packets(&key, packets);
         if has_payload && !matches!(assignment, Assignment::Assigned { .. }) {
             self.observe_header(
-                key.scope,
+                key.scope.clone(),
                 packets[0],
                 when,
                 header,
                 HeaderDisposition::Omitted,
             )?;
         }
+        self.resolve_packets(&key, packets);
         Ok(assignment)
     }
 
@@ -1070,6 +1091,57 @@ impl TcpTracker {
         )
     }
 
+    /// Prepare the loss observations before changing the generation that held
+    /// these bytes. A work or retention limit leaves its inputs intact.
+    fn displaced_headers(
+        &mut self,
+        key: &FlowKey,
+        selected: usize,
+        direction: usize,
+        first: u32,
+    ) -> Result<Vec<UnretainedHeader>> {
+        let existing = self.unretained.get(key);
+        let mut displaced = BTreeMap::new();
+        for input in &self.flows[selected].inputs {
+            if !input.segment.payload.is_empty()
+                && input.outside_span(direction, first, self.limits.max_stream_span)
+            {
+                let packet = input.packets[0];
+                if !existing
+                    .and_then(|set| set.get(&packet))
+                    .is_some_and(|h| h.disposition == HeaderDisposition::Omitted)
+                {
+                    displaced.entry(packet).or_insert((
+                        input.when,
+                        input.segment.header(),
+                        input.arrival,
+                    ));
+                }
+            }
+        }
+        let additional = displaced
+            .keys()
+            .filter(|packet| existing.is_none_or(|set| !set.contains_key(*packet)))
+            .count();
+        self.check_header_capacity(key, additional)?;
+        displaced
+            .into_iter()
+            .map(|(packet, (when, header, arrival))| {
+                self.match_header(
+                    key,
+                    UnretainedHeader::new(
+                        direction,
+                        packet,
+                        when,
+                        header,
+                        HeaderDisposition::Omitted,
+                        arrival,
+                    ),
+                )
+            })
+            .collect()
+    }
+
     fn assign(
         &mut self,
         key: &FlowKey,
@@ -1089,12 +1161,19 @@ impl TcpTracker {
             Owner::Unresolved(assignment) => return Ok(assignment),
         };
 
-        let flow = &mut self.flows[selected];
+        let flow = &self.flows[selected];
         if flow.inputs.len() >= self.limits.max_segments_per_flow {
             return Err(Error::limit("segments_per_flow"));
         }
-        let mut excluded = Vec::new();
-        if segment.syn() && flow.syn[direction].is_none() {
+        let reconcile = segment.syn() && flow.syn[direction].is_none();
+        let displaced = if reconcile {
+            self.displaced_headers(key, selected, direction, segment.data_sequence())?
+        } else {
+            Vec::new()
+        };
+        let arrival = self.arrival();
+        let flow = &mut self.flows[selected];
+        if reconcile {
             // Before the handshake arrives, this direction has only a relative
             // sequence origin. Reconcile data and control state against the ISN.
             let first = segment.data_sequence();
@@ -1105,7 +1184,6 @@ impl TcpTracker {
                 for input in std::mem::take(&mut flow.inputs) {
                     if outside(&input) {
                         flow.outside_syn_span.extend_from_slice(&input.packets);
-                        excluded.push(input);
                     } else {
                         flow.record(&input);
                         flow.inputs.push(input);
@@ -1118,27 +1196,21 @@ impl TcpTracker {
         sources.sort_unstable();
         sources.dedup();
         let input = Input {
-            ordinal: flow.next_input,
+            arrival,
             direction,
             segment,
             when,
             packets: sources,
         };
-        flow.next_input += 1;
+        self.next_input += 1;
         flow.record(&input);
         flow.inputs.push(input);
         self.retained = retained;
-        for previous in excluded {
-            if previous.segment.payload.is_empty() {
-                continue; // A FIN alone supplies no missing application bytes.
+        if !displaced.is_empty() {
+            let set = self.unretained.entry(key.clone()).or_default();
+            for header in displaced {
+                self.loss_count += usize::from(set.insert(header.packet, header).is_none());
             }
-            self.observe_header(
-                key.scope.clone(),
-                previous.packets[0],
-                previous.when,
-                previous.segment.header(),
-                HeaderDisposition::Omitted,
-            )?;
         }
         Ok(Assignment::Assigned {
             flow_id: selected,
@@ -1156,7 +1228,7 @@ impl TcpTracker {
                 if owned && header.syn_isn.is_some() && header.ack.is_none() {
                     continue; // An observed opening SYN already owned this retransmission.
                 }
-                let first = ids.partition_point(|&id| id < header.first_future_id);
+                let first = ids.partition_point(|&id| id < header.arrival.first_future_id);
                 for &id in &ids[first..] {
                     self.remaining_loss_checks = self
                         .remaining_loss_checks

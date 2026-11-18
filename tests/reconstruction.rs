@@ -106,6 +106,49 @@ fn payload_before_syn_and_excessive_span_rejected() {
     );
 }
 #[test]
+fn failed_handshake_reconciliation_preserves_retained_inputs() {
+    let mut tracker = TcpTracker::new(
+        Limits {
+            max_correlation_checks: 1,
+            ..Limits::default()
+        },
+        100,
+    )
+    .unwrap();
+    tracker
+        .ingest(scope(), id(1), Some(1), segment(1000, 0, 2, b"", 1))
+        .unwrap();
+    let reverse = |mut s: TcpSegment| {
+        std::mem::swap(&mut s.source, &mut s.destination);
+        s
+    };
+    for (frame, sequence) in [(2, 450), (3, 454)] {
+        tracker
+            .ingest(
+                scope(),
+                id(frame),
+                Some(i128::from(frame)),
+                reverse(segment(sequence, 1001, 0x18, b"data", frame)),
+            )
+            .unwrap();
+    }
+    let correction = reverse(segment(500, 1001, 0x12, b"", 4));
+    let err = tracker
+        .ingest(scope(), id(4), Some(4), correction)
+        .unwrap_err();
+    assert_eq!(err.field, "unretained_tcp_generation_checks");
+    assert_eq!(tracker.retained_payload_bytes(), 8);
+    let flows = tracker.finish(OverlapPolicy::RejectConflict).unwrap();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].syn, [Some(1000), None]);
+    assert!(flows[0].outside_syn_span.is_empty());
+    assert_eq!(
+        flows[0].streams[1].as_ref().unwrap().chunks[0].bytes.data(),
+        b"datadata"
+    );
+}
+
+#[test]
 fn connection_reuse_creates_generation_and_same_syn_is_not_recounted() {
     let mut t = TcpTracker::new(Limits::default(), 120_000_000_000).unwrap();
     let first = t
