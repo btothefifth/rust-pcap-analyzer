@@ -164,7 +164,7 @@ impl Active {
     }
 }
 struct FragSlot {
-    reassembler: FragmentReassembler,
+    reassembler: FragmentReassembler<Option<network::PrefixHeader>>,
     last_frame: u64,
 }
 #[derive(Clone, Copy)]
@@ -361,7 +361,10 @@ impl State<'_> {
         path: &[String],
         frame: u64,
         ancestors: &[PacketId],
-        inspect: &mut pcap_evidence::fragment::ScheduledPrefixObserver<'_>,
+        inspect: &mut pcap_evidence::fragment::CachedPrefixObserver<
+            '_,
+            Option<network::PrefixHeader>,
+        >,
     ) -> Result<Option<(wire::Datagram, Vec<PacketId>)>> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
@@ -387,7 +390,7 @@ impl State<'_> {
             self.fragments.insert(
                 path.to_vec(),
                 FragSlot {
-                    reassembler: FragmentReassembler::new(self.c.fragment_limits()),
+                    reassembler: FragmentReassembler::with_prefix_cache(self.c.fragment_limits()),
                     last_frame: frame,
                 },
             );
@@ -400,7 +403,7 @@ impl State<'_> {
                 .ok_or_else(|| Error::limit("fragment_context"))?;
             slot.last_frame = frame;
             slot.reassembler
-                .push_with_prefix_schedule(d, frame, ancestors, Some(inspect))
+                .push_caching_prefix(d, frame, ancestors, Some(inspect))
         };
         match result {
             Ok(FragmentOutcome::Pending) => Ok(None),
@@ -592,11 +595,16 @@ impl State<'_> {
         let purpose = network::HeaderUse::Loss(self.c.base.checksum_policy);
         let loss_header =
             |d: &wire::Datagram| network::tcp_prefix_path(d, path.clone(), max_depth, purpose);
-        let mut header = d
-            .fragment
-            .as_ref()
-            .filter(|f| f.offset == 0)
-            .and_then(|_| loss_header(&d));
+        let mut header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
+            match self
+                .fragments
+                .get(&path)
+                .and_then(|slot| slot.reassembler.cached_prefix(&d))
+            {
+                Some(cached) => cached.as_ref().map(|h| h.witness_for(&d)),
+                None => loss_header(&d),
+            }
+        });
         let mut resolved = None;
         let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
@@ -614,23 +622,23 @@ impl State<'_> {
                     {
                         // A complete prefix is observed here only when the set
                         // was refused. Replace its provisional contributors.
-                        let (scope, path, segment, _) = &candidate;
+                        let (scope, path, segment, _) = &candidate.path;
                         resolved =
                             Some((scope.clone(), path.clone(), *segment, contributors.to_vec()));
                         disposition = HeaderDisposition::Omitted;
-                        header = Some(candidate);
+                        header = Some(candidate.path.clone());
                     } else {
-                        header.get_or_insert(candidate);
+                        header.get_or_insert_with(|| candidate.path.clone());
                     }
-                    next_check
+                    (next_check, Some(Some(candidate)))
                 }
                 Err(error) if error.code == pcap_evidence::ErrorCode::Truncated => {
                     header = None;
-                    Some(prefix.payload.len() + 1)
+                    (Some(prefix.payload.len() + 1), Some(None))
                 }
                 Ok(None) | Err(_) => {
                     header = None;
-                    match network::inspect_tcp_path(
+                    let next = match network::inspect_tcp_path(
                         prefix,
                         path.clone(),
                         max_depth,
@@ -643,7 +651,8 @@ impl State<'_> {
                         Ok(None) => None,
                         Err(error) => (error.code == pcap_evidence::ErrorCode::Truncated)
                             .then(|| prefix.payload.len() + 1),
-                    }
+                    };
+                    (next, Some(None))
                 }
             }
         };

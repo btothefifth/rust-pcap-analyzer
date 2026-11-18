@@ -174,6 +174,8 @@ pub fn tcp_loss_header(d: &Datagram) -> Option<TcpHeader> {
 /// Capture evidence for TCP identity before transport admission. The ports,
 /// sequence numbers, data offset and flags occupy the first 14 TCP bytes.
 pub struct TcpHeaderObservation {
+    /// Offset of the first TCP byte in the source packet.
+    pub packet_start: usize,
     pub header: TcpHeader,
     pub packet: PacketId,
     possible_payload: bool,
@@ -203,7 +205,7 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
     }
     let (header, header_len) = tcp_identity(d, &d.payload.data()[offset..])?;
     let spans = d.payload.spans();
-    let packet = spans
+    let span = spans
         .get(spans.partition_point(|s| s.end <= offset))
         .ok_or_else(|| {
             Error::new(
@@ -212,8 +214,7 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
                 "tcp_header",
                 "missing source span",
             )
-        })?
-        .packet;
+        })?;
     let complete = d.fragment.is_none() && d.payload.len() == d.declared_payload_len;
     let checksum_allowed = d.ip_checksum != Checksum::Invalid
         && checksum_context != ChecksumContext::Unsupported
@@ -222,7 +223,11 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
                 == Checksum::Valid);
     Ok(Some(TcpHeaderObservation {
         header,
-        packet,
+        packet: span.packet,
+        packet_start: span
+            .packet_start
+            .checked_add(offset - span.start)
+            .ok_or_else(|| Error::limit("tcp_header_offset"))?,
         possible_payload: d.fragment.is_some() || d.declared_payload_len > offset + header_len,
         checksum_allowed,
     }))
@@ -567,8 +572,11 @@ pub fn ipv6_checksum_context(protocol: u8, header: &[u8]) -> Result<ChecksumCont
     Ok(context)
 }
 
+/// Bytes through the TCP flags, required for generation attribution.
+pub const TCP_IDENTITY_BYTES: usize = 14;
+
 fn tcp_identity(datagram: &Datagram, data: &[u8]) -> Result<(TcpHeader, usize)> {
-    require(data, 14, 0, "tcp_identity")?;
+    require(data, TCP_IDENTITY_BYTES, 0, "tcp_identity")?;
     let header = usize::from(data[12] >> 4) * 4;
     if header < 20 {
         return Err(bad("tcp_offset", "data offset smaller than fixed header"));

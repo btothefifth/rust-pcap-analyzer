@@ -195,6 +195,9 @@ generation lost evidence. If the whole checksum-covered extent is available on
 a refused arrival, strict mode can resolve the loss witness from its checksum.
 For an incomplete UDP tunnel, strict mode rechecks the checksum when all declared
 UDP bytes become contiguous, even if the enclosing IP datagram still lacks bytes.
+An identical first fragment reuses that verdict and retains its own packet
+reference. A change to the terminal extent or checksum context triggers a new
+inspection.
 An assembled segment replaces its provisional contributors before the window
 checks its idle and capacity limits. When a complete set is refused by the
 fragment or window allowance, the completion time determines which generations

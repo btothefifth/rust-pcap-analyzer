@@ -660,6 +660,28 @@ pub(crate) type TcpPath = (
     pcap_evidence::provenance::PacketId,
 );
 
+/// TCP identity from a classified fragment set and its position in that set.
+#[derive(Clone)]
+pub(crate) struct PrefixHeader {
+    pub path: TcpPath,
+    offset: usize,
+}
+
+impl PrefixHeader {
+    pub fn witness_for(&self, incoming: &Datagram) -> TcpPath {
+        let mut path = self.path.clone();
+        // A shorter duplicate may not independently identify the header.
+        // In that case the original source remains the witness.
+        if incoming.payload.len().saturating_sub(self.offset) >= wire::TCP_IDENTITY_BYTES {
+            let spans = incoming.payload.spans();
+            if let Some(span) = spans.get(spans.partition_point(|s| s.end <= self.offset)) {
+                path.3 = span.packet;
+            }
+        }
+        path
+    }
+}
+
 pub(crate) fn tcp_prefix_path(
     first: &Datagram,
     path: Vec<String>,
@@ -678,6 +700,7 @@ pub(crate) fn inspect_tcp_path(
     purpose: HeaderUse,
 ) -> Result<Option<TcpPath>> {
     inspect_scheduled_tcp_path(first, path, max_depth, purpose, &mut None)
+        .map(|found| found.map(|h| h.path))
 }
 
 pub(crate) fn inspect_scheduled_tcp_path(
@@ -686,7 +709,7 @@ pub(crate) fn inspect_scheduled_tcp_path(
     max_depth: usize,
     purpose: HeaderUse,
     next_check: &mut Option<usize>,
-) -> Result<Option<TcpPath>> {
+) -> Result<Option<PrefixHeader>> {
     // Nested lengths are relative to different headers. Their missing suffixes
     // all start at the same captured end while the nested payload is partial.
     let mut recheck_after = |missing: usize| {
@@ -717,7 +740,31 @@ pub(crate) fn inspect_scheduled_tcp_path(
                 HeaderUse::Loss(policy) => observation.possible_loss(policy),
                 HeaderUse::Resolve => Some(observation.header),
             };
-            return Ok(header.map(|h| (datagram.scope.clone(), path, h, observation.packet)));
+            let Some(header) = header else {
+                return Ok(None);
+            };
+            // A tunnel walk preserves packet coordinates across payload slices.
+            let offset = first
+                .payload
+                .spans()
+                .iter()
+                .find_map(|s| {
+                    let within = observation.packet_start.checked_sub(s.packet_start)?;
+                    (s.packet == observation.packet && within < s.end - s.start)
+                        .then(|| s.start + within)
+                })
+                .ok_or_else(|| {
+                    Error::new(
+                        pcap_evidence::ErrorCode::Invariant,
+                        0,
+                        "tcp_prefix",
+                        "TCP header lost its source span",
+                    )
+                })?;
+            return Ok(Some(PrefixHeader {
+                path: (datagram.scope.clone(), path, header, observation.packet),
+                offset,
+            }));
         }
         if datagram.fragment.as_ref().is_some_and(|f| f.offset != 0) {
             return Ok(None);
@@ -806,6 +853,27 @@ mod tests {
         Limits,
     };
 
+    fn fragment_input(
+        frame: &[u8],
+        range: std::ops::Range<usize>,
+        more: bool,
+        sequence: u64,
+    ) -> Datagram {
+        let id = PacketId {
+            capture: [0; 32],
+            frame: sequence,
+            record_offset: sequence * 128,
+        };
+        let bytes = tiny_capture::ipv4_fragment(frame, range, more);
+        let scope = Scope {
+            section: 0,
+            interface: 0,
+            link_interface: None,
+            vlans: vec![],
+        };
+        wire::decode_packet(1, &bytes, id, scope).unwrap()
+    }
+
     #[test]
     fn identified_tunnel_waits_for_the_checksum_extent() {
         let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 512]);
@@ -815,7 +883,7 @@ mod tests {
         frame[40..42].copy_from_slice(&1u16.to_be_bytes());
         let covered_at = udp_len.next_multiple_of(8);
         frame.resize(34 + covered_at + 16, 0);
-        let mut reassembler = FragmentReassembler::new(Limits::default());
+        let mut reassembler = FragmentReassembler::with_prefix_cache(Limits::default());
         let mut calls = Vec::new();
         let mut inspect = |prefix: &Datagram, _: &[PacketId]| {
             let mut next = None;
@@ -828,29 +896,18 @@ mod tests {
             )
             .unwrap();
             calls.push((prefix.payload.len(), found.is_some(), next));
-            next
+            (next, Some(found))
         };
         // The initial fragment identifies the flow. Later fragments grow the
         // prefix eight bytes at a time, including one beyond the UDP extent.
         let ranges =
             std::iter::once(0..72).chain((72..covered_at + 8).step_by(8).map(|n| n..n + 8));
         for (i, range) in ranges.enumerate() {
-            let id = PacketId {
-                capture: [0; 32],
-                frame: i as u64 + 1,
-                record_offset: i as u64 * 128,
-            };
-            let fragment = tiny_capture::ipv4_fragment(&frame, range, true);
-            let scope = Scope {
-                section: 0,
-                interface: 0,
-                link_interface: None,
-                vlans: vec![],
-            };
-            let d = wire::decode_packet(1, &fragment, id, scope).unwrap();
+            let sequence = i as u64 + 1;
+            let d = fragment_input(&frame, range, true, sequence);
             assert!(matches!(
                 reassembler
-                    .push_with_prefix_schedule(d, id.frame, &[], Some(&mut inspect))
+                    .push_caching_prefix(d, sequence, &[], Some(&mut inspect))
                     .unwrap(),
                 FragmentOutcome::Pending
             ));
@@ -859,6 +916,97 @@ mod tests {
             calls,
             [(72, true, Some(udp_len)), (covered_at, false, None)]
         );
+    }
+
+    #[test]
+    fn duplicate_fragment_uses_the_settled_verdict_and_keeps_its_witness() {
+        let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 512]);
+        let mut frame = tiny_capture::tunneled("vxlan", 7, false, &inner);
+        let mut bytes = frame[26..34].to_vec();
+        bytes.extend_from_slice(&[0, 17]);
+        bytes.extend_from_slice(&frame[38..40]);
+        bytes.extend_from_slice(&frame[34..]);
+        let checksum = wire::internet_checksum(&bytes);
+        let checksum = if checksum == 0 { u16::MAX } else { checksum };
+        let covered = (frame.len() - 34).next_multiple_of(8);
+        frame.resize(34 + covered + 16, 0);
+
+        for (sum, valid) in [(checksum, true), (if checksum == 1 { 2 } else { 1 }, false)] {
+            frame[40..42].copy_from_slice(&sum.to_be_bytes());
+            for cap in [2, 5, 6] {
+                let mut ip = FragmentReassembler::with_prefix_cache(Limits {
+                    max_fragments_per_set: cap,
+                    ..Limits::default()
+                });
+                let mut calls = Vec::new();
+                let ranges = [
+                    0..72,
+                    72..covered,
+                    0..72,
+                    0..48,
+                    0..covered,
+                    covered..covered + 16,
+                ];
+                for (i, range) in ranges.into_iter().enumerate() {
+                    let more = i != 5;
+                    let sequence = i as u64 + 1;
+                    let d = fragment_input(&frame, range, more, sequence);
+                    if (2..5).contains(&i) {
+                        let cached: &Option<PrefixHeader> =
+                            ip.cached_prefix(&d).expect("classified duplicate");
+                        assert_eq!(cached.is_some(), valid);
+                        if let Some(h) = cached {
+                            // Only the 48-byte duplicate stops before the TCP identity.
+                            assert_eq!(
+                                h.witness_for(&d).3.frame,
+                                if i == 3 { 1 } else { sequence }
+                            );
+                        }
+                    } else {
+                        assert!(ip.cached_prefix(&d).is_none());
+                    }
+                    let result = ip.push_caching_prefix(
+                        d,
+                        sequence,
+                        &[],
+                        Some(&mut |prefix, ids| {
+                            let mut next = None;
+                            let header = inspect_scheduled_tcp_path(
+                                prefix,
+                                vec![],
+                                4,
+                                HeaderUse::Loss(wire::ChecksumPolicy::RequireValid),
+                                &mut next,
+                            )
+                            .unwrap();
+                            calls.push((sequence, header.is_some(), ids.len()));
+                            (next, Some(header))
+                        }),
+                    );
+                    if i == cap {
+                        assert_eq!(result.err().unwrap().field, "fragments_per_set");
+                        break;
+                    }
+                    if more {
+                        assert!(matches!(result.unwrap(), FragmentOutcome::Pending));
+                    } else {
+                        let FragmentOutcome::Complete(_, ids) = result.unwrap() else {
+                            panic!("expected all six fragments")
+                        };
+                        assert_eq!(
+                            ids.iter().map(|p| p.frame).collect::<Vec<_>>(),
+                            [1, 2, 3, 4, 5, 6]
+                        );
+                    }
+                }
+                let mut expected = vec![(1, true, 1), (2, valid, 2)];
+                // Refused completion establishes the terminal extent.
+                if cap == 5 {
+                    expected.push((6, valid, 6));
+                }
+                assert_eq!(calls, expected);
+            }
+        }
     }
 
     #[test]

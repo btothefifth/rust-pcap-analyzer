@@ -14,6 +14,18 @@ struct Key {
     id: u32,
     ipv6: bool,
 }
+impl Key {
+    fn new(d: &Datagram, info: &FragmentInfo) -> Self {
+        Self {
+            scope: d.scope.clone(),
+            source: d.source,
+            destination: d.destination,
+            protocol: if d.ipv6 { 0 } else { d.protocol },
+            id: info.id,
+            ipv6: d.ipv6,
+        }
+    }
+}
 struct Part {
     start: usize,
     end: usize,
@@ -32,7 +44,8 @@ impl Part {
         }
     }
 }
-struct Assembly {
+struct Assembly<V> {
+    verdict: Option<V>,
     prefix: Datagram,
     parts: Vec<Part>,
     end: Option<usize>,
@@ -55,58 +68,20 @@ pub enum FragmentOutcome {
 /// The observed datagram prefix and all packets contributing to its fragment set.
 pub type PrefixObserver<'a> = dyn FnMut(&Datagram, &[PacketId]) -> bool + 'a;
 
-/// The callback returns the next contiguous payload length worth inspecting.
-/// A new terminal length, changed checksum context, or offset-zero contributor
-/// also triggers inspection, even after the callback returned `None`.
-pub type ScheduledPrefixObserver<'a> = dyn FnMut(&Datagram, &[PacketId]) -> Option<usize> + 'a;
+/// Returns the next contiguous length worth inspecting and an optional verdict
+/// to reuse for identical offset-zero fragments.
+pub type CachedPrefixObserver<'a, V> =
+    dyn FnMut(&Datagram, &[PacketId]) -> (Option<usize>, Option<V>) + 'a;
 
-pub struct FragmentReassembler {
-    sets: BTreeMap<Key, Assembly>,
+pub struct FragmentReassembler<V = ()> {
+    sets: BTreeMap<Key, Assembly<V>>,
     deadlines: BTreeSet<(u64, Key)>,
     retained: usize,
     limits: Limits,
 }
 impl FragmentReassembler {
     pub fn new(limits: Limits) -> Self {
-        Self {
-            sets: BTreeMap::new(),
-            deadlines: BTreeSet::new(),
-            retained: 0,
-            limits,
-        }
-    }
-    pub fn expire(&mut self, frame: u64) -> Vec<FragmentNotice> {
-        let mut notices = Vec::new();
-        while self
-            .deadlines
-            .first()
-            .is_some_and(|(deadline, _)| *deadline <= frame)
-        {
-            let Some((_, key)) = self.deadlines.pop_first() else {
-                break;
-            };
-            if let Some(assembly) = self.remove(&key) {
-                notices.push(FragmentNotice {
-                    code: "fragment_expired",
-                    packets: assembly.packets,
-                });
-            }
-        }
-        notices
-    }
-    fn remove(&mut self, key: &Key) -> Option<Assembly> {
-        let a = self.sets.remove(key)?;
-        if let Some(deadline) = a
-            .first_frame
-            .checked_add(self.limits.fragment_frame_lifetime)
-            .and_then(|n| n.checked_add(1))
-        {
-            self.deadlines.remove(&(deadline, key.clone()));
-        }
-
-        let size: usize = a.parts.iter().map(|p| p.end - p.start).sum();
-        self.retained -= size;
-        Some(a)
+        Self::with_prefix_cache(limits)
     }
     pub fn push(&mut self, datagram: Datagram, frame: u64) -> Result<FragmentOutcome> {
         self.push_with_contributors(datagram, frame, &[])
@@ -133,24 +108,79 @@ impl FragmentReassembler {
         observer: Option<&mut PrefixObserver<'_>>,
     ) -> Result<FragmentOutcome> {
         match observer {
-            Some(inspect) => self.push_with_prefix_schedule(
+            Some(inspect) => self.push_caching_prefix(
                 datagram,
                 frame,
                 ancestors,
-                Some(&mut |prefix, ids| (!inspect(prefix, ids)).then(|| prefix.payload.len() + 1)),
+                Some(&mut |p, ids| ((!inspect(p, ids)).then(|| p.payload.len() + 1), None)),
             ),
-            None => self.push_with_prefix_schedule(datagram, frame, ancestors, None),
+            None => self.push_caching_prefix(datagram, frame, ancestors, None),
         }
     }
+}
+impl<V> FragmentReassembler<V> {
+    pub fn with_prefix_cache(limits: Limits) -> Self {
+        Self {
+            sets: BTreeMap::new(),
+            deadlines: BTreeSet::new(),
+            retained: 0,
+            limits,
+        }
+    }
+    pub fn expire(&mut self, frame: u64) -> Vec<FragmentNotice> {
+        let mut notices = Vec::new();
+        while self
+            .deadlines
+            .first()
+            .is_some_and(|(deadline, _)| *deadline <= frame)
+        {
+            let Some((_, key)) = self.deadlines.pop_first() else {
+                break;
+            };
+            if let Some(assembly) = self.remove(&key) {
+                notices.push(FragmentNotice {
+                    code: "fragment_expired",
+                    packets: assembly.packets,
+                });
+            }
+        }
+        notices
+    }
+    fn remove(&mut self, key: &Key) -> Option<Assembly<V>> {
+        let a = self.sets.remove(key)?;
+        if let Some(deadline) = a
+            .first_frame
+            .checked_add(self.limits.fragment_frame_lifetime)
+            .and_then(|n| n.checked_add(1))
+        {
+            self.deadlines.remove(&(deadline, key.clone()));
+        }
 
-    /// Inspect at a caller-supplied byte boundary. Complete admitted datagrams
-    /// are returned directly, including when they reach that boundary.
-    pub fn push_with_prefix_schedule(
+        let size: usize = a.parts.iter().map(|p| p.end - p.start).sum();
+        self.retained -= size;
+        Some(a)
+    }
+    /// Return the verdict for an identical offset-zero prefix in this set.
+    /// The caller still submits the fragment for admission and accounting.
+    pub fn cached_prefix(&self, datagram: &Datagram) -> Option<&V> {
+        let info = datagram.fragment.as_ref()?;
+        if info.offset != 0 || !info.more || datagram.ipv6 {
+            return None;
+        }
+        self.sets
+            .get(&Key::new(datagram, info))?
+            .reusable_verdict(datagram, info)
+    }
+
+    /// Inspect at the scheduled prefix length or when header metadata changes.
+    /// An unchanged duplicate reuses the cached classifier result. The caller
+    /// must use the same classifier and policy throughout a fragment set.
+    pub fn push_caching_prefix(
         &mut self,
         mut datagram: Datagram,
         frame: u64,
         ancestors: &[PacketId],
-        observer: Option<&mut ScheduledPrefixObserver<'_>>,
+        observer: Option<&mut CachedPrefixObserver<'_, V>>,
     ) -> Result<FragmentOutcome> {
         self.limits.validate()?;
         datagram.require_complete()?;
@@ -172,14 +202,7 @@ impl FragmentReassembler {
                 return Ok(FragmentOutcome::Complete(datagram, ids));
             }
         };
-        let key = Key {
-            scope: datagram.scope.clone(),
-            source: datagram.source,
-            destination: datagram.destination,
-            protocol: if datagram.ipv6 { 0 } else { datagram.protocol },
-            id: info.id,
-            ipv6: datagram.ipv6,
-        };
+        let key = Key::new(&datagram, &info);
         let end = info
             .offset
             .checked_add(datagram.payload.len())
@@ -215,7 +238,9 @@ impl FragmentReassembler {
         };
         if too_many || new_size > self.limits.max_retained_payload {
             if let (Some(set), Some(inspect)) = (existing, observer) {
-                set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
+                if set.reusable_verdict(&datagram, &info).is_none() {
+                    set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
+                }
             }
             return Err(Error::limit(if too_many {
                 "fragments_per_set"
@@ -259,6 +284,7 @@ impl FragmentReassembler {
                     packets: Vec::new(),
                     poisoned: false,
                     next_inspection_len: Some(1),
+                    verdict: None,
                 },
             );
         }
@@ -284,6 +310,8 @@ impl FragmentReassembler {
                 }));
             }
 
+            // Conflict checks above established equality on every overlap.
+            let repeat = set.reusable_metadata(&datagram, &info);
             let previous_checksum = (set.prefix.ip_checksum, set.prefix.checksum_context);
             update_metadata(&mut set.prefix, &datagram, &info);
             let checksum_changed =
@@ -335,20 +363,24 @@ impl FragmentReassembler {
                 }
             }
             // The terminal fragment can establish a decisive length while a hole
-            // remains. An offset-zero retransmission also supplies a new header
-            // witness; adjudicate it against the longer prefix already captured.
+            // remains. A new offset-zero witness can reuse a classification
+            // only after the overlapping bytes and header metadata agree.
             let new_prefix = set
                 .next_inspection_len
                 .is_some_and(|next| contiguous >= next);
             if !ready
                 && contiguous > 0
-                && (new_prefix || learned_end || checksum_changed || info.offset == 0)
+                && (new_prefix || learned_end || checksum_changed || (info.offset == 0 && !repeat))
             {
                 if let Some(inspect) = observer {
                     let prefix = &mut set.prefix;
                     set_prefix_extent(prefix, set.end);
-                    set.next_inspection_len =
-                        inspect(prefix, &set.packets).map(|n| n.max(contiguous + 1));
+                    let (next, verdict) = inspect(prefix, &set.packets);
+                    set.next_inspection_len = next.map(|n| n.max(contiguous + 1));
+                    set.verdict = verdict;
+                } else {
+                    set.next_inspection_len = Some(1);
+                    set.verdict = None;
                 }
             }
         }
@@ -378,7 +410,30 @@ impl FragmentReassembler {
     }
 }
 
-impl Assembly {
+impl<V> Assembly<V> {
+    fn reusable_metadata(&self, d: &Datagram, info: &FragmentInfo) -> bool {
+        self.verdict.is_some()
+            && !self.poisoned
+            && !d.ipv6
+            && info.offset == 0
+            && info.more
+            && d.protocol == self.prefix.protocol
+            && d.network_header_len == self.prefix.network_header_len
+            && d.ip_checksum == self.prefix.ip_checksum
+            && d.checksum_context == self.prefix.checksum_context
+            && d.payload.len() <= self.prefix.payload.len()
+    }
+
+    fn reusable_verdict(&self, d: &Datagram, info: &FragmentInfo) -> Option<&V> {
+        if self.reusable_metadata(d, info)
+            && self.prefix.payload.data().starts_with(d.payload.data())
+        {
+            self.verdict.as_ref()
+        } else {
+            None
+        }
+    }
+
     fn conflict(
         &self,
         datagram: &Datagram,
@@ -469,7 +524,7 @@ impl Assembly {
         info: &FragmentInfo,
         end: usize,
         packets: &[PacketId],
-        inspect: &mut ScheduledPrefixObserver<'_>,
+        inspect: &mut CachedPrefixObserver<'_, V>,
     ) -> Result<()> {
         let contiguous = self.prefix.payload.len();
         let extends = info.offset <= contiguous && end > contiguous;
