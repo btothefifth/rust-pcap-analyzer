@@ -1397,7 +1397,7 @@ fn late_server_syn_excludes_predecessor_data_without_losing_the_response() {
         let raw = capture(&frames);
         let root = pcap_evidence::engine::analyze(&raw, c.base.clone()).unwrap();
         let reason = if predecessor_first {
-            "stream_position_precedes_observed_syn"
+            "stream_position_outside_syn_span"
         } else {
             "sequence_outside_known_generations"
         };
@@ -1447,7 +1447,7 @@ fn fin_uses_the_stream_lower_bound_before_and_after_the_syn_ack() {
                 &response
             );
             assert_eq!(
-                flow.before_syn.len(),
+                flow.outside_syn_span.len(),
                 usize::from(fin_first && fin_seq == 480)
             );
             assert!(snapshot
@@ -1458,6 +1458,194 @@ fn fin_uses_the_stream_lower_bound_before_and_after_the_syn_ack() {
             assert!(events
                 .iter()
                 .any(|e| e.data.encode().contains("read_mapping")));
+        }
+    }
+}
+
+mod provisional_transport {
+    use super::*;
+    use tiny_capture::{capture, ipv4_fragment, tcp};
+
+    const REQUEST: &[u8] = &[0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    const RESPONSE: &[u8] = &[0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+
+    fn config() -> StreamConfig {
+        let mut config = StreamConfig::default();
+        config.base.modbus_ports = vec![2000];
+        config
+    }
+
+    fn assert_pair(
+        source: &[u8],
+        config: StreamConfig,
+        expected: bool,
+    ) -> pcap_evidence::engine::Analysis {
+        let root = pcap_evidence::engine::analyze(source, config.base.clone()).unwrap();
+        assert_eq!(
+            pcap_evidence::report::analysis(&root, false)
+                .encode()
+                .contains("read_mapping"),
+            expected
+        );
+        assert_eq!(
+            run(source, config)
+                .events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            expected
+        );
+        root
+    }
+
+    #[test]
+    fn loss_uses_the_final_syn_span_in_both_arrival_orders() {
+        for after_syn in [false, true] {
+            for seq in [512, 629, 630] {
+                let mut frames = vec![tcp(false, 100, 0, 2, &[]), tcp(true, 374, 101, 0x11, &[])];
+                let syn = tcp(true, 500, 101, 0x12, &[]);
+                let omitted = tcp(true, seq, 113, 0x18, RESPONSE);
+                if after_syn {
+                    frames.push(syn.clone());
+                }
+                let record = capture(&frames).len();
+                frames.push(omitted[..54].to_vec());
+                if !after_syn {
+                    frames.push(syn);
+                }
+                frames.push(tcp(false, 101, 501, 0x18, REQUEST));
+                frames.push(tcp(true, 501, 113, 0x18, RESPONSE));
+                let mut bytes = capture(&frames);
+                bytes[record + 12..record + 16]
+                    .copy_from_slice(&(omitted.len() as u32).to_le_bytes());
+                let mut c = config();
+                c.base.limits.max_stream_span = 128;
+                c.window_payload = 128;
+                let root = assert_pair(&bytes, c, seq > 629);
+                assert_eq!(root.flows()[0].uncertain_payload.is_some(), seq <= 629);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_data_outside_the_final_span_cannot_discard_an_in_span_response() {
+        for before_syn in [true, false] {
+            let mut frames = vec![
+                tcp(false, 100, 0, 2, &[]),
+                tcp(true, 565, 101, 0x10, &[]),
+                tcp(true, 500, 101, 0x12, &[]),
+                tcp(true, 630, 101, 0x18, RESPONSE),
+                tcp(false, 101, 501, 0x18, REQUEST),
+                tcp(true, 501, 113, 0x18, RESPONSE),
+            ];
+            if before_syn {
+                frames.swap(2, 3);
+            }
+            let mut c = config();
+            c.base.limits.max_stream_span = 128;
+            c.window_payload = 128;
+            let root = assert_pair(&capture(&frames), c, true);
+            assert_eq!(
+                root.flows()[0].outside_syn_span.len(),
+                usize::from(before_syn)
+            );
+            assert!(root.flows()[0].reconstruction_errors.is_empty());
+        }
+    }
+
+    #[test]
+    fn fully_observed_empty_fin_preserves_payload_evidence_under_ambiguous_assignment() {
+        let fin = tcp(true, 513, 113, 0x11, &[]);
+        let first = ipv4_fragment(&fin, 0..16, true);
+        let last = ipv4_fragment(&fin, 16..20, false);
+        for (tail, complete) in [
+            (vec![fin], true),
+            (vec![first.clone()], false),
+            (vec![first, last], true),
+        ] {
+            let mut frames = vec![
+                tcp(false, 100, 0, 2, &[]),
+                tcp(true, 500, 101, 0x12, &[]),
+                tcp(false, 101, 501, 0x18, REQUEST),
+                tcp(true, 501, 113, 0x18, RESPONSE),
+                tcp(false, 112, 0, 2, &[]),
+                tcp(true, 512, 113, 0x12, &[]),
+            ];
+            frames.extend(tail);
+            let root = assert_pair(&capture(&frames), config(), complete);
+            assert_eq!(root.flows().len(), 2);
+            if complete {
+                assert!(matches!(&root.packets.last().unwrap().disposition,
+                    pcap_evidence::engine::Disposition::Ambiguous {flows} if flows.len()==2));
+            }
+        }
+    }
+
+    #[test]
+    fn a_delayed_syn_ack_can_disprove_a_provisional_close() {
+        for (server_fin, acknowledgement, count) in [(480, 101, 1), (512, 101, 2), (480, 99, 2)] {
+            let frames = [
+                tcp(false, 100, 0, 2, &[]),
+                tcp(true, server_fin, 101, 0x11, &[]),
+                tcp(false, 101, 501, 0x18, REQUEST),
+                tcp(false, 113, 501, 0x11, &[]),
+                tcp(true, 500, acknowledgement, 0x12, &[]),
+                tcp(true, 501, 113, 0x18, RESPONSE),
+            ];
+            let root = assert_pair(&capture(&frames), config(), count == 1);
+            assert_eq!(root.flows().len(), count);
+            assert_eq!(root.flows()[0].closed, count == 2);
+        }
+    }
+
+    #[test]
+    fn undecided_fragment_timestamp_cannot_cut_the_window() {
+        let mut bad = tcp(false, 113, 501, 0x18, REQUEST);
+        bad[50] ^= 1;
+        for (response_time, eligible) in [(8000, true), (8001, false)] {
+            for fragmented in [false, true] {
+                let mut frames = vec![
+                    tcp(false, 100, 0, 2, &[]),
+                    tcp(true, 500, 101, 0x12, &[]),
+                    tcp(false, 101, 501, 0x10, &[]),
+                    tcp(false, 101, 501, 0x18, REQUEST),
+                ];
+                frames.push(if fragmented {
+                    ipv4_fragment(&bad, 0..24, true)
+                } else {
+                    bad.clone()
+                });
+                frames.push(tcp(true, 501, 113, 0x18, RESPONSE));
+                if fragmented {
+                    frames.push(ipv4_fragment(&bad, 24..32, false));
+                }
+                let mut source = capture(&frames);
+                let mut at = 24;
+                for (frame, micros) in
+                    frames
+                        .iter()
+                        .zip([0u32, 1000, 2000, 3000, 9000, response_time, 10000])
+                {
+                    source[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+                    source[at + 4..at + 8].copy_from_slice(&micros.to_le_bytes());
+                    at += 16 + frame.len();
+                }
+                let mut c = config();
+                c.base.idle_timeout_ns = 5_000_000;
+                c.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+                let events = run(&source, c).events;
+                assert_eq!(
+                    events
+                        .iter()
+                        .any(|e| e.data.encode().contains("read_mapping")),
+                    eligible
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .any(|e| e.data.encode().contains("idle_time_boundary")),
+                    !eligible
+                );
+            }
         }
     }
 }

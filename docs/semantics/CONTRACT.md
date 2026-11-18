@@ -179,8 +179,9 @@ generations. When such a header forces a capacity cut, it also applies to the
 closing window. Reassembly resolves its own fragment observations, including
 duplicate fragments in enclosing tunnels. Under strict checksum checking, a
 completed segment rejected for its checksum has the same disposition whether
-it arrived whole or in fragments. A provisional fragment consumes a packet slot until adjudication. It cannot
-renew the idle deadline or eviction priority of an existing window.
+it arrived whole or in fragments. A provisional fragment consumes a packet slot until adjudication. Its timestamp cannot trigger or renew an idle cut in an existing
+window. Idle decisions use the timestamps of admitted segments and confirmed
+omissions.
 Identical IPv4 fragment overlaps retain the witness from the lowest starting
 offset, with arrival order breaking ties. Partial IP payloads can supply a header
 witness, but normal transport decoding and fragment admission require the
@@ -192,9 +193,12 @@ generation lost evidence. Tunnel loss attribution honors enclosing IP and
 UDP lengths. Both captured and omitted payload must start at or after a
 generation's first payload sequence when that direction has an observed SYN.
 The comparison uses TCP sequence arithmetic and applies in either arrival order.
-A late handshake excludes earlier data and FIN positions outside its lower bound. Their
-packet IDs remain available in diagnostics and the generation retains its
-admissible stream bytes.
+A late handshake rechecks earlier stream positions and loss observations against
+the observed initial sequence and configured span. Excluded packets remain in
+diagnostics. A SYN-ACK acknowledging the captured peer SYN can overturn a
+tentative two-FIN close when its sequence excludes the FIN that supplied it.
+A complete payload-free control resolves provisional payload evidence even
+when its own generation assignment remains ambiguous.
 
 Losing only the options of a header-only TCP segment preserves payload
 eligibility. Unassigned data and segments too large for a streaming window

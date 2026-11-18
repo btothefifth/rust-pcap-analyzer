@@ -10,7 +10,7 @@ frame, `modbus::decode` for a stream, and `correlate::transactions` or
 an empty result. Exhaustive `ApplicationData` matches must handle
 `ModbusFailed { capture, error }`. Read TCP generation results from
 `TcpTracker::finish`; they now include the first uncertain payload witness and the packet IDs
-excluded by a subsequently observed SYN in `before_syn`. `wire::Datagram`
+excluded by a subsequently observed SYN in `outside_syn_span`. `wire::Datagram`
 carries `declared_payload_len`, the IP payload length after decoded extensions.
 For a complete datagram constructed by a caller, use the payload's byte length.
 Read finalized snapshot observations through `Analysis::applications()` and transport

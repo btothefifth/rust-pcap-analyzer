@@ -523,9 +523,9 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
     let flows = tracker.finish(config.overlap_policy)?;
     let mut applications = Vec::new();
     for flow in &flows {
-        each_packet(&mut packets, &flow.before_syn, |p| {
+        each_packet(&mut packets, &flow.outside_syn_span, |p| {
             p.disposition = Disposition::Rejected {
-                code: "stream_position_precedes_observed_syn",
+                code: "stream_position_outside_syn_span",
                 detail: "later handshake excludes this segment from the candidate generation"
                     .into(),
             };

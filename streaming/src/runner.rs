@@ -153,7 +153,6 @@ struct Active {
     // Pending fragments consume packet slots but cannot renew an idle window.
     last_frame: u64,
     last_ns: Option<i128>,
-    provisional_only: bool,
     messages: Vec<MessageRecord>,
     dnp3_confirmations: Vec<Dnp3StreamingConfirmationRecord>,
     remaining: usize,
@@ -197,7 +196,7 @@ impl State<'_> {
             .ok_or_else(|| Error::limit("session_id"))?;
         Ok(self.next_session)
     }
-    fn create(&mut self, key: Key, frame: u64, time: Option<i128>) -> Result<Active> {
+    fn create(&mut self, key: Key, frame: u64) -> Result<Active> {
         self.next_window = self
             .next_window
             .checked_add(1)
@@ -225,8 +224,7 @@ impl State<'_> {
             payload: 0,
             packet_refs: 0,
             last_frame: frame,
-            last_ns: time,
-            provisional_only: true,
+            last_ns: None,
             messages: Vec::new(),
             dnp3_confirmations: Vec::new(),
             remaining: self.c.max_plugin_events,
@@ -877,13 +875,18 @@ impl State<'_> {
             Some(a) => a,
             None => {
                 self.room(bytes)?;
-                self.create(key.clone(), frame, time)?
+                self.create(key.clone(), frame)?
             }
         };
-        let idle = match (time, a.last_ns) {
-            (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
-            _ => false,
-        };
+        let provisional = matches!(
+            input,
+            WindowInput::Header(_, HeaderDisposition::AwaitingReassembly)
+        );
+        let idle = !provisional
+            && match (time, a.last_ns) {
+                (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
+                _ => false,
+            };
         let already_charged = header.zip(a.tracker.as_ref()).map_or(0, |(h, tracker)| {
             tracker.provisional_count(key.scope.clone(), h, packets)
         });
@@ -910,28 +913,19 @@ impl State<'_> {
                     "reconstruction_window_budget"
                 },
             )?;
-            a = self.create(key.clone(), frame, time)?;
+            a = self.create(key.clone(), frame)?;
         }
         self.room(a.payload + bytes)?;
-        if matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
+        if !provisional && matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
             self.diagnostic(
                 "capture_clock_reversal",
                 packets.to_vec(),
                 EvidenceStatus::Ambiguous,
             )?;
         }
-        let provisional = matches!(
-            input,
-            WindowInput::Header(_, HeaderDisposition::AwaitingReassembly)
-        );
         if !provisional {
             a.last_frame = frame;
-            a.last_ns = if a.provisional_only {
-                time
-            } else {
-                a.last_ns.max(time)
-            };
-            a.provisional_only = false;
+            a.last_ns = a.last_ns.max(time);
         }
         a.packet_refs += packet_refs;
         Ok(a)
@@ -961,6 +955,13 @@ impl State<'_> {
                 packets.clone(),
                 EvidenceStatus::Unsupported,
             )?;
+        }
+        if let Transport::Tcp(segment) = &transport {
+            if packets.len() > 1 && segment.payload.is_empty() {
+                // Adjudicate the fragment set before a capacity or idle cut can
+                // publish a transaction based on a provisional payload loss.
+                self.resolve_header(scope.clone(), path.clone(), segment.header(), &packets);
+            }
         }
         if bytes > self.c.window_payload || packets.len() > self.c.window_packets {
             if let Transport::Tcp(segment) = &transport {
@@ -1016,9 +1017,9 @@ impl State<'_> {
                                 .observe_at_cut(scope.clone(), packets[0], time, retry.header())?;
                         }
                         self.flush(a, "tracker_admission_boundary")?;
-                        a = self.create(key.clone(), frame, time)?;
+                        a = self.create(key.clone(), frame)?;
                         a.packet_refs = packets.len();
-                        a.provisional_only = false;
+                        a.last_ns = time;
                         a.tracker
                             .as_mut()
                             .ok_or_else(|| Error::limit("tcp_tracker"))?
@@ -1140,18 +1141,18 @@ impl State<'_> {
         dnp3_confirmations: &mut Vec<Dnp3StreamingConfirmationRecord>,
         remaining: &mut usize,
     ) -> Result<()> {
-        if !flow.before_syn.is_empty() {
+        if !flow.outside_syn_span.is_empty() {
             let mut event = Event::new(
                 EventKind::Diagnostic,
                 EvidenceStatus::Observed,
                 Json::object([
-                    ("reason", "stream_position_precedes_observed_syn".into()),
+                    ("reason", "stream_position_outside_syn_span".into()),
                     ("window", window.into()),
                     ("generation", flow.generation.into()),
                 ]),
             );
             event.session = Some(id);
-            event.evidence = Evidence::packets(flow.before_syn.clone());
+            event.evidence = Evidence::packets(flow.outside_syn_span.clone());
             self.sink.emit(&event)?;
         }
         if let Some(packet) = flow.uncertain_payload {

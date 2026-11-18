@@ -319,6 +319,7 @@ impl FlowKey {
     }
 }
 struct Input {
+    ordinal: usize,
     packets: Vec<PacketId>,
     when: Option<i128>,
     direction: usize,
@@ -332,14 +333,16 @@ struct Flow {
     anchors: [Option<u32>; 2],
     fin: [bool; 2],
     fin_next: [Option<u32>; 2],
-    closed: bool,
+    // Ordinals survive removal of inputs later excluded by the handshake.
+    next_input: usize,
+    closed_at: Option<usize>,
     rst_seen: bool,
     has_payload: bool,
     midstream: bool,
     first_ns: Option<i128>,
     last_ns: Option<i128>,
     inputs: Vec<Input>,
-    before_syn: Vec<PacketId>,
+    outside_syn_span: Vec<PacketId>,
     anomalies: Vec<&'static str>,
     uncertain_payload: Option<PacketId>,
 }
@@ -359,8 +362,8 @@ pub struct FlowResult {
     pub anomalies: Vec<&'static str>,
     /// Earliest observed packet that could carry unretained data for this generation.
     pub uncertain_payload: Option<PacketId>,
-    /// Previously assigned segments excluded when a later SYN established the lower bound.
-    pub before_syn: Vec<PacketId>,
+    /// Previously assigned segments excluded when a later SYN established the sequence range.
+    pub outside_syn_span: Vec<PacketId>,
 }
 impl FlowResult {
     pub(crate) fn has_transport_loss(&self) -> bool {
@@ -379,13 +382,17 @@ pub enum Assignment {
     Ambiguous { candidate_flow_ids: Vec<usize> },
     Unassigned { reason: &'static str },
 }
+fn within_syn_span(sequence: u32, first: u32, max_span: i64) -> bool {
+    sequence_delta(sequence, first).is_ok_and(|delta| (0..=max_span).contains(&delta))
+}
+
 impl Flow {
     fn reset_observations(&mut self) {
         self.syn = [None; 2];
         self.anchors = [None; 2];
         self.fin = [false; 2];
         self.fin_next = [None; 2];
-        self.closed = false;
+        self.closed_at = None;
         self.rst_seen = false;
         self.has_payload = false;
         self.first_ns = None;
@@ -422,7 +429,39 @@ impl Flow {
             );
         }
         self.rst_seen |= segment.rst();
-        self.closed |= self.rst_seen || (self.fin[0] && self.fin[1]);
+        if self.rst_seen || (self.fin[0] && self.fin[1]) {
+            self.closed_at.get_or_insert(input.ordinal);
+        }
+    }
+
+    /// A missing half of the handshake can disprove a FIN tentatively used to
+    /// close the generation. An observed reset or an admissible FIN still closes it.
+    fn handshake_revokes_close(
+        &self,
+        direction: usize,
+        segment: &TcpSegment,
+        max_span: i64,
+    ) -> bool {
+        if self.closed_at.is_none()
+            || self.rst_seen
+            || !segment.syn()
+            || !segment.ack()
+            || self.syn[direction].is_some()
+            || self.syn[1 - direction]
+                .is_none_or(|isn| segment.acknowledgement != isn.wrapping_add(1))
+        {
+            return false;
+        }
+        self.inputs
+            .iter()
+            .filter(|input| input.direction == direction && input.segment.fin())
+            .all(|input| {
+                !within_syn_span(
+                    input.segment.data_sequence(),
+                    segment.data_sequence(),
+                    max_span,
+                )
+            })
     }
 
     fn admits_stream_start(&self, direction: usize, sequence: u32) -> bool {
@@ -454,9 +493,16 @@ pub enum HeaderDisposition {
     Omitted,
 }
 
+struct GenerationAtArrival {
+    id: usize,
+    next_input: usize,
+}
+
 struct UnretainedHeader {
     disposition: HeaderDisposition,
-    existing: Vec<usize>,
+    // Active generations at header arrival, with their input cursor at that point.
+    // The final SYN anchors and any corrected close position govern attribution.
+    existing: Vec<GenerationAtArrival>,
     packet: PacketId,
     time: Option<i128>,
     direction: usize,
@@ -467,6 +513,24 @@ struct UnretainedHeader {
     first_future_id: usize,
 }
 impl UnretainedHeader {
+    fn apply_existing(&mut self, flows: &mut [Flow], max_span: i64) {
+        let mut candidates = std::mem::take(&mut self.existing);
+        let mut open = false;
+        candidates.retain(|candidate| {
+            let flow = &flows[candidate.id];
+            if !self.matches(flow, max_span) {
+                return false;
+            }
+            open |= flow.closed_at.is_none_or(|at| at >= candidate.next_input);
+            true
+        });
+        if open {
+            for candidate in &candidates {
+                flows[candidate.id].note_uncertain(self.packet);
+            }
+        }
+    }
+
     fn handshake_allows(&self, flow: &Flow) -> bool {
         self.syn_isn
             .zip(flow.syn[self.direction])
@@ -530,13 +594,14 @@ impl TcpTracker {
             anchors: [None, None],
             fin: [false, false],
             fin_next: [None, None],
-            closed: false,
+            next_input: 0,
+            closed_at: None,
             rst_seen: false,
             has_payload: false,
             midstream,
             first_ns: None,
             last_ns: None,
-            before_syn: Vec::new(),
+            outside_syn_span: Vec::new(),
             inputs: Vec::new(),
             anomalies: Vec::new(),
             uncertain_payload: None,
@@ -580,7 +645,7 @@ impl TcpTracker {
         }
     }
     /// Keep header evidence until the owning generation is known. Reassembled
-    /// segments release their provisional headers only after successful admission.
+    /// segments replace provisional payload evidence with their known extent.
     pub fn observe_header(
         &mut self,
         scope: Scope,
@@ -625,11 +690,11 @@ impl TcpTracker {
     ) -> Option<usize> {
         let same_syn = history.iter().rev().copied().find(|id| {
             let f = &self.flows[*id];
-            !f.closed && self.active_at(f, when) && f.syn[direction] == Some(sequence)
+            f.closed_at.is_none() && self.active_at(f, when) && f.syn[direction] == Some(sequence)
         });
         let simultaneous = history.last().copied().filter(|id| {
             let f = &self.flows[*id];
-            !f.closed
+            f.closed_at.is_none()
                 && self.active_at(f, when)
                 && !f.midstream
                 && !f.has_payload
@@ -675,22 +740,26 @@ impl TcpTracker {
                     .and_then(|input| input.packets.first())
                     .is_some_and(|p| p.capture == packet.capture)
                 {
-                    header.existing.push(id);
+                    header.existing.push(GenerationAtArrival {
+                        id,
+                        next_input: self.flows[id].next_input,
+                    });
                 }
             }
             return Ok(header);
         }
-        let mut open = false;
         for &id in ids {
             let flow = &self.flows[id];
-            if self.active_at(flow, when) && header.matches(flow, max_span) {
-                header.existing.push(id);
-                open |= !flow.closed;
+            // An unanchored direction can acquire a different sequence origin.
+            // Keep temporal eligibility now and test that origin at finalization.
+            if self.active_at(flow, when)
+                && (flow.syn[direction].is_none() || header.matches(flow, max_span))
+            {
+                header.existing.push(GenerationAtArrival {
+                    id,
+                    next_input: flow.next_input,
+                });
             }
-        }
-        // A late data packet with only closed candidates is unassigned.
-        if !open {
-            header.existing.clear();
         }
         Ok(header)
     }
@@ -705,7 +774,7 @@ impl TcpTracker {
         segment: TcpHeader,
     ) -> Result<()> {
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
-        let header = self.match_header(
+        let mut header = self.match_header(
             &key,
             direction,
             packet,
@@ -713,9 +782,7 @@ impl TcpTracker {
             segment,
             HeaderDisposition::Omitted,
         )?;
-        for id in header.existing {
-            self.flows[id].note_uncertain(packet);
-        }
+        header.apply_existing(&mut self.flows, self.limits.max_stream_span as i64);
         Ok(())
     }
 
@@ -778,9 +845,10 @@ impl TcpTracker {
         let has_payload = !segment.payload.is_empty();
         let (key, direction) = FlowKey::new(scope, header.source, header.destination);
         let assignment = self.assign(&key, direction, packets, when, segment)?;
-        if matches!(assignment, Assignment::Assigned { .. }) {
-            self.resolve_packets(&key, packets);
-        } else if has_payload {
+        // The complete segment replaces all partial observations of its bytes,
+        // including when a payload-free control has several possible owners.
+        self.resolve_packets(&key, packets);
+        if has_payload && !matches!(assignment, Assignment::Assigned { .. }) {
             self.observe_header(
                 key.scope,
                 packets[0],
@@ -845,17 +913,24 @@ impl TcpTracker {
             let mut conflicting_syn = false;
             for id in &history {
                 let f = &self.flows[*id];
-                let expired = match (when, f.last_ns) {
-                    (Some(now), Some(last)) => now.saturating_sub(last) > self.idle_ns,
-                    _ => false,
-                };
-                if !expired && self.plausible(f, direction, &segment) {
+                if !self.active_at(f, when) {
+                    continue;
+                }
+                if f.handshake_revokes_close(
+                    direction,
+                    &segment,
+                    self.limits.max_stream_span as i64,
+                ) {
+                    candidates.push(*id);
+                    continue;
+                }
+                if self.plausible(f, direction, &segment) {
                     if segment.syn() && f.syn[direction].is_some_and(|isn| isn != segment.sequence)
                     {
-                        conflicting_syn |= !f.closed;
+                        conflicting_syn |= f.closed_at.is_none();
                         continue;
                     }
-                    if f.closed {
+                    if f.closed_at.is_some() {
                         closed_candidates.push(*id);
                         if Self::is_final_ack(f, direction, &segment) {
                             closed_final_ack_candidates.push(*id);
@@ -924,16 +999,20 @@ impl TcpTracker {
             // Before the handshake arrives, this direction has only a relative
             // sequence origin. Reconcile data and control state against the ISN.
             let first = segment.data_sequence();
-            let precedes = |input: &Input| {
+            let outside = |input: &Input| {
                 input.direction == direction
                     && input.segment.contributes_stream_extent()
-                    && !sequence_delta(input.segment.data_sequence(), first).is_ok_and(|d| d >= 0)
+                    && !within_syn_span(
+                        input.segment.data_sequence(),
+                        first,
+                        self.limits.max_stream_span as i64,
+                    )
             };
-            if flow.inputs.iter().any(precedes) {
+            if flow.inputs.iter().any(outside) {
                 flow.reset_observations();
                 for input in std::mem::take(&mut flow.inputs) {
-                    if precedes(&input) {
-                        flow.before_syn.extend_from_slice(&input.packets);
+                    if outside(&input) {
+                        flow.outside_syn_span.extend_from_slice(&input.packets);
                         excluded.push(input);
                     } else {
                         flow.record(&input);
@@ -947,11 +1026,13 @@ impl TcpTracker {
         sources.sort_unstable();
         sources.dedup();
         let input = Input {
+            ordinal: flow.next_input,
             direction,
             segment,
             when,
             packets: sources,
         };
+        flow.next_input += 1;
         flow.record(&input);
         flow.inputs.push(input);
         self.retained = retained;
@@ -979,15 +1060,11 @@ impl TcpTracker {
             let Some(ids) = self.keys.get(&key) else {
                 continue;
             };
-            for header in headers.into_values() {
-                for &id in &header.existing {
-                    let flow = &mut self.flows[id];
-                    // The opposite half of the handshake may have arrived since admission.
-                    if header.handshake_allows(flow) {
-                        flow.note_uncertain(header.packet);
-                    }
-                }
-                if header.syn_isn.is_some() && header.ack.is_none() && !header.existing.is_empty() {
+            for mut header in headers.into_values() {
+                let opening_owner =
+                    header.syn_isn.is_some() && header.ack.is_none() && !header.existing.is_empty();
+                header.apply_existing(&mut self.flows, max_span);
+                if opening_owner {
                     continue; // An observed opening SYN already owned this retransmission.
                 }
                 let first = ids.partition_point(|&id| id < header.first_future_id);
@@ -1061,8 +1138,8 @@ impl TcpTracker {
             };
             packets.sort_unstable();
             packets.dedup();
-            flow.before_syn.sort_unstable();
-            flow.before_syn.dedup();
+            flow.outside_syn_span.sort_unstable();
+            flow.outside_syn_span.dedup();
             flow.anomalies.sort();
             flow.anomalies.dedup();
             output.push(FlowResult {
@@ -1070,12 +1147,12 @@ impl TcpTracker {
                 generation: flow.generation,
                 key: flow.key,
                 syn: flow.syn,
-                closed: flow.closed,
+                closed: flow.closed_at.is_some(),
                 midstream: flow.midstream,
                 first_ns: flow.first_ns,
                 last_ns: flow.last_ns,
                 packets,
-                before_syn: flow.before_syn,
+                outside_syn_span: flow.outside_syn_span,
                 streams: [first, second],
                 reconstruction_errors,
                 anomalies: flow.anomalies,
