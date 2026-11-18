@@ -440,20 +440,8 @@ impl<V> Assembly<V> {
         info: &FragmentInfo,
         end: usize,
     ) -> Option<&'static str> {
-        if !info.more && self.end.is_some_and(|total| end != total) {
-            return Some("conflicting_fragment_terminal_length");
-        }
-        if let Some(total) = self.end.or((!info.more).then_some(end)) {
-            if end > total
-                || (info.more && end == total)
-                || self
-                    .parts
-                    .iter()
-                    .any(|p| p.end > total || (p.more && p.end == total))
-            {
-                return Some("fragment_outside_terminal_length");
-            }
-        }
+        // A fragment can violate more than one rule. V1 history records the
+        // overlap verdict first, then a range violation, then a disputed end.
         for part in &self.parts {
             let start = info.offset.max(part.start);
             let stop = end.min(part.end);
@@ -467,6 +455,21 @@ impl<V> Assembly<V> {
                     return Some("conflicting_fragment_bytes");
                 }
             }
+        }
+        let terminal = if info.more { self.end } else { Some(end) };
+        if let Some(total) = terminal {
+            if end > total
+                || (info.more && end == total)
+                || self
+                    .parts
+                    .iter()
+                    .any(|p| p.end > total || (p.more && p.end == total))
+            {
+                return Some("fragment_outside_terminal_length");
+            }
+        }
+        if !info.more && self.end.is_some_and(|total| total != end) {
+            return Some("conflicting_fragment_terminal_length");
         }
         None
     }

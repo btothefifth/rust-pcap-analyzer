@@ -65,7 +65,7 @@ opt-in through these entry points:
 | pcap-evidence-product::deep | Decode one already-framed protocol unit | The caller supplies the protocol hypothesis and EvidenceBytes; no port-only identity is inferred |
 | pcap-depth decode | Inspect a standalone protocol unit | The input is explicitly not a PCAP; the report says so and binds only to the supplied unit hash |
 | pcap-depth analyze | Add depth observations to the existing event stream | ProductSink re-reads packet bytes from the capture and PacketMap verifies their hashes before retaining witnesses |
-| pcap-evidence-history-app | Apply stateful application framing to a sealed history range | History::evidence_range verifies journal/index/source identity and returns candidate bytes or explicit gaps/conflicts |
+| pcap-evidence-history-app | Apply stateful application framing to a sealed history range | History::evidence_page reads candidate bytes and their witnesses, and reports indexed gaps and conflicts |
 | tools.depth.opcua_crypto | Optional authorized OPC UA symmetric transform | Python-only tool boundary; the Rust parser never discovers keys or decrypts automatically |
 
 The product CLI’s ordinary command remains the established product path. The
@@ -171,6 +171,13 @@ page boundaries.
 
 Adjacent unavailable intervals with the same transport status produce one cut
 and one boundary event, including when the interval spans query pages.
+When a page ends in a gap, the reader skips directly to the next indexed
+placement in that direction or the end of the selection. Before reading the
+first page, the consumer checks the selection length against the history's
+`max_query_work` allowance (one unit per selected byte, including gaps).
+An oversized selection aborts at its starting offset with
+`history_app_range_work`. The index and witness work limits still apply to each
+page.
 
 The history application consumer emits a hash-chained NDJSON sequence:
 analysis.start, zero or more message/boundary events, optional incomplete or

@@ -378,6 +378,68 @@ fn history_drains_a_complete_frame_before_charging_later_packet_spans() {
 }
 
 #[test]
+fn a_sparse_selection_obeys_the_same_work_limit_at_any_page_size() {
+    let temp = Temp::new();
+    let source = temp.source(&[tcp(false, 100, 0, 2, &[]), tcp(false, 101, 0, 0x18, b"abc")]);
+    let workspace = temp.0.join("history");
+    let config = Config {
+        max_query_work: 4096,
+        ..Config::default()
+    };
+    analyze_file(&source, &workspace, config, &Cancellation::default()).unwrap();
+    let mut history = History::open(&source, &workspace).unwrap();
+    let generation = history.generations(None, 10).unwrap()[0];
+    // A one-byte query before the only placement skips to its start. A
+    // one-byte query after it covers the rest of the selected gap in one page.
+    for (start, end, gap_end) in [(-4090, 3, 0), (3, 4099, 4099)] {
+        let page = history.evidence_page(generation, 0, start, end, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            (page[0].status.as_str(), page[0].start, page[0].end),
+            ("gap", start, gap_end)
+        );
+    }
+    for length in [4096, 4097] {
+        let mut expected = None;
+        for page_bytes in [1, 64, 4096] {
+            let request = Request {
+                generation,
+                direction: 0,
+                start: 3,
+                end: 3 + length,
+                page_bytes,
+                max_output_bytes: 8192,
+                protocol: "modbus".into(),
+                ua_security_none: false,
+            };
+            let mut output = Vec::new();
+            let result = analyze(
+                &mut history,
+                &request,
+                Limits::default(),
+                &mut output,
+                &AtomicBool::new(false),
+            );
+            let report = String::from_utf8(output).unwrap();
+            if length == 4096 {
+                result.unwrap();
+                assert_eq!(
+                    report.matches(r#""kind":"application.boundary""#).count(),
+                    1
+                );
+                assert!(report.contains(r#""start":"3","end":"4099""#));
+                assert!(report.contains("analysis.complete"));
+            } else {
+                assert_eq!(result.unwrap_err().field, "history_app_range_work");
+                assert!(report.contains("analysis.aborted"));
+                assert!(report.contains(r#""consumed_until":"3""#));
+            }
+            assert_eq!(expected.get_or_insert_with(|| report.clone()), &report);
+        }
+    }
+}
+
+#[test]
 fn a_paged_gap_emits_one_boundary_with_the_discarded_prefix() {
     let temp = Temp::new();
     let source = temp.source(&[

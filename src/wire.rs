@@ -342,6 +342,9 @@ fn ipv4(
     if total < header {
         return Err(bad("ipv4_total_length", "length smaller than header"));
     }
+    if !partial {
+        require(b, total, id.record_offset + start as u64, "ipv4_payload")?;
+    }
     let flags = be16(&b[6..8]);
     let off = usize::from(flags & 0x1fff) * 8;
     let more = flags & 0x2000 != 0;
@@ -359,9 +362,6 @@ fn ipv4(
     }
     if off.checked_add(total - header).is_none_or(|n| n > 65_535) {
         return Err(bad("ipv4_fragment", "fragment range too large"));
-    }
-    if !partial {
-        require(b, total, id.record_offset + start as u64, "ipv4_payload")?;
     }
     let declared_payload_len = total - header;
     let total = total.min(b.len());

@@ -114,16 +114,22 @@ pub fn analyze<W: Write>(
     let mut at = request.start;
     let mut boundary: Option<Boundary> = None;
     let read_result = (|| -> Result<()> {
+        if request.start.abs_diff(request.end) > history.config.max_query_work {
+            return Err(Error::limit("history_app_range_work"));
+        }
         while at < request.end {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(Error::limit("history_app_cancelled"));
             }
-            let end = at
-                .checked_add(request.page_bytes as i64)
-                .unwrap_or(i64::MAX)
-                .min(request.end);
-            let range = history.evidence_range(request.generation, request.direction, at, end)?;
-            for p in range.pieces {
+            let pieces = history.evidence_page(
+                request.generation,
+                request.direction,
+                at,
+                request.end,
+                request.page_bytes,
+            )?;
+            for p in pieces {
+                at = p.end;
                 if let Some(gap) = &mut boundary {
                     if p.bytes.is_none() && gap.end == p.start && gap.status == p.status {
                         gap.end = p.end;
@@ -170,7 +176,6 @@ pub fn analyze<W: Write>(
                     });
                 }
             }
-            at = end;
         }
         Ok(())
     })();

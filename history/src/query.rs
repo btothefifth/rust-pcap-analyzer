@@ -160,6 +160,17 @@ impl History {
         start: i64,
         end: i64,
     ) -> Result<Json> {
+        self.range_with_next_start(generation, direction, start, end)
+            .map(|(report, _)| report)
+    }
+
+    fn range_with_next_start(
+        &mut self,
+        generation: [u8; 32],
+        direction: u8,
+        start: i64,
+        end: i64,
+    ) -> Result<(Json, Option<i64>)> {
         let size = end
             .checked_sub(start)
             .filter(|n| *n > 0)
@@ -173,6 +184,7 @@ impl History {
         let mut work = 0u64;
         let mut scanned = 0usize;
         let mut boundaries = BTreeSet::from([start, end]);
+        let mut next_start = None;
         while at < self.index.count {
             // Charge the index scan before filtering: short intervals preceding
             // start are still reads, even though they produce no observation.
@@ -186,7 +198,11 @@ impl History {
                 .ok_or_else(|| Error::limit("query_work"))?;
             let row = self.index.at(at)?;
             at += 1;
-            if row.generation != generation || row.direction != direction || row.start >= end {
+            if row.generation != generation || row.direction != direction {
+                break;
+            }
+            if row.start >= end {
+                next_start = Some(row.start);
                 break;
             }
             if row.end <= start {
@@ -332,6 +348,28 @@ impl History {
             ("observations", Json::array(evidence)),
         ]);
         result.encode_bounded(self.config.max_record_bytes)?;
-        Ok(result)
+        Ok((result, next_start))
+    }
+
+    /// Read one page of a selection. A trailing gap extends to the next indexed
+    /// placement or the selection end without reading empty pages in between.
+    pub fn evidence_page(
+        &mut self,
+        generation: [u8; 32],
+        direction: u8,
+        start: i64,
+        end: i64,
+        page_bytes: usize,
+    ) -> Result<Vec<EvidencePiece>> {
+        if page_bytes == 0 || page_bytes > self.config.max_query_bytes {
+            return Err(Error::limit("query_bytes"));
+        }
+        let page_end = start.saturating_add_unsigned(page_bytes as u64).min(end);
+        let (report, next) = self.range_with_next_start(generation, direction, start, page_end)?;
+        let mut pieces = self.typed_evidence(report)?.pieces;
+        if let Some(gap) = pieces.last_mut().filter(|p| p.status == "gap") {
+            gap.end = next.unwrap_or(end).min(end);
+        }
+        Ok(pieces)
     }
 }

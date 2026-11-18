@@ -177,12 +177,25 @@ fn reverse_tunnel_directions_share_generation_and_distinct_tunnels_do_not() {
 fn gre_rejection_notices_replay_from_the_v1_seal() {
     // Written by pcap-history at 03a86f8 from a bad checksum, a nonzero GRE
     // reserved field with a valid checksum, and an ordinary TCP data segment.
-    let old = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/gre-checksum-v1");
+    check_v1_replay("gre-checksum-v1", 2);
+}
+
+#[test]
+fn ipv4_rejection_precedence_replays_from_the_v1_seal() {
+    // The base writer saw a short IPv4 packet with a reserved flag, followed
+    // by shorter, longer, and byte-conflicting terminal fragments.
+    check_v1_replay("ipv4-notices-v1", 7);
+}
+
+fn check_v1_replay(fixture: &str, notices: u64) {
+    let old = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(fixture);
     let source = old.join("source.pcap");
     let temp = Temp::new();
     let cancel = Cancellation::default();
     let verified = verify_file(&source, &old, &temp.0.join("verified"), &cancel).unwrap();
-    assert_eq!((verified.notices, verified.tcp_records), (2, 1));
+    assert_eq!((verified.notices, verified.tcp_records), (notices, 1));
 
     let prefix = temp.0.join("prefix");
     fs::create_dir(&prefix).unwrap();
