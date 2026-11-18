@@ -607,6 +607,25 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
             expected,
             "snapshot {case}"
         );
+        if matches!(
+            case,
+            "split-header" | "split-header-reversed" | "split-header-gap"
+        ) {
+            let mut tight = limits.clone();
+            tight.base.limits.max_fragments_per_set = 1;
+            let events = run(&raw, tight).events;
+            assert!(events
+                .iter()
+                .any(|e| e.data.encode().contains("fragment_context_reset")));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| e.data.encode().contains("read_mapping"))
+                    .count(),
+                expected,
+                "refused {case}"
+            );
+        }
         let events = run(&raw, limits).events;
         assert_eq!(
             events
@@ -1151,5 +1170,52 @@ fn udp_tunnel_loss_respects_enclosing_lengths() {
                 frames.len()
             );
         }
+    }
+}
+
+#[test]
+fn late_predecessor_payload_does_not_belong_to_a_known_successor() {
+    use tiny_capture::{capture, tcp};
+    let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let exchange = |syn: u32, peer: u32, addr: u8| {
+        let mut query = request;
+        query[9] = addr;
+        vec![
+            tcp(false, syn, 0, 2, &[]),
+            tcp(true, peer, syn + 1, 0x12, &[]),
+            tcp(false, syn + 1, peer + 1, 0x18, &query),
+            tcp(true, peer + 1, syn + 13, 0x18, &response),
+        ]
+    };
+    let old = 0xffff1000u32;
+    let peer = 0xfffd1000u32;
+    let next = old.wrapping_add(4 * 1024 * 1024 + 8);
+    let other = peer.wrapping_add(4 * 1024 * 1024 + 8);
+    for snap in [false, true] {
+        let mut frames = exchange(old, peer, 9);
+        frames.extend(exchange(next, other, 17));
+        let record = capture(&frames).len();
+        let late = tcp(false, old + 13, peer + 12, 0x18, &request);
+        let len = late.len() as u32;
+        frames.push(if snap { late[..48].to_vec() } else { late });
+        let mut bytes = capture(&frames);
+        bytes[record + 12..record + 16].copy_from_slice(&len.to_le_bytes());
+        let mut config = StreamConfig::default();
+        config.base.modbus_ports = vec![2000];
+        let root = pcap_evidence::engine::analyze(&bytes, config.base.clone()).unwrap();
+        let report = pcap_evidence::report::analysis(&root, false).encode();
+        assert_eq!(report.matches("read_mapping").count(), 1);
+        assert!(report.contains(r#""starting_address_zero_based":17"#));
+        let mapped: Vec<_> = run(&bytes, config)
+            .events
+            .into_iter()
+            .filter(|e| e.data.encode().contains("read_mapping"))
+            .collect();
+        assert_eq!(mapped.len(), 1);
+        assert!(mapped[0]
+            .data
+            .encode()
+            .contains(r#""starting_address_zero_based":17"#));
     }
 }

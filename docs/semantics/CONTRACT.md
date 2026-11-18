@@ -183,9 +183,12 @@ it arrived whole or in fragments. Partial IP payloads can supply a header
 witness, but normal transport decoding and fragment admission require the
 complete declared extent. Adjacent fragments can jointly identify a TCP header
 before reassembly finishes. A gap before the identity fields leaves the header
-unknown. Tunnel loss attribution honors enclosing IP and UDP lengths. An
-earlier payload observation can belong to a later SYN-anchored generation only
-if its sequence falls at or after that direction's first payload sequence.
+unknown. If the fragment limit interrupts assembly, streaming can still use
+the arriving fragment and retained contiguous bytes to identify which TCP
+generation lost evidence. Tunnel loss attribution honors enclosing IP and
+UDP lengths. Both captured and omitted payload must start at or after a
+generation's first payload sequence when that direction has an observed SYN.
+The comparison uses TCP sequence arithmetic and applies in either arrival order.
 
 Losing only the options of a header-only TCP segment preserves payload
 eligibility. Unassigned data and segments too large for a streaming window

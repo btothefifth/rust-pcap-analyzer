@@ -376,6 +376,12 @@ pub enum Assignment {
     Unassigned { reason: &'static str },
 }
 impl Flow {
+    fn admits_payload_start(&self, direction: usize, sequence: u32) -> bool {
+        self.syn[direction].is_none_or(|isn| {
+            sequence_delta(sequence, isn.wrapping_add(1)).is_ok_and(|delta| delta >= 0)
+        })
+    }
+
     fn sequence_plausible(
         &self,
         direction: usize,
@@ -420,6 +426,7 @@ impl UnretainedHeader {
                 .opening_isn
                 .zip(flow.syn[self.direction])
                 .is_none_or(|(observed, assigned)| observed == assigned)
+            && flow.admits_payload_start(self.direction, self.sequence)
             && flow.sequence_plausible(self.direction, self.sequence, self.ack, max_span)
     }
 }
@@ -491,12 +498,14 @@ impl TcpTracker {
         }
     }
     fn plausible(&self, flow: &Flow, direction: usize, segment: &TcpSegment) -> bool {
-        flow.sequence_plausible(
-            direction,
-            segment.data_sequence(),
-            segment.ack().then_some(segment.acknowledgement),
-            self.limits.max_stream_span as i64,
-        )
+        (segment.payload.is_empty()
+            || flow.admits_payload_start(direction, segment.data_sequence()))
+            && flow.sequence_plausible(
+                direction,
+                segment.data_sequence(),
+                segment.ack().then_some(segment.acknowledgement),
+                self.limits.max_stream_span as i64,
+            )
     }
     fn is_final_ack(flow: &Flow, direction: usize, segment: &TcpSegment) -> bool {
         if flow.rst_seen
@@ -904,13 +913,7 @@ impl TcpTracker {
                         .time
                         .zip(flow.first_ns)
                         .is_some_and(|(seen, start)| start.saturating_sub(seen) > self.idle_ns);
-                    // A later opening SYN bounds the payload sequence space even
-                    // when the earlier observation was close enough to this tuple.
-                    let after_syn = flow.syn[header.direction].is_none_or(|isn| {
-                        sequence_delta(header.sequence, isn.wrapping_add(1))
-                            .is_ok_and(|delta| delta >= 0)
-                    });
-                    if !expired && after_syn && header.matches(flow, max_span) {
+                    if !expired && header.matches(flow, max_span) {
                         flow.note_uncertain(header.packet);
                     }
                 }

@@ -184,25 +184,39 @@ impl TcpHeaderObservation {
 }
 
 pub fn tcp_header_observation(d: &Datagram) -> Option<TcpHeaderObservation> {
+    inspect_tcp_header(d).ok().flatten()
+}
+
+/// Inspect a transport prefix, distinguishing a short header from a different
+/// protocol or an invalid header. Only a short header needs additional bytes.
+pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> {
     if d.fragment.as_ref().is_some_and(|f| f.offset != 0) {
-        return None;
+        return Ok(None);
     }
-    let (protocol, offset, checksum_context) = transport_offset(d).ok()?;
+    let (protocol, offset, checksum_context) = transport_offset(d)?;
     if protocol != 6 {
-        return None;
+        return Ok(None);
     }
-    let (header, header_len) = tcp_identity(d, &d.payload.data()[offset..]).ok()?;
+    let (header, header_len) = tcp_identity(d, &d.payload.data()[offset..])?;
     let spans = d.payload.spans();
     let packet = spans
-        .get(spans.partition_point(|s| s.end <= offset))?
+        .get(spans.partition_point(|s| s.end <= offset))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Invariant,
+                offset as u64,
+                "tcp_header",
+                "missing source span",
+            )
+        })?
         .packet;
-    Some(TcpHeaderObservation {
+    Ok(Some(TcpHeaderObservation {
         header,
         packet,
         possible_payload: d.fragment.is_some() || d.declared_payload_len > offset + header_len,
         checksum_allowed: d.ip_checksum != Checksum::Invalid
             && checksum_context != ChecksumContext::Unsupported,
-    })
+    }))
 }
 
 /// Read captured network headers for loss attribution. In prefix mode the

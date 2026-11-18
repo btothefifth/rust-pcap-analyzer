@@ -588,22 +588,38 @@ impl State<'_> {
             .filter(|f| f.offset == 0)
             .and_then(|_| loss_header(&d));
         let mut resolved = None;
-        let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
-            if let Some(candidate) = loss_header(prefix) {
-                header.get_or_insert(candidate);
-            } else {
-                header = None;
-                if let Some((scope, path, segment, _)) = network::tcp_prefix_path(
-                    prefix,
-                    path.clone(),
-                    max_depth,
-                    network::HeaderUse::Resolve,
-                ) {
-                    resolved = Some((scope, path, segment, contributors.to_vec()));
+        let mut inspect =
+            |prefix: &wire::Datagram, contributors: &[PacketId]| match network::inspect_tcp_path(
+                prefix,
+                path.clone(),
+                max_depth,
+                purpose,
+            ) {
+                Ok(Some(candidate)) => {
+                    header.get_or_insert(candidate);
+                    true
                 }
-            }
-            header.is_some()
-        };
+                Err(error) if error.code == pcap_evidence::ErrorCode::Truncated => {
+                    header = None;
+                    false
+                }
+                Ok(None) | Err(_) => {
+                    header = None;
+                    match network::inspect_tcp_path(
+                        prefix,
+                        path.clone(),
+                        max_depth,
+                        network::HeaderUse::Resolve,
+                    ) {
+                        Ok(Some((scope, path, segment, _))) => {
+                            resolved = Some((scope, path, segment, contributors.to_vec()));
+                            true
+                        }
+                        Ok(None) => true,
+                        Err(error) => error.code != pcap_evidence::ErrorCode::Truncated,
+                    }
+                }
+            };
         let Some((datagram, mut contributors)) =
             self.reassemble(d, &path, frame, ancestors, &mut inspect)?
         else {

@@ -1,6 +1,6 @@
 //! Bounded IP fragment reconstruction. Missing bytes are never synthesized.
 use crate::provenance::{EvidenceBytes, PacketId};
-use crate::wire::{Checksum, ChecksumContext, Datagram, Scope};
+use crate::wire::{Checksum, ChecksumContext, Datagram, FragmentInfo, Scope};
 use crate::{Error, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -16,17 +16,27 @@ struct Key {
 }
 struct Part {
     start: usize,
+    end: usize,
     more: bool,
-    bytes: EvidenceBytes,
+    // Dropped once the contiguous prefix owns these bytes.
+    pending: Option<EvidenceBytes>,
+}
+impl Part {
+    fn data<'a>(&'a self, prefix: &'a EvidenceBytes) -> &'a [u8] {
+        match &self.pending {
+            Some(bytes) => bytes.data(),
+            None => &prefix.data()[self.start..self.end],
+        }
+    }
 }
 struct Assembly {
-    template: Datagram,
+    prefix: Datagram,
     parts: Vec<Part>,
     end: Option<usize>,
     first_frame: u64,
     packets: Vec<PacketId>,
     poisoned: bool,
-    // None once the observer has identified the transport.
+    // None once additional bytes cannot change the classification.
     inspected_prefix: Option<usize>,
 }
 #[derive(Clone, Debug)]
@@ -86,7 +96,7 @@ impl FragmentReassembler {
             self.deadlines.remove(&(deadline, key.clone()));
         }
 
-        let size: usize = a.parts.iter().map(|p| p.bytes.len()).sum();
+        let size: usize = a.parts.iter().map(|p| p.end - p.start).sum();
         self.retained -= size;
         Some(a)
     }
@@ -103,9 +113,10 @@ impl FragmentReassembler {
     ) -> Result<FragmentOutcome> {
         self.push_observing_prefix(datagram, frame, ancestors, None)
     }
-    /// Inspect newly contiguous bytes of a still-incomplete datagram for loss
-    /// attribution. Return true once its transport identity is known. The
-    /// prefix retains its packet spans and cannot enter transport admission.
+    /// Inspect a contiguous prefix for loss attribution. Return true when
+    /// additional bytes cannot change its classification. A fragment refused
+    /// at the capacity limit may supply header evidence to the observer. Only
+    /// a successful Complete outcome delivers a datagram to the caller.
     pub fn push_observing_prefix(
         &mut self,
         mut datagram: Datagram,
@@ -123,13 +134,13 @@ impl FragmentReassembler {
             ids.extend_from_slice(ancestors);
             ids.sort_unstable();
             ids.dedup();
-            if ids.len() > self.limits.max_fragments_per_set {
-                return Err(Error::limit("fragment_contributors"));
-            }
         }
         let info = match datagram.fragment.clone() {
             Some(x) => x,
             None => {
+                if ids.len() > self.limits.max_fragments_per_set {
+                    return Err(Error::limit("fragment_contributors"));
+                }
                 return Ok(FragmentOutcome::Complete(datagram, ids));
             }
         };
@@ -165,11 +176,8 @@ impl FragmentReassembler {
         admitted_packets.extend(ids);
         admitted_packets.sort();
         admitted_packets.dedup();
-        if admitted_packets.len() > self.limits.max_fragments_per_set
-            || existing.is_some_and(|set| set.parts.len() >= self.limits.max_fragments_per_set)
-        {
-            return Err(Error::limit("fragments_per_set"));
-        }
+        let too_many = admitted_packets.len() > self.limits.max_fragments_per_set
+            || existing.is_some_and(|set| set.parts.len() >= self.limits.max_fragments_per_set);
         let new_size = if existing.is_some_and(|set| set.poisoned) {
             self.retained
         } else {
@@ -177,8 +185,15 @@ impl FragmentReassembler {
                 .checked_add(datagram.payload.len())
                 .ok_or_else(|| Error::limit("fragment_payload"))?
         };
-        if new_size > self.limits.max_retained_payload {
-            return Err(Error::limit("fragment_payload"));
+        if too_many || new_size > self.limits.max_retained_payload {
+            if let (Some(set), Some(inspect)) = (existing, observer) {
+                set.inspect_refused(datagram, &info, end, &admitted_packets, inspect)?;
+            }
+            return Err(Error::limit(if too_many {
+                "fragments_per_set"
+            } else {
+                "fragment_payload"
+            }));
         }
         if !self.sets.contains_key(&key) {
             if self.sets.len() >= self.limits.max_fragment_sets {
@@ -186,7 +201,7 @@ impl FragmentReassembler {
             }
 
             // Copy fixed metadata, not a full payload that is immediately discarded.
-            let template = Datagram {
+            let prefix = Datagram {
                 scope: datagram.scope.clone(),
                 source: datagram.source,
                 destination: datagram.destination,
@@ -209,7 +224,7 @@ impl FragmentReassembler {
             self.sets.insert(
                 key.clone(),
                 Assembly {
-                    template,
+                    prefix,
                     parts: Vec::new(),
                     end: None,
                     first_frame: frame,
@@ -219,7 +234,6 @@ impl FragmentReassembler {
                 },
             );
         }
-        let mut rejection = None;
         let mut ready = false;
         {
             let set = self
@@ -233,52 +247,8 @@ impl FragmentReassembler {
                     packets: set.packets.clone(),
                 }));
             }
-            if datagram.ip_checksum == Checksum::Invalid {
-                set.template.ip_checksum = Checksum::Invalid;
-            }
-            if datagram.checksum_context == ChecksumContext::Unsupported {
-                set.template.checksum_context = ChecksumContext::Unsupported;
-            }
-            if info.offset == 0 {
-                // RFC 8200 4.5: IPv6 nonzero fragments may advertise different
-                // Next Header values. Offset zero owns the reassembled value.
-                set.template.protocol = datagram.protocol;
-                set.template.fragment = Some(info.clone());
-
-                set.template.network_header_len = datagram.network_header_len;
-            }
             let learned_end = !info.more && set.end.is_none();
-            if !info.more {
-                if set.end.is_some_and(|old| old != end) {
-                    rejection = Some("conflicting_fragment_terminal_length");
-                }
-                set.end = Some(end);
-            }
-            if let Some(total) = set.end {
-                if end > total
-                    || (info.more && end >= total)
-                    || set.parts.iter().any(|p| {
-                        p.start + p.bytes.len() > total
-                            || (p.more && p.start + p.bytes.len() >= total)
-                    })
-                {
-                    rejection = Some("fragment_outside_terminal_length");
-                }
-            }
-            for previous in &set.parts {
-                let a = previous.start.max(info.offset);
-                let b = (previous.start + previous.bytes.len()).min(end);
-                if a < b {
-                    if key.ipv6 {
-                        rejection = Some("ipv6_overlapping_fragments");
-                    } else if previous.bytes.data()[a - previous.start..b - previous.start]
-                        != datagram.payload.data()[a - info.offset..b - info.offset]
-                    {
-                        rejection = Some("conflicting_fragment_bytes");
-                    }
-                }
-            }
-            if let Some(code) = rejection {
+            if let Some(code) = set.conflict(&datagram, &info, end) {
                 set.poisoned = true;
                 return Ok(FragmentOutcome::Rejected(FragmentNotice {
                     code,
@@ -286,27 +256,36 @@ impl FragmentReassembler {
                 }));
             }
 
-            self.retained = new_size;
-            set.parts.push(Part {
-                start: info.offset,
-                more: info.more,
-                bytes: std::mem::take(&mut datagram.payload),
-            });
-            set.parts.sort_by_key(|p| p.start);
-            let mut contiguous = 0;
-            for part in &set.parts {
-                if part.start > contiguous {
-                    break;
-                }
-                contiguous = contiguous.max(part.start + part.bytes.len());
+            let previous_checksum = (set.prefix.ip_checksum, set.prefix.checksum_context);
+            update_metadata(&mut set.prefix, &datagram, &info);
+            let checksum_changed =
+                previous_checksum != (set.prefix.ip_checksum, set.prefix.checksum_context);
+            if !info.more {
+                set.end = Some(end);
             }
+            self.retained = new_size;
+            let index = set.parts.partition_point(|part| part.start <= info.offset);
+            set.parts.insert(
+                index,
+                Part {
+                    start: info.offset,
+                    end,
+                    more: info.more,
+                    pending: Some(std::mem::take(&mut datagram.payload)),
+                },
+            );
+            if let Err(error) = set.extend_prefix(index) {
+                set.poisoned = true;
+                return Err(error);
+            }
+            let contiguous = set.prefix.payload.len();
             if let Some(total) = set.end {
                 ready = contiguous == total;
                 if ready {
                     let overhead = if key.ipv6 {
-                        set.template.network_header_len.saturating_sub(48)
+                        set.prefix.network_header_len.saturating_sub(48)
                     } else {
-                        set.template.network_header_len
+                        set.prefix.network_header_len
                     };
                     if total + overhead > 65_535 {
                         set.poisoned = true;
@@ -322,19 +301,15 @@ impl FragmentReassembler {
             let new_prefix = set.inspected_prefix.is_some_and(|seen| contiguous > seen);
             if !ready
                 && contiguous > 0
-                && (new_prefix || learned_end || (info.offset == 0 && set.end.is_some()))
+                && (new_prefix
+                    || learned_end
+                    || checksum_changed
+                    || (info.offset == 0 && set.end.is_some()))
             {
                 if let Some(inspect) = observer {
-                    let mut prefix = set.template.clone();
-                    prefix.payload = join_prefix(&set.parts)?;
-                    // More bytes are known to exist, even without a final fragment.
-                    if let Some(total) = set.end {
-                        prefix.fragment = None;
-                        prefix.declared_payload_len = total;
-                    } else {
-                        prefix.declared_payload_len = contiguous + 1;
-                    }
-                    set.inspected_prefix = (!inspect(&prefix, &set.packets)).then_some(contiguous);
+                    let prefix = &mut set.prefix;
+                    set_prefix_extent(prefix, set.end);
+                    set.inspected_prefix = (!inspect(prefix, &set.packets)).then_some(contiguous);
                 }
             }
         }
@@ -344,11 +319,9 @@ impl FragmentReassembler {
         let mut set = self
             .remove(&key)
             .ok_or_else(|| Error::limit("fragment_state"))?;
-        let joined = join_prefix(&set.parts)?;
-        set.template.declared_payload_len = joined.len();
-        set.template.payload = joined;
-        set.template.fragment = None;
-        Ok(FragmentOutcome::Complete(set.template, set.packets))
+        set.prefix.declared_payload_len = set.prefix.payload.len();
+        set.prefix.fragment = None;
+        Ok(FragmentOutcome::Complete(set.prefix, set.packets))
     }
     pub fn finish(mut self) -> Vec<FragmentNotice> {
         let sets = std::mem::take(&mut self.sets);
@@ -365,16 +338,134 @@ impl FragmentReassembler {
     }
 }
 
-fn join_prefix(parts: &[Part]) -> Result<EvidenceBytes> {
-    let mut joined = EvidenceBytes::default();
-    for part in parts {
-        if part.start > joined.len() {
-            break;
+impl Assembly {
+    fn conflict(
+        &self,
+        datagram: &Datagram,
+        info: &FragmentInfo,
+        end: usize,
+    ) -> Option<&'static str> {
+        if !info.more && self.end.is_some_and(|total| end != total) {
+            return Some("conflicting_fragment_terminal_length");
         }
-        let skip = joined.len().saturating_sub(part.start);
-        if skip < part.bytes.len() {
-            joined.append(&part.bytes.slice(skip..part.bytes.len())?, 65_535)?;
+        if let Some(total) = self.end.or((!info.more).then_some(end)) {
+            if end > total
+                || (info.more && end == total)
+                || self
+                    .parts
+                    .iter()
+                    .any(|p| p.end > total || (p.more && p.end == total))
+            {
+                return Some("fragment_outside_terminal_length");
+            }
         }
+        for part in &self.parts {
+            let start = info.offset.max(part.start);
+            let stop = end.min(part.end);
+            if start < stop {
+                if datagram.ipv6 {
+                    return Some("ipv6_overlapping_fragments");
+                }
+                if datagram.payload.data()[start - info.offset..stop - info.offset]
+                    != part.data(&self.prefix.payload)[start - part.start..stop - part.start]
+                {
+                    return Some("conflicting_fragment_bytes");
+                }
+            }
+        }
+        None
     }
-    Ok(joined)
+
+    fn extend_prefix(&mut self, index: usize) -> Result<()> {
+        let prefix = &mut self.prefix.payload;
+        for part in &mut self.parts[index..] {
+            if part.start > prefix.len() {
+                break;
+            }
+            if let Some(bytes) = part.pending.take() {
+                append_contiguous(prefix, part.start, bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A rejected arrival may close the gap inside a transport header. Inspect
+    /// the available prefix once without retaining the arrival or delivering it.
+    fn inspect_refused(
+        &self,
+        mut arrival: Datagram,
+        info: &FragmentInfo,
+        end: usize,
+        packets: &[PacketId],
+        inspect: &mut PrefixObserver<'_>,
+    ) -> Result<()> {
+        let contiguous = self.prefix.payload.len();
+        let extends = info.offset <= contiguous && end > contiguous;
+        if self.poisoned || (!extends && info.more) || self.conflict(&arrival, info, end).is_some()
+        {
+            return Ok(());
+        }
+        let mut prefix = self.prefix.clone();
+        update_metadata(&mut prefix, &arrival, info);
+        if extends {
+            append_contiguous(
+                &mut prefix.payload,
+                info.offset,
+                std::mem::take(&mut arrival.payload),
+            )?;
+        }
+        for part in &self.parts {
+            if part.start > prefix.payload.len() {
+                break;
+            }
+            if part.end > prefix.payload.len() {
+                if let Some(bytes) = &part.pending {
+                    let suffix = bytes.slice(prefix.payload.len() - part.start..bytes.len())?;
+                    prefix.payload.append(&suffix, 65_535)?;
+                }
+            }
+        }
+        if prefix.payload.is_empty() {
+            return Ok(());
+        }
+        set_prefix_extent(&mut prefix, self.end.or((!info.more).then_some(end)));
+        inspect(&prefix, packets);
+        Ok(())
+    }
+}
+
+fn append_contiguous(prefix: &mut EvidenceBytes, start: usize, bytes: EvidenceBytes) -> Result<()> {
+    if prefix.is_empty() {
+        *prefix = bytes;
+    } else if start == prefix.len() {
+        prefix.append(&bytes, 65_535)?;
+    } else if start + bytes.len() > prefix.len() {
+        prefix.append(&bytes.slice(prefix.len() - start..bytes.len())?, 65_535)?;
+    }
+    Ok(())
+}
+
+fn update_metadata(prefix: &mut Datagram, arrival: &Datagram, info: &FragmentInfo) {
+    if info.offset == 0 {
+        // RFC 8200 §4.5 gives the offset-zero fragment authority over Next Header.
+        prefix.fragment = Some(info.clone());
+        prefix.protocol = arrival.protocol;
+        prefix.network_header_len = arrival.network_header_len;
+    }
+    if arrival.ip_checksum == Checksum::Invalid {
+        prefix.ip_checksum = Checksum::Invalid;
+    }
+    if arrival.checksum_context == ChecksumContext::Unsupported {
+        prefix.checksum_context = ChecksumContext::Unsupported;
+    }
+}
+
+fn set_prefix_extent(prefix: &mut Datagram, end: Option<usize>) {
+    if let Some(total) = end {
+        prefix.fragment = None;
+        prefix.declared_payload_len = total;
+    } else {
+        // At least one byte follows the contiguous part of an unfinished datagram.
+        prefix.declared_payload_len = prefix.payload.len() + 1;
+    }
 }

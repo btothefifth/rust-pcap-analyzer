@@ -343,21 +343,26 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             .fragment
             .as_ref()
             .and_then(|_| loss_header(&network));
-        let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
-            if let Some(candidate) = loss_header(prefix) {
-                header.get_or_insert(candidate);
-            } else {
-                header = None;
-                if let Some(observation) = wire::tcp_header_observation(prefix) {
-                    tracker.resolve_reassembly(
-                        prefix.scope.clone(),
-                        observation.header,
-                        contributors,
-                    );
+        let mut inspect =
+            |prefix: &wire::Datagram, contributors: &[PacketId]| match wire::inspect_tcp_header(
+                prefix,
+            ) {
+                Ok(Some(observation)) => {
+                    if let Some(candidate) = observation.possible_loss(config.checksum_policy) {
+                        header.get_or_insert((prefix.scope.clone(), observation.packet, candidate));
+                    } else {
+                        header = None;
+                        tracker.resolve_reassembly(
+                            prefix.scope.clone(),
+                            observation.header,
+                            contributors,
+                        );
+                    }
+                    true
                 }
-            }
-            header.is_some()
-        };
+                Ok(None) => true,
+                Err(error) => error.code != crate::ErrorCode::Truncated,
+            };
         let outcome =
             fragments.push_observing_prefix(network, metadata.frame, &[], Some(&mut inspect))?;
         if !matches!(outcome, FragmentOutcome::Complete(..)) {

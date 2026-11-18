@@ -17,10 +17,22 @@ pub enum Decoded {
     },
 }
 fn need(b: &[u8], n: usize, field: &'static str) -> Result<()> {
-    if b.len() < n {
-        Err(malformed(field, "truncated header or payload"))
+    need_extent(b, n, field, false)
+}
+
+fn need_extent(b: &[u8], n: usize, field: &'static str, partial: bool) -> Result<()> {
+    if b.len() >= n {
+        return Ok(());
+    }
+    if partial {
+        Err(Error::new(
+            pcap_evidence::ErrorCode::Truncated,
+            0,
+            field,
+            "truncated header or payload",
+        ))
     } else {
-        Ok(())
+        Err(malformed(field, "truncated header or payload"))
     }
 }
 fn u16be(b: &[u8], p: usize) -> u16 {
@@ -47,15 +59,15 @@ fn decode_extent(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) ->
     let mut scoped = scope.clone();
     let layout = match link {
         1 => {
-            need(b, 14, "ethernet")?;
+            need_extent(b, 14, "ethernet", partial)?;
             Some((14, u16be(b, 12)))
         }
         113 => {
-            need(b, 16, "sll")?;
+            need_extent(b, 16, "sll", partial)?;
             Some((16, u16be(b, 14)))
         }
         276 => {
-            need(b, 20, "sll2")?;
+            need_extent(b, 20, "sll2", partial)?;
             scoped.link_interface = Some(u32be(b, 4));
             Some((20, u16be(b, 0)))
         }
@@ -66,7 +78,7 @@ fn decode_extent(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) ->
             if scoped.vlans.len() >= 8 {
                 return Err(Error::limit("vlan_depth"));
             }
-            need(b, p + 4, "vlan")?;
+            need_extent(b, p + 4, "vlan", partial)?;
             scoped.vlans.push(u16be(b, p) & 0x0fff);
             ty = u16be(b, p + 2);
             p += 4;
@@ -84,6 +96,9 @@ fn decode_extent(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) ->
     ))
 }
 fn decode_ip(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Datagram> {
+    if partial {
+        need_extent(raw.data(), 1, "network", true)?;
+    }
     let id = raw
         .spans()
         .first()
@@ -142,7 +157,7 @@ fn mpls(raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
         if labels.len() >= 16 {
             return Err(Error::limit("mpls_depth"));
         }
-        need(b, p + 4, "mpls")?;
+        need_extent(b, p + 4, "mpls", partial)?;
         let word = u32be(b, p);
         p += 4;
         labels.push(word >> 12);
@@ -150,7 +165,7 @@ fn mpls(raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
             break;
         }
     }
-    need(b, p + 1, "mpls_payload")?;
+    need_extent(b, p + 1, "mpls_payload", partial)?;
     let link = match b[p] >> 4 {
         4 => 228,
         6 => 229,
@@ -387,7 +402,7 @@ fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, St
     };
     let b = d.payload.data();
     let (ty, start, label) = if d.protocol == 47 {
-        need(b, 4, "gre")?;
+        need_extent(b, 4, "gre", partial)?;
         let f = u16be(b, 0);
         let ty = u16be(b, 2);
         if f & !0xb000 != 0 {
@@ -399,7 +414,7 @@ fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, St
         let mut p = 4;
         let mut key = None;
         if f & 0x8000 != 0 {
-            need(b, p + 4, "gre_checksum")?;
+            need_extent(b, p + 4, "gre_checksum", partial)?;
             if u16be(b, p + 2) != 0 {
                 return Err(malformed("gre_checksum", "nonzero reserved field"));
             }
@@ -414,17 +429,17 @@ fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, St
             p += 4;
         }
         if f & 0x2000 != 0 {
-            need(b, p + 4, "gre_key")?;
+            need_extent(b, p + 4, "gre_key", partial)?;
             key = Some(u32be(b, p));
             p += 4;
         }
         if f & 0x1000 != 0 {
-            need(b, p + 4, "gre_sequence")?;
+            need_extent(b, p + 4, "gre_sequence", partial)?;
             p += 4;
         }
         (ty, p, format!("gre:{key:?}"))
     } else if d.protocol == 17 {
-        need(b, 8, "udp_tunnel")?;
+        need_extent(b, 8, "udp_tunnel", partial)?;
         let src = u16be(b, 0);
         let dst = u16be(b, 2);
         let n = usize::from(u16be(b, 4));
@@ -442,7 +457,7 @@ fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, St
         let udp_end = (!matches!(extent, TunnelExtent::Resolve)).then_some(n);
         let n = n.min(b.len());
         let t = &b[8..n];
-        need(t, 8, "udp_tunnel_header")?;
+        need_extent(t, 8, "udp_tunnel_header", partial)?;
         let vni = (u32::from(t[4]) << 16) | (u32::from(t[5]) << 8) | u32::from(t[6]);
         if vx {
             if t[0] != 8 || t[1..4] != [0, 0, 0] || t[7] != 0 {
@@ -458,17 +473,17 @@ fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, St
             return Err(malformed("geneve", "unsupported version/reserved bits"));
         }
         let options = usize::from(t[0] & 0x3f) * 4;
-        need(t, 8 + options, "geneve_options")?;
+        need_extent(t, 8 + options, "geneve_options", partial)?;
         let mut p = 8;
         let mut critical = false;
         while p < 8 + options {
-            need(&t[..8 + options], p + 4, "geneve_option")?;
+            need_extent(&t[..8 + options], p + 4, "geneve_option", partial)?;
             if t[p + 3] & 0xe0 != 0 {
                 return Err(malformed("geneve_option", "reserved option bits"));
             }
             critical |= t[p + 2] & 0x80 != 0;
             let size = 4 + usize::from(t[p + 3] & 31) * 4;
-            need(&t[..8 + options], p + size, "geneve_option")?;
+            need_extent(&t[..8 + options], p + size, "geneve_option", partial)?;
             p += size;
         }
         if critical || t[1] & 0x40 != 0 {
@@ -638,52 +653,77 @@ pub(crate) enum HeaderUse {
     Resolve,
 }
 
-pub(crate) fn tcp_prefix_path(
-    first: &Datagram,
-    mut path: Vec<String>,
-    max_depth: usize,
-    purpose: HeaderUse,
-) -> Option<(
+pub(crate) type TcpPath = (
     Scope,
     Vec<String>,
     wire::TcpHeader,
     pcap_evidence::provenance::PacketId,
-)> {
+);
+
+pub(crate) fn tcp_prefix_path(
+    first: &Datagram,
+    path: Vec<String>,
+    max_depth: usize,
+    purpose: HeaderUse,
+) -> Option<TcpPath> {
+    inspect_tcp_path(first, path, max_depth, purpose)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn inspect_tcp_path(
+    first: &Datagram,
+    mut path: Vec<String>,
+    max_depth: usize,
+    purpose: HeaderUse,
+) -> Result<Option<TcpPath>> {
     let mut next;
     let mut datagram = first;
     for depth in 0..=max_depth {
         if matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
             && datagram.ip_checksum == wire::Checksum::Invalid
         {
-            return None;
+            return Ok(None);
         }
-        if let Some(observation) = wire::tcp_header_observation(datagram) {
+        if let Some(observation) = wire::inspect_tcp_header(datagram)? {
             let header = match purpose {
-                HeaderUse::Loss(policy) => observation.possible_loss(policy)?,
-                HeaderUse::Resolve => observation.header,
+                HeaderUse::Loss(policy) => observation.possible_loss(policy),
+                HeaderUse::Resolve => Some(observation.header),
             };
-            return Some((datagram.scope.clone(), path, header, observation.packet));
+            return Ok(header.map(|h| (datagram.scope.clone(), path, h, observation.packet)));
         }
         if datagram.fragment.as_ref().is_some_and(|f| f.offset != 0) {
-            return None;
+            return Ok(None);
         }
         // The captured start of an outer fragment can identify a tunnel.
         // This is a header walk only; no fragment bytes enter reassembly.
         if depth == max_depth {
-            return None;
+            return Ok(None);
         }
-        let mut outer = datagram.clone();
-        outer.fragment = None;
-        let outer = normalize(outer).ok()?;
+        if !(matches!(datagram.protocol, 17 | 47)
+            || datagram.ipv6 && matches!(datagram.protocol, 0 | 43 | 51 | 60))
+        {
+            return Ok(None);
+        }
+        let normalized;
+        let outer = if matches!(datagram.protocol, 17 | 47) {
+            datagram
+        } else {
+            let mut extensions = datagram.clone();
+            extensions.fragment = None;
+            normalized = normalize(extensions)?;
+            &normalized
+        };
         if outer.protocol == 17
             && matches!(purpose, HeaderUse::Loss(wire::ChecksumPolicy::RequireValid))
         {
-            let header = outer.payload.data().get(..8)?;
+            let header = outer.payload.data();
+            need_extent(header, 8, "udp_tunnel", true)?;
             if matches!(
-                wire::udp_header_checksum(&outer, outer.checksum_context, u16be(header, 6)),
+                wire::udp_header_checksum(outer, outer.checksum_context, u16be(header, 6)),
                 Some(wire::Checksum::Invalid | wire::Checksum::NotChecked)
             ) {
-                return None;
+                return Ok(None);
             }
         }
         let extent = match purpose {
@@ -692,14 +732,83 @@ pub(crate) fn tcp_prefix_path(
             },
             HeaderUse::Resolve => TunnelExtent::Resolve,
         };
-        let (inner, hop) = peel_extent(&outer, extent).ok()??;
+        let Some((inner, hop)) = peel_extent(outer, extent)? else {
+            return Ok(None);
+        };
         let Decoded::Ip(inner, context) = inner else {
-            return None;
+            return Ok(None);
         };
         path.push(hop);
         path.extend(context);
         next = inner;
         datagram = &next;
     }
-    None
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcap_evidence::{
+        fragment::{FragmentOutcome, FragmentReassembler},
+        provenance::PacketId,
+        wire::{Checksum, ChecksumContext, FragmentInfo},
+        Limits,
+    };
+
+    #[test]
+    fn ordinary_udp_prefix_is_classified_once() {
+        for fragments in [16, 32, 64] {
+            let mut ip = FragmentReassembler::new(Limits::default());
+            let mut inspected = Vec::new();
+            let mut inspect = |prefix: &Datagram, _: &[PacketId]| {
+                assert!(inspect_tcp_path(prefix, vec![], 4, HeaderUse::Resolve)
+                    .unwrap()
+                    .is_none());
+                inspected.push(prefix.payload.len());
+                true
+            };
+            for i in 0..fragments {
+                let mut bytes = [0; 64];
+                if i == 0 {
+                    bytes[2..4].copy_from_slice(&53u16.to_be_bytes());
+                    bytes[4..6].copy_from_slice(&4096u16.to_be_bytes());
+                }
+                let frame = i as u64 + 1;
+                let id = PacketId {
+                    capture: [0; 32],
+                    frame,
+                    record_offset: frame * 100,
+                };
+                let datagram = Datagram {
+                    scope: Scope {
+                        section: 0,
+                        interface: 0,
+                        link_interface: None,
+                        vlans: vec![],
+                    },
+                    source: [192, 0, 2, 1].into(),
+                    destination: [192, 0, 2, 2].into(),
+                    protocol: 17,
+                    ipv6: false,
+                    network_header_len: 20,
+                    declared_payload_len: bytes.len(),
+                    fragment: Some(FragmentInfo {
+                        id: 5,
+                        offset: i * 64,
+                        more: true,
+                    }),
+                    payload: EvidenceBytes::from_packet(&bytes, id, 34),
+                    ip_checksum: Checksum::Valid,
+                    checksum_context: ChecksumContext::BaseAddresses,
+                };
+                assert!(matches!(
+                    ip.push_observing_prefix(datagram, frame, &[], Some(&mut inspect))
+                        .unwrap(),
+                    FragmentOutcome::Pending
+                ));
+            }
+            assert_eq!(inspected, [64]);
+        }
+    }
 }
