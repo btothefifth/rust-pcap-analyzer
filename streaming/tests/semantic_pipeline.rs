@@ -2207,6 +2207,41 @@ mod provisional_transport {
     }
 
     #[test]
+    fn omitted_syn_ack_uses_the_close_at_its_arrival() {
+        // The observed ACK seeds a provisional origin at 600. Only the
+        // acknowledged client SYN links the omitted server handshake to this flow.
+        let exchange = [
+            tcp(false, 100, 0, 2, &[]),
+            tcp(true, 600, 101, 0x10, &[]),
+            tcp(false, 101, 501, 0x18, REQUEST),
+            tcp(true, 501, 113, 0x18, RESPONSE),
+        ];
+        let omitted = ipv4_fragment(&tcp(true, 469, 101, 0x12, RESPONSE), 0..24, true);
+        let fins = vec![
+            tcp(false, 113, 512, 0x11, &[]),
+            tcp(true, 512, 114, 0x11, &[]),
+        ];
+        let reset = vec![tcp(true, 512, 113, 0x14, &[])];
+        for close in [fins, reset] {
+            for position in 0..=close.len() {
+                let mut frames = exchange.to_vec();
+                frames.extend_from_slice(&close);
+                frames.insert(exchange.len() + position, omitted.clone());
+                let mut c = config();
+                c.base.limits.max_stream_span = 128;
+                c.window_payload = 128;
+                let after_close = position == close.len();
+                let root = assert_pair(&capture(&frames), c, after_close);
+                let frame = (exchange.len() + position + 1) as u64;
+                assert_eq!(
+                    root.flows()[0].uncertain_payload.map(|p| p.frame),
+                    (!after_close).then_some(frame)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_delayed_syn_ack_can_disprove_a_provisional_close() {
         for (server_fin, acknowledgement, count) in [(480, 101, 1), (512, 101, 2), (480, 99, 2)] {
             let frames = [

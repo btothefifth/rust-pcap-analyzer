@@ -218,8 +218,10 @@ It can overturn a tentative two-FIN close if all FINs for the unanchored
 direction fall outside the new sequence interval. The tracker indexes those FIN
 positions until that direction gains a SYN. A captured SYN-ACK header with
 omitted data can establish the same possible ownership, so its missing bytes
-withhold the mapping without changing the observed handshake. Omitted opening
-SYN retransmissions are matched against the corrected close position at their arrival. A genuine earlier close excludes them.
+withhold the mapping without changing the observed handshake. The tracker
+evaluates omitted handshakes against the corrected close position at their
+arrival. A later FIN or reset cannot erase an earlier loss witness. A genuine
+earlier close excludes an omitted opening SYN retransmission.
 Window and active payload limits count the bytes the tracker
 retains after that correction. The tracker reserves loss observations for
 displaced payload before changing the flow. If the attribution exceeds its

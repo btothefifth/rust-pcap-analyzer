@@ -479,15 +479,23 @@ impl Flow {
 
     /// A SYN-ACK that identifies the peer SYN can establish the missing sequence
     /// origin. A reset or a FIN consistent with that origin still closes the flow.
-    fn completes_handshake(&self, direction: usize, isn: u32, ack: u32, max_span: i64) -> bool {
-        if self.rst_seen
-            || self.syn[direction].is_some()
-            || self.acknowledges_syn(1 - direction, ack) != Some(true)
+    fn completes_handshake(
+        &self,
+        direction: usize,
+        isn: u32,
+        ack: u32,
+        ordinal: usize,
+        max_span: i64,
+    ) -> bool {
+        if self.syn[direction].is_some() || self.acknowledges_syn(1 - direction, ack) != Some(true)
         {
             return false;
         }
-        if self.closed_at.is_none() {
+        if self.open_at(ordinal) {
             return true;
+        }
+        if self.rst_seen {
+            return false;
         }
         // The first FIN at or after the proposed origin in sequence space
         // decides whether any FIN survives, including across u32 wraparound.
@@ -636,11 +644,9 @@ impl UnretainedHeader {
         if packet.capture != self.packet.capture || !self.handshake_allows(flow) {
             return None;
         }
-        if self
-            .syn_isn
-            .zip(self.ack)
-            .is_some_and(|(isn, ack)| flow.completes_handshake(self.direction, isn, ack, max_span))
-        {
+        if self.syn_isn.zip(self.ack).is_some_and(|(isn, ack)| {
+            flow.completes_handshake(self.direction, isn, ack, self.arrival.ordinal, max_span)
+        }) {
             // The observed header could invalidate the provisional close just
             // as a retained SYN-ACK would. Its missing bytes remain uncertain.
             return Some(HeaderCandidate::Open);
@@ -1036,6 +1042,7 @@ impl TcpTracker {
                     direction,
                     segment.sequence,
                     segment.acknowledgement,
+                    self.next_input,
                     self.limits.max_stream_span as i64,
                 )
             {
