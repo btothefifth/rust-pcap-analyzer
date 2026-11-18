@@ -752,3 +752,92 @@ fn completion_output_limit_flushes_accepted_events_to_the_underlying_writer() {
         assert_eq!(writer.get_ref().as_slice(), expected);
     }
 }
+
+#[test]
+fn torn_event_stops_writes_and_flushes_the_accepted_prefix() {
+    use std::io::{self, Write};
+
+    struct FailOnce {
+        at: usize,
+        bytes: Vec<u8>,
+        failed: bool,
+        writes_after_error: usize,
+        flushes: usize,
+    }
+    impl Write for FailOnce {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.failed {
+                self.writes_after_error += 1;
+                return self.bytes.write(bytes);
+            }
+            let remaining = self.at - self.bytes.len();
+            if remaining == 0 {
+                self.failed = true;
+                return Err(io::Error::other("injected write failure"));
+            }
+            self.bytes.write(&bytes[..bytes.len().min(remaining)])
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    let (_temp, mut history, generation) = history_with_gap(Config::default());
+    let mut request = Request {
+        generation,
+        direction: 0,
+        start: 0,
+        end: 14,
+        page_bytes: 14,
+        max_output_bytes: 65536,
+        protocol: "modbus".into(),
+        ua_security_none: false,
+    };
+    for (range_end, cancelled) in [(14, false), (2, false), (14, true)] {
+        request.end = range_end;
+        request.max_output_bytes = 65536;
+        let cancel = AtomicBool::new(cancelled);
+        let mut reference = Vec::new();
+        let outcome = analyze(
+            &mut history,
+            &request,
+            Limits::default(),
+            &mut reference,
+            &cancel,
+        );
+        if cancelled {
+            assert_eq!(outcome.unwrap_err().field, "history_app_cancelled");
+        } else {
+            outcome.unwrap();
+        }
+        let mut end = 0;
+        for line in reference.split_inclusive(|&b| b == b'\n') {
+            end += line.len();
+            request.max_output_bytes = end as u64;
+            // The full event fits the cap, but the sink fails partway through its digest.
+            let mut sink = FailOnce {
+                at: end - 32,
+                bytes: Vec::new(),
+                failed: false,
+                writes_after_error: 0,
+                flushes: 0,
+            };
+            let err = analyze(
+                &mut history,
+                &request,
+                Limits::default(),
+                &mut sink,
+                &cancel,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, pcap_evidence::ErrorCode::Io);
+            assert_eq!(err.detail, "injected write failure");
+            assert_eq!(sink.writes_after_error, 0);
+            assert_eq!(sink.bytes.as_slice(), &reference[..end - 32]);
+            assert!(sink.bytes.len() as u64 <= request.max_output_bytes);
+            assert_eq!(sink.flushes, 1);
+        }
+    }
+}

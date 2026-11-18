@@ -76,7 +76,13 @@ pub fn analyze<W: Write>(
     let mut seq = 0u64;
     let mut written = 0u64;
     let mut chain = [0u8; 32];
+    let mut write_error: Option<Error> = None;
     let mut emit = |kind: &'static str, data: Json| -> Result<()> {
+        // After a short write followed by an error the sink can end mid-record.
+        // Even an abort marker would corrupt that line.
+        if let Some(error) = &write_error {
+            return Err(error.clone());
+        }
         let next_seq = seq
             .checked_add(1)
             .ok_or_else(|| Error::limit("history_app_sequence"))?;
@@ -105,13 +111,17 @@ pub fn analyze<W: Write>(
             .checked_add(line.len() as u64)
             .filter(|n| *n <= request.max_output_bytes)
             .ok_or_else(|| Error::limit("history_app_output"))?;
-        output.write_all(line.as_bytes())?;
+        if let Err(e) = output.write_all(line.as_bytes()) {
+            let error = Error::io(e);
+            write_error = Some(error.clone());
+            return Err(error);
+        }
         seq = next_seq;
         written = next_written;
         chain = next;
         Ok(())
     };
-    emit(
+    if let Err(error) = emit(
         "analysis.start",
         Json::object([
             ("source_range_start", request.start.to_string().into()),
@@ -121,7 +131,12 @@ pub fn analyze<W: Write>(
             ("semantic_replay_verified", false.into()),
             ("page_boundaries_reset_protocol", false.into()),
         ]),
-    )?;
+    ) {
+        if write_error.is_some() {
+            output.flush()?;
+        }
+        return Err(error);
+    }
     let check_cancelled = || {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             Err(Error::limit("history_app_cancelled"))
@@ -247,5 +262,5 @@ pub fn analyze<W: Write>(
         }
     };
     output.flush()?;
-    terminal
+    write_error.map_or(terminal, Err)
 }

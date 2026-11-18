@@ -194,8 +194,11 @@ publication succeeds.
 
 Once the writer accepts `analysis.start`, the reader flushes the accepted event
 chain before returning. If the completion record exceeds the output cap, the
-caller receives the preceding events and a `history_app_output` error. A flush
-failure returns the I/O error.
+caller receives the preceding events and a `history_app_output` error. If a
+write fails, the reader stops appending records and attempts to flush, even if
+the first event was interrupted. The sink may contain a partial final line.
+Only preceding newline-terminated records belong to the accepted chain. A write
+or flush failure returns an I/O error.
 
 Library cancellation is cooperative. The reader checks the flag between pages,
 between pieces, and before publishing further results. If an event writer
