@@ -939,6 +939,40 @@ fn native_message_budget_admits_earliest_completed_exchange() {
 }
 
 #[test]
+fn ipv6_tunnel_loss_survives_fragment_set_refusal() {
+    // Frame 6 occupies a fragment slot. Frame 7 contains the start of a GRE
+    // tunnel after IPv6 destination options, including the inner TCP header.
+    let capture = include_bytes!("../../tests/fixtures/ipv6_gre_fragment.pcap");
+    for slots in [1, 2] {
+        let mut config = StreamConfig {
+            max_tunnel_contexts: 1,
+            ..StreamConfig::default()
+        };
+        config.base.limits.max_fragment_sets = slots;
+        config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+        let events = run(capture, config).events;
+        let refused = events
+            .iter()
+            .any(|e| e.data.encode().contains("(fragment_sets)"));
+        assert_eq!(refused, slots == 1);
+        let mappings: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == EventKind::Transaction)
+            .map(|e| e.data.encode())
+            .filter(|data| data.contains("read_mapping"))
+            .collect();
+        assert_eq!(mappings.len(), 1);
+        assert!(mappings[0].contains(r#""starting_address_zero_based":17"#));
+        let losses: Vec<_> = events
+            .iter()
+            .filter(|e| e.data.encode().contains("tcp_generation_payload_uncertain"))
+            .flat_map(|e| e.evidence.packets.iter().map(|packet| packet.frame))
+            .collect();
+        assert_eq!(losses, [7]);
+    }
+}
+
+#[test]
 fn gre_checksum_rejection_resolves_only_completed_fragment_sets() {
     use pcap_evidence::wire::internet_checksum;
     use tiny_capture::{capture, ipv4_fragment, tcp, tunneled};

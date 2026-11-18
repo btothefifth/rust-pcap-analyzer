@@ -191,7 +191,9 @@ complete declared extent. Adjacent fragments can jointly identify a TCP header
 before reassembly finishes. A gap before the identity fields leaves the header
 unknown. If the fragment limit interrupts assembly, streaming can still use
 the arriving fragment and retained contiguous bytes to identify which TCP
-generation lost evidence. If the whole checksum-covered extent is available on
+generation lost evidence. An IPv6 extension header after the fragment header
+can identify the inner protocol while the enclosing datagram is still incomplete.
+If the whole checksum-covered extent is available on
 a refused arrival, strict mode can resolve the loss witness from its checksum.
 For an incomplete UDP tunnel, strict mode rechecks the checksum when all declared
 UDP bytes become contiguous, even if the enclosing IP datagram still lacks bytes.

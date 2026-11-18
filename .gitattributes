@@ -2,6 +2,7 @@
 *.bin -text -diff
 *.pcap -text -diff
 *.pcapng -text -diff
+history/fixtures/**/*.idx -text -diff
 
 # Rust source and test files must remain LF-only so the structural preflight is
 # deterministic on Windows as well as on POSIX hosts.

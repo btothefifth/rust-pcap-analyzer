@@ -415,15 +415,11 @@ fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, St
         let mut key = None;
         if f & 0x8000 != 0 {
             need_extent(b, p + 4, "gre_checksum", partial)?;
-            if u16be(b, p + 2) != 0 {
-                return Err(malformed("gre_checksum", "nonzero reserved field"));
-            }
-            if !partial && wire::internet_checksum(b) != 0 {
-                return Err(Error::new(
-                    pcap_evidence::ErrorCode::Checksum,
-                    0,
+            if u16be(b, p + 2) != 0 || (!partial && wire::internet_checksum(b) != 0) {
+                // The v1 history journal includes this diagnostic in its seal.
+                return Err(malformed(
                     "gre_checksum",
-                    "invalid GRE checksum",
+                    "invalid checksum or reserved field",
                 ));
             }
             p += 4;
@@ -779,6 +775,20 @@ pub(crate) fn inspect_scheduled_tcp_path(
         {
             return Ok(None);
         }
+        // Normalization strips the fragment marker to walk extension headers.
+        // Only the original datagram can establish the enclosing payload extent.
+        let extent = match purpose {
+            HeaderUse::Loss(_)
+                if datagram.fragment.is_none()
+                    && datagram.declared_payload_len == datagram.payload.len() =>
+            {
+                TunnelExtent::Complete
+            }
+            HeaderUse::Loss(_) => TunnelExtent::Prefix {
+                ip_length_known: datagram.fragment.is_none(),
+            },
+            HeaderUse::Resolve => TunnelExtent::Resolve,
+        };
         let normalized;
         let outer = if matches!(datagram.protocol, 17 | 47) {
             datagram
@@ -813,18 +823,6 @@ pub(crate) fn inspect_scheduled_tcp_path(
                     .saturating_sub(outer.payload.len()),
             );
         }
-        let extent = match purpose {
-            HeaderUse::Loss(_)
-                if outer.fragment.is_none()
-                    && outer.declared_payload_len == outer.payload.len() =>
-            {
-                TunnelExtent::Complete
-            }
-            HeaderUse::Loss(_) => TunnelExtent::Prefix {
-                ip_length_known: datagram.fragment.is_none(),
-            },
-            HeaderUse::Resolve => TunnelExtent::Resolve,
-        };
         let Some((inner, hop)) = peel_extent(outer, extent)? else {
             return Ok(None);
         };

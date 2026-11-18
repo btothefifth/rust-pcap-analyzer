@@ -174,6 +174,38 @@ fn reverse_tunnel_directions_share_generation_and_distinct_tunnels_do_not() {
 }
 
 #[test]
+fn gre_rejection_notices_replay_from_the_v1_seal() {
+    // Written by pcap-history at 03a86f8 from a bad checksum, a nonzero GRE
+    // reserved field with a valid checksum, and an ordinary TCP data segment.
+    let old = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/gre-checksum-v1");
+    let source = old.join("source.pcap");
+    let temp = Temp::new();
+    let cancel = Cancellation::default();
+    let verified = verify_file(&source, &old, &temp.0.join("verified"), &cancel).unwrap();
+    assert_eq!((verified.notices, verified.tcp_records), (2, 1));
+
+    let prefix = temp.0.join("prefix");
+    fs::create_dir(&prefix).unwrap();
+    let journal_path = old.join("journal.bin");
+    let sealed = fs::read(&journal_path).unwrap();
+    let mut reader = Reader::open(&journal_path).unwrap();
+    loop {
+        let record = reader.next_record().unwrap().expect("missing v1 seal");
+        if record.kind == journal::SEAL {
+            fs::write(
+                prefix.join("journal.bin"),
+                &sealed[..record.offset as usize],
+            )
+            .unwrap();
+            break;
+        }
+    }
+    let recovered = temp.0.join("recovered");
+    recover_file(&source, &prefix, &recovered, false, &cancel).unwrap();
+    assert_eq!(fs::read(recovered.join("journal.bin")).unwrap(), sealed);
+}
+
+#[test]
 fn recovery_requires_eof_after_seal_even_when_torn_tail_is_authorized() {
     for allow_torn in [false, true] {
         let temp = Temp::new();
