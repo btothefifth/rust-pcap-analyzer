@@ -351,6 +351,7 @@ impl State<'_> {
         path: &[String],
         frame: u64,
         ancestors: &[PacketId],
+        inspect: &mut pcap_evidence::fragment::PrefixObserver<'_>,
     ) -> Result<Option<(wire::Datagram, Vec<PacketId>)>> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
@@ -388,7 +389,8 @@ impl State<'_> {
                 .get_mut(path)
                 .ok_or_else(|| Error::limit("fragment_context"))?;
             slot.last_frame = frame;
-            slot.reassembler.push_with_contributors(d, frame, ancestors)
+            slot.reassembler
+                .push_observing_prefix(d, frame, ancestors, Some(inspect))
         };
         match result {
             Ok(FragmentOutcome::Pending) => Ok(None),
@@ -576,18 +578,38 @@ impl State<'_> {
             }
         }
         let fragmented = d.fragment.is_some();
-        let header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
-            network::tcp_prefix_path(
-                &d,
-                path.clone(),
-                self.c.max_tunnel_depth.saturating_sub(depth),
-                network::HeaderUse::Loss(self.c.base.checksum_policy),
-            )
-        });
-        let Some((datagram, mut contributors)) = self.reassemble(d, &path, frame, ancestors)?
+        let max_depth = self.c.max_tunnel_depth.saturating_sub(depth);
+        let purpose = network::HeaderUse::Loss(self.c.base.checksum_policy);
+        let loss_header =
+            |d: &wire::Datagram| network::tcp_prefix_path(d, path.clone(), max_depth, purpose);
+        let mut header = d
+            .fragment
+            .as_ref()
+            .filter(|f| f.offset == 0)
+            .and_then(|_| loss_header(&d));
+        let mut resolved = None;
+        let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
+            if let Some(candidate) = loss_header(prefix) {
+                header.get_or_insert(candidate);
+            } else {
+                header = None;
+                if let Some((scope, path, segment, _)) = network::tcp_prefix_path(
+                    prefix,
+                    path.clone(),
+                    max_depth,
+                    network::HeaderUse::Resolve,
+                ) {
+                    resolved = Some((scope, path, segment, contributors.to_vec()));
+                }
+            }
+            header.is_some()
+        };
+        let Some((datagram, mut contributors)) =
+            self.reassemble(d, &path, frame, ancestors, &mut inspect)?
         else {
-            // The offset-zero fragment can arrive last. Only publish a loss
-            // observation if this record did not deliver a complete datagram.
+            if let Some((scope, path, segment, packets)) = resolved {
+                self.resolve_header(scope, path, segment, &packets);
+            }
             if let Some(header) = header {
                 self.observe_tcp_header(
                     header,
@@ -638,9 +660,7 @@ impl State<'_> {
                     EvidenceStatus::Unsupported,
                 )?,
                 Err(e) => {
-                    if wire::is_checksum_rejection(&e) {
-                        self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
-                    }
+                    self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
                     self.diagnostic(e.to_string(), contributors, EvidenceStatus::Rejected)?;
                     return Ok(());
                 }
@@ -683,9 +703,7 @@ impl State<'_> {
                 );
             }
             Err(e) => {
-                if wire::is_checksum_rejection(&e) {
-                    self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
-                }
+                self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
                 self.diagnostic(
                     format!("tunnel_candidate_rejected:{e}"),
                     contributors.clone(),
@@ -757,9 +775,7 @@ impl State<'_> {
         let transport = match wire::decode_transport(&datagram, self.c.base.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
-                if wire::is_checksum_rejection(&e) {
-                    self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
-                }
+                self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
                 self.diagnostic(e.to_string(), contributors, EvidenceStatus::Unsupported)?;
                 return Ok(());
             }
@@ -779,10 +795,19 @@ impl State<'_> {
             self.c.max_tunnel_depth.saturating_sub(depth),
             network::HeaderUse::Resolve,
         ) {
-            let (key, _) = Key::new(scope.clone(), path, 6, header.source, header.destination);
-            if let Some(tracker) = self.active.get_mut(&key).and_then(|a| a.tracker.as_mut()) {
-                tracker.resolve_reassembly(scope, header, packets);
-            }
+            self.resolve_header(scope, path, header, packets);
+        }
+    }
+    fn resolve_header(
+        &mut self,
+        scope: Scope,
+        path: Vec<String>,
+        header: wire::TcpHeader,
+        packets: &[PacketId],
+    ) {
+        let (key, _) = Key::new(scope.clone(), path, 6, header.source, header.destination);
+        if let Some(tracker) = self.active.get_mut(&key).and_then(|a| a.tracker.as_mut()) {
+            tracker.resolve_reassembly(scope, header, packets);
         }
     }
     fn observe_tcp_header(

@@ -748,13 +748,6 @@ fn require_supported_checksum(checksum: Checksum, policy: ChecksumPolicy) -> Res
     Ok(())
 }
 
-/// A complete datagram was rejected by the configured checksum policy.
-pub fn is_checksum_rejection(error: &Error) -> bool {
-    error.code == ErrorCode::Checksum
-        || (error.code == ErrorCode::UnsupportedNetwork
-            && error.field == "transport_checksum_operands")
-}
-
 pub fn internet_checksum(data: &[u8]) -> u16 {
     let mut checksum = crate::checksum::InternetChecksum::new();
     checksum.update(data);

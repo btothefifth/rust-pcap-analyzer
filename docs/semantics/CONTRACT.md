@@ -181,7 +181,11 @@ duplicate fragments in enclosing tunnels. Under strict checksum checking, a
 completed segment rejected for its checksum has the same disposition whether
 it arrived whole or in fragments. Partial IP payloads can supply a header
 witness, but normal transport decoding and fragment admission require the
-complete declared extent.
+complete declared extent. Adjacent fragments can jointly identify a TCP header
+before reassembly finishes. A gap before the identity fields leaves the header
+unknown. Tunnel loss attribution honors enclosing IP and UDP lengths. An
+earlier payload observation can belong to a later SYN-anchored generation only
+if its sequence falls at or after that direction's first payload sequence.
 
 Losing only the options of a header-only TCP segment preserves payload
 eligibility. Unassigned data and segments too large for a streaming window

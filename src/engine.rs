@@ -331,20 +331,47 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             };
             continue;
         }
-        if network.fragment.as_ref().is_some_and(|f| f.offset == 0) {
-            if let Some(header) = wire::tcp_header_observation(&network)
-                .and_then(|h| h.possible_loss(config.checksum_policy))
-            {
+        let loss_header = |d: &wire::Datagram| {
+            let observation = wire::tcp_header_observation(d)?;
+            Some((
+                d.scope.clone(),
+                observation.packet,
+                observation.possible_loss(config.checksum_policy)?,
+            ))
+        };
+        let mut header = network
+            .fragment
+            .as_ref()
+            .and_then(|_| loss_header(&network));
+        let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
+            if let Some(candidate) = loss_header(prefix) {
+                header.get_or_insert(candidate);
+            } else {
+                header = None;
+                if let Some(observation) = wire::tcp_header_observation(prefix) {
+                    tracker.resolve_reassembly(
+                        prefix.scope.clone(),
+                        observation.header,
+                        contributors,
+                    );
+                }
+            }
+            header.is_some()
+        };
+        let outcome =
+            fragments.push_observing_prefix(network, metadata.frame, &[], Some(&mut inspect))?;
+        if !matches!(outcome, FragmentOutcome::Complete(..)) {
+            if let Some((scope, packet, segment)) = header {
                 tracker.observe_header(
-                    network.scope.clone(),
-                    id,
+                    scope,
+                    packet,
                     time,
-                    header,
+                    segment,
                     HeaderDisposition::AwaitingReassembly,
                 )?;
             }
         }
-        let (datagram, mut contributors) = match fragments.push(network, metadata.frame)? {
+        let (datagram, mut contributors) = match outcome {
             FragmentOutcome::Pending => {
                 packets[at].disposition = Disposition::FragmentPending;
                 continue;
@@ -362,14 +389,12 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         let transport = match wire::decode_transport(&datagram, config.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
-                if wire::is_checksum_rejection(&e) {
-                    if let Some(observation) = wire::tcp_header_observation(&datagram) {
-                        tracker.resolve_reassembly(
-                            datagram.scope.clone(),
-                            observation.header,
-                            &contributors,
-                        );
-                    }
+                if let Some(observation) = wire::tcp_header_observation(&datagram) {
+                    tracker.resolve_reassembly(
+                        datagram.scope.clone(),
+                        observation.header,
+                        &contributors,
+                    );
                 }
                 each_packet(&mut packets, &contributors, |p| {
                     p.disposition = Disposition::Rejected {

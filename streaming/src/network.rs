@@ -350,9 +350,41 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
 /// and encrypted tunnels never authorize inner decoding.
 pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
     d.require_complete()?;
-    peel_extent(d, false)
+    peel_extent(d, TunnelExtent::Complete)
 }
-fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>> {
+#[derive(Clone, Copy)]
+enum TunnelExtent {
+    Complete,
+    Prefix { ip_length_known: bool },
+    // Recover the identity of an earlier observation after definitive rejection.
+    Resolve,
+}
+
+fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, String)>> {
+    let partial = !matches!(extent, TunnelExtent::Complete);
+    let ip_end = match extent {
+        TunnelExtent::Complete
+        | TunnelExtent::Prefix {
+            ip_length_known: true,
+        } => Some(d.declared_payload_len),
+        _ => None,
+    };
+    let decode_child = |ty, start, captured_end, declared_end: Option<usize>| {
+        let payload = d.payload.slice(start..captured_end)?;
+        let child = ethertype(ty, &payload, d.scope.clone(), partial)?;
+        if let (Decoded::Ip(inner, _), Some(end)) = (&child, declared_end) {
+            let missing = inner
+                .declared_payload_len
+                .saturating_sub(inner.payload.len());
+            if missing > end.saturating_sub(captured_end) {
+                return Err(malformed(
+                    "tunnel",
+                    "inner IP length exceeds enclosing payload",
+                ));
+            }
+        }
+        Ok(child)
+    };
     let b = d.payload.data();
     let (ty, start, label) = if d.protocol == 47 {
         need(b, 4, "gre")?;
@@ -396,7 +428,7 @@ fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>>
         let src = u16be(b, 0);
         let dst = u16be(b, 2);
         let n = usize::from(u16be(b, 4));
-        if n < 8 || (!partial && n > b.len()) {
+        if n < 8 || ip_end.is_some_and(|end| n > end) {
             return Err(malformed("udp_tunnel", "invalid UDP length"));
         }
         let vx = src == 4789 || dst == 4789;
@@ -407,6 +439,7 @@ fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>>
         if !vx && !ge {
             return Ok(None);
         }
+        let udp_end = (!matches!(extent, TunnelExtent::Resolve)).then_some(n);
         let n = n.min(b.len());
         let t = &b[8..n];
         need(t, 8, "udp_tunnel_header")?;
@@ -417,7 +450,7 @@ fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>>
             }
             // Honor UDP length rather than accidentally decoding trailing IP bytes.
             return Ok(Some((
-                ethertype(0x6558, &d.payload.slice(16..n)?, d.scope.clone(), partial)?,
+                decode_child(0x6558, 16, n, udp_end)?,
                 tunnel_key(d, &format!("vxlan:{vni}")),
             )));
         }
@@ -451,24 +484,14 @@ fn peel_extent(d: &Datagram, partial: bool) -> Result<Option<(Decoded, String)>>
             ));
         }
         return Ok(Some((
-            ethertype(
-                u16be(t, 2),
-                &d.payload.slice(16 + options..n)?,
-                d.scope.clone(),
-                partial,
-            )?,
+            decode_child(u16be(t, 2), 16 + options, n, udp_end)?,
             tunnel_key(d, &format!("geneve:{vni}")),
         )));
     } else {
         return Ok(None);
     };
     Ok(Some((
-        ethertype(
-            ty,
-            &d.payload.slice(start..d.payload.len())?,
-            d.scope.clone(),
-            partial,
-        )?,
+        decode_child(ty, start, d.payload.len(), ip_end)?,
         tunnel_key(d, &label),
     )))
 }
@@ -663,7 +686,13 @@ pub(crate) fn tcp_prefix_path(
                 return None;
             }
         }
-        let (inner, hop) = peel_extent(&outer, true).ok()??;
+        let extent = match purpose {
+            HeaderUse::Loss(_) => TunnelExtent::Prefix {
+                ip_length_known: datagram.fragment.is_none(),
+            },
+            HeaderUse::Resolve => TunnelExtent::Resolve,
+        };
+        let (inner, hop) = peel_extent(&outer, extent).ok()??;
         let Decoded::Ip(inner, context) = inner else {
             return None;
         };

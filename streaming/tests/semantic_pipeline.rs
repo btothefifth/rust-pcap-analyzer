@@ -529,6 +529,9 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
         ("first-fragment", 1),
         ("noninitial-fragment", 2),
         ("incomplete-reassembly", 1),
+        ("split-header", 1),
+        ("split-header-reversed", 1),
+        ("split-header-gap", 2),
         ("oversized", 1),
     ] {
         let mut frames = exchange(1000, 5000);
@@ -538,6 +541,19 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
         let mut tail = tcp(false, 1013, 5012, 0x18, &request);
         let mut snapped_length = None;
         match case {
+            "split-header" | "split-header-reversed" | "split-header-gap" => {
+                let first = tiny_capture::ipv4_fragment(&tail, 0..8, true);
+                let second_start = if case == "split-header-gap" { 16 } else { 8 };
+                let second =
+                    tiny_capture::ipv4_fragment(&tail, second_start..second_start + 8, true);
+                tail = if case == "split-header-reversed" {
+                    frames.push(second);
+                    first
+                } else {
+                    frames.push(first);
+                    second
+                };
+            }
             "incomplete-reassembly" => tail = tiny_capture::ipv4_fragment(&tail, 0..24, true),
             "future" => tail = tcp(false, start + 13, peer + 12, 0x18, &request),
             "oversized" => tail = tcp(false, 1013, 5012, 0x18, &request.repeat(3)),
@@ -1040,6 +1056,99 @@ fn snapped_vxlan_respects_the_outer_ipv6_udp_checksum_policy() {
                     .iter()
                     .any(|e| e.data.encode().contains("read_mapping")),
                 zero && policy == ChecksumPolicy::RequireValid
+            );
+        }
+    }
+}
+
+#[test]
+fn future_syn_bounds_an_earlier_omitted_payload_across_wraparound() {
+    use tiny_capture::{capture, tcp};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    for (sequence, paired) in [(u32::MAX, true), (0, false), (1, false)] {
+        let omitted = tcp(false, sequence, 501, 0x18, &req);
+        let mut raw = capture(&[
+            omitted[..54].to_vec(),
+            tcp(false, u32::MAX, 0, 2, &[]),
+            tcp(true, 500, 0, 0x12, &[]),
+            tcp(false, 0, 501, 0x18, &req),
+            tcp(true, 501, 12, 0x18, &rsp),
+        ]);
+        raw[36..40].copy_from_slice(&(omitted.len() as u32).to_le_bytes());
+        let mut config = StreamConfig::default();
+        config.base.modbus_ports = vec![2000];
+        let root = pcap_evidence::engine::analyze(&raw, config.base.clone()).unwrap();
+        assert_eq!(
+            pcap_evidence::report::analysis(&root, false)
+                .encode()
+                .contains("read_mapping"),
+            paired
+        );
+        assert_eq!(
+            run(&raw, config)
+                .events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping")),
+            paired
+        );
+    }
+}
+
+#[test]
+fn udp_tunnel_loss_respects_enclosing_lengths() {
+    use tiny_capture::{capture, ipv4_fragment, tcp, tunneled};
+    let req = [0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1];
+    let rsp = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0x12, 0x34];
+    let wrap = |reverse, frame: Vec<u8>| tunneled("vxlan", 7, reverse, &frame);
+    let pair = [
+        wrap(false, tcp(false, 100, 0, 2, &[])),
+        wrap(true, tcp(true, 500, 101, 0x12, &[])),
+        wrap(false, tcp(false, 101, 501, 0x18, &req)),
+        wrap(true, tcp(true, 501, 113, 0x18, &rsp)),
+    ];
+    let mut tail = wrap(false, tcp(false, 113, 512, 0x18, &req));
+    let ip_len = tail.len() - 34;
+    let mut config = StreamConfig::default();
+    config.base.modbus_ports = vec![2000];
+    for udp_len in [ip_len, ip_len + 1, ip_len - 1] {
+        tail[38..40].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        let first = ipv4_fragment(&tail, 0..72, true);
+        let last = ipv4_fragment(&tail, 72..ip_len, false);
+        let before_gap = ipv4_fragment(&tail, 0..64, true);
+        for (suffix, snapped, paired) in [
+            (vec![tail.clone()], false, udp_len != ip_len),
+            (
+                vec![tail[..tail.len() - 8].to_vec()],
+                true,
+                udp_len != ip_len,
+            ),
+            (vec![first.clone()], false, udp_len < ip_len),
+            (
+                vec![before_gap.clone(), last.clone()],
+                false,
+                udp_len != ip_len,
+            ),
+            (vec![last.clone(), before_gap], false, udp_len != ip_len),
+            (vec![first.clone(), last.clone()], false, udp_len != ip_len),
+            (vec![last, first], false, udp_len != ip_len),
+        ] {
+            let mut frames = pair.to_vec();
+            frames.extend(suffix);
+            let mut bytes = capture(&frames);
+            if snapped {
+                let at = capture(&pair).len();
+                bytes[at + 12..at + 16].copy_from_slice(&(tail.len() as u32).to_le_bytes());
+            }
+            let observed = run(&bytes, config.clone())
+                .events
+                .iter()
+                .any(|e| e.data.encode().contains("read_mapping"));
+            assert_eq!(
+                observed,
+                paired,
+                "UDP length {udp_len}, {} frames, snapped {snapped}",
+                frames.len()
             );
         }
     }

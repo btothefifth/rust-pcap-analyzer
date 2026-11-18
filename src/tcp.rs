@@ -904,7 +904,13 @@ impl TcpTracker {
                         .time
                         .zip(flow.first_ns)
                         .is_some_and(|(seen, start)| start.saturating_sub(seen) > self.idle_ns);
-                    if !expired && header.matches(flow, max_span) {
+                    // A later opening SYN bounds the payload sequence space even
+                    // when the earlier observation was close enough to this tuple.
+                    let after_syn = flow.syn[header.direction].is_none_or(|isn| {
+                        sequence_delta(header.sequence, isn.wrapping_add(1))
+                            .is_ok_and(|delta| delta >= 0)
+                    });
+                    if !expired && after_syn && header.matches(flow, max_span) {
                         flow.note_uncertain(header.packet);
                     }
                 }
