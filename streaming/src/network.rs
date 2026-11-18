@@ -17,10 +17,22 @@ pub enum Decoded {
     },
 }
 fn need(b: &[u8], n: usize, field: &'static str) -> Result<()> {
-    if b.len() < n {
-        Err(malformed(field, "truncated header or payload"))
+    need_extent(b, n, field, false)
+}
+
+fn need_extent(b: &[u8], n: usize, field: &'static str, partial: bool) -> Result<()> {
+    if b.len() >= n {
+        return Ok(());
+    }
+    if partial {
+        Err(Error::new(
+            pcap_evidence::ErrorCode::Truncated,
+            0,
+            field,
+            "truncated header or payload",
+        ))
     } else {
-        Ok(())
+        Err(malformed(field, "truncated header or payload"))
     }
 }
 fn u16be(b: &[u8], p: usize) -> u16 {
@@ -34,25 +46,28 @@ fn hex(b: &[u8]) -> String {
 }
 
 pub fn decode(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+    decode_extent(link, raw, scope, false)
+}
+fn decode_extent(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     if !raw.validate() {
         return Err(malformed("provenance", "invalid input spans"));
     }
     if link == 127 || link == 105 {
-        return wireless(link, raw, scope);
+        return wireless(link, raw, scope, partial);
     }
     let b = raw.data();
     let mut scoped = scope.clone();
     let layout = match link {
         1 => {
-            need(b, 14, "ethernet")?;
+            need_extent(b, 14, "ethernet", partial)?;
             Some((14, u16be(b, 12)))
         }
         113 => {
-            need(b, 16, "sll")?;
+            need_extent(b, 16, "sll", partial)?;
             Some((16, u16be(b, 14)))
         }
         276 => {
-            need(b, 20, "sll2")?;
+            need_extent(b, 20, "sll2", partial)?;
             scoped.link_interface = Some(u32be(b, 4));
             Some((20, u16be(b, 0)))
         }
@@ -63,7 +78,7 @@ pub fn decode(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
             if scoped.vlans.len() >= 8 {
                 return Err(Error::limit("vlan_depth"));
             }
-            need(b, p + 4, "vlan")?;
+            need_extent(b, p + 4, "vlan", partial)?;
             scoped.vlans.push(u16be(b, p) & 0x0fff);
             ty = u16be(b, p + 2);
             p += 4;
@@ -72,18 +87,24 @@ pub fn decode(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
             return arp(&b[p..]);
         }
         if ty == 0x8847 || ty == 0x8848 {
-            return mpls(&raw.slice(p..raw.len())?, scoped);
+            return mpls(&raw.slice(p..raw.len())?, scoped, partial);
         }
     }
-    Ok(Decoded::Ip(decode_ip(link, raw, scope)?, Vec::new()))
+    Ok(Decoded::Ip(
+        decode_ip(link, raw, scope, partial)?,
+        Vec::new(),
+    ))
 }
-fn decode_ip(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Datagram> {
+fn decode_ip(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Datagram> {
+    if partial {
+        need_extent(raw.data(), 1, "network", true)?;
+    }
     let id = raw
         .spans()
         .first()
         .ok_or_else(|| malformed("network", "empty network packet"))?
         .packet;
-    let mut d = wire::decode_packet(link, raw.data(), id, scope)?;
+    let mut d = wire::decode_packet_extent(link, raw.data(), id, scope, partial)?;
     // wire::decode_packet made a temporary single-span view. Rebind its relative
     // offsets through the ORIGINAL evidence (possibly several IP fragments).
     let start = d
@@ -128,7 +149,7 @@ fn arp(b: &[u8]) -> Result<Decoded> {
         ]),
     })
 }
-fn mpls(raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+fn mpls(raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     let b = raw.data();
     let mut labels = Vec::new();
     let mut p = 0;
@@ -136,7 +157,7 @@ fn mpls(raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
         if labels.len() >= 16 {
             return Err(Error::limit("mpls_depth"));
         }
-        need(b, p + 4, "mpls")?;
+        need_extent(b, p + 4, "mpls", partial)?;
         let word = u32be(b, p);
         p += 4;
         labels.push(word >> 12);
@@ -144,7 +165,7 @@ fn mpls(raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
             break;
         }
     }
-    need(b, p + 1, "mpls_payload")?;
+    need_extent(b, p + 1, "mpls_payload", partial)?;
     let link = match b[p] >> 4 {
         4 => 228,
         6 => 229,
@@ -161,11 +182,11 @@ fn mpls(raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
     };
     let path = format!("mpls:{labels:?}");
     Ok(Decoded::Ip(
-        decode_ip(link, &raw.slice(p..raw.len())?, scope)?,
+        decode_ip(link, &raw.slice(p..raw.len())?, scope, partial)?,
         vec![path],
     ))
 }
-fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     let b = raw.data();
     let mut start = 0usize;
     let mut end = b.len();
@@ -205,7 +226,7 @@ fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
             need(&b[..start], at + 1, "radiotap_flags")?;
             flags = b[at];
         }
-        if flags & 0x10 != 0 {
+        if flags & 0x10 != 0 && !partial {
             end = end
                 .checked_sub(4)
                 .ok_or_else(|| malformed("radiotap", "missing FCS"))?;
@@ -264,7 +285,7 @@ fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
         return unsupported("non_snap_payload");
     }
     let ty = u16be(b, p + 6);
-    let mut out = ethertype(ty, &raw.slice(p + 8..end)?, scope)?;
+    let mut out = ethertype(ty, &raw.slice(p + 8..end)?, scope, partial)?;
     if let Decoded::Ip(_, path) = &mut out {
         // Preserve capture-layer namespace instead of merging all WLAN traffic.
         let bssid = match fc & 0x0300 {
@@ -277,12 +298,12 @@ fn wireless(link: u32, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
     }
     Ok(out)
 }
-fn ethertype(ty: u16, raw: &EvidenceBytes, scope: Scope) -> Result<Decoded> {
+fn ethertype(ty: u16, raw: &EvidenceBytes, scope: Scope, partial: bool) -> Result<Decoded> {
     match ty {
-        0x0800 => Ok(Decoded::Ip(decode_ip(228, raw, scope)?, vec![])),
-        0x86dd => Ok(Decoded::Ip(decode_ip(229, raw, scope)?, vec![])),
-        0x6558 => decode(1, raw, scope),
-        0x8847 | 0x8848 => mpls(raw, scope),
+        0x0800 => Ok(Decoded::Ip(decode_ip(228, raw, scope, partial)?, vec![])),
+        0x86dd => Ok(Decoded::Ip(decode_ip(229, raw, scope, partial)?, vec![])),
+        0x6558 => decode_extent(1, raw, scope, partial),
+        0x8847 | 0x8848 => mpls(raw, scope, partial),
         0x0806 => arp(raw.data()),
         _ => Ok(Decoded::Metadata {
             protocol: "ethernet",
@@ -328,6 +349,10 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
         return Err(malformed("ipv6_fragment", "nested fragment header"));
     }
     d.protocol = next;
+    d.declared_payload_len = d
+        .declared_payload_len
+        .checked_sub(p)
+        .ok_or_else(|| malformed("network", "extension exceeds declared IP length"))?;
     d.payload = d.payload.slice(p..d.payload.len())?;
     d.network_header_len = d
         .network_header_len
@@ -339,9 +364,45 @@ pub fn normalize(mut d: Datagram) -> Result<Datagram> {
 /// conflicting hints, unknown critical options, GRE routing/version extensions,
 /// and encrypted tunnels never authorize inner decoding.
 pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
+    d.require_complete()?;
+    peel_extent(d, TunnelExtent::Complete)
+}
+#[derive(Clone, Copy)]
+enum TunnelExtent {
+    Complete,
+    Prefix { ip_length_known: bool },
+    // Recover the identity of an earlier observation after definitive rejection.
+    Resolve,
+}
+
+fn peel_extent(d: &Datagram, extent: TunnelExtent) -> Result<Option<(Decoded, String)>> {
+    let partial = !matches!(extent, TunnelExtent::Complete);
+    let ip_end = match extent {
+        TunnelExtent::Complete
+        | TunnelExtent::Prefix {
+            ip_length_known: true,
+        } => Some(d.declared_payload_len),
+        _ => None,
+    };
+    let decode_child = |ty, start, captured_end, declared_end: Option<usize>| {
+        let payload = d.payload.slice(start..captured_end)?;
+        let child = ethertype(ty, &payload, d.scope.clone(), partial)?;
+        if let (Decoded::Ip(inner, _), Some(end)) = (&child, declared_end) {
+            let missing = inner
+                .declared_payload_len
+                .saturating_sub(inner.payload.len());
+            if missing > end.saturating_sub(captured_end) {
+                return Err(malformed(
+                    "tunnel",
+                    "inner IP length exceeds enclosing payload",
+                ));
+            }
+        }
+        Ok(child)
+    };
     let b = d.payload.data();
     let (ty, start, label) = if d.protocol == 47 {
-        need(b, 4, "gre")?;
+        need_extent(b, 4, "gre", partial)?;
         let f = u16be(b, 0);
         let ty = u16be(b, 2);
         if f & !0xb000 != 0 {
@@ -353,8 +414,9 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
         let mut p = 4;
         let mut key = None;
         if f & 0x8000 != 0 {
-            need(b, p + 4, "gre_checksum")?;
-            if u16be(b, p + 2) != 0 || wire::internet_checksum(b) != 0 {
+            need_extent(b, p + 4, "gre_checksum", partial)?;
+            if u16be(b, p + 2) != 0 || (!partial && wire::internet_checksum(b) != 0) {
+                // The v1 history journal includes this diagnostic in its seal.
                 return Err(malformed(
                     "gre_checksum",
                     "invalid checksum or reserved field",
@@ -363,21 +425,21 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
             p += 4;
         }
         if f & 0x2000 != 0 {
-            need(b, p + 4, "gre_key")?;
+            need_extent(b, p + 4, "gre_key", partial)?;
             key = Some(u32be(b, p));
             p += 4;
         }
         if f & 0x1000 != 0 {
-            need(b, p + 4, "gre_sequence")?;
+            need_extent(b, p + 4, "gre_sequence", partial)?;
             p += 4;
         }
         (ty, p, format!("gre:{key:?}"))
     } else if d.protocol == 17 {
-        need(b, 8, "udp_tunnel")?;
+        need_extent(b, 8, "udp_tunnel", partial)?;
         let src = u16be(b, 0);
         let dst = u16be(b, 2);
         let n = usize::from(u16be(b, 4));
-        if n < 8 || n > b.len() {
+        if n < 8 || ip_end.is_some_and(|end| n > end) {
             return Err(malformed("udp_tunnel", "invalid UDP length"));
         }
         let vx = src == 4789 || dst == 4789;
@@ -388,8 +450,10 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
         if !vx && !ge {
             return Ok(None);
         }
+        let udp_end = (!matches!(extent, TunnelExtent::Resolve)).then_some(n);
+        let n = n.min(b.len());
         let t = &b[8..n];
-        need(t, 8, "udp_tunnel_header")?;
+        need_extent(t, 8, "udp_tunnel_header", partial)?;
         let vni = (u32::from(t[4]) << 16) | (u32::from(t[5]) << 8) | u32::from(t[6]);
         if vx {
             if t[0] != 8 || t[1..4] != [0, 0, 0] || t[7] != 0 {
@@ -397,7 +461,7 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
             }
             // Honor UDP length rather than accidentally decoding trailing IP bytes.
             return Ok(Some((
-                ethertype(0x6558, &d.payload.slice(16..n)?, d.scope.clone())?,
+                decode_child(0x6558, 16, n, udp_end)?,
                 tunnel_key(d, &format!("vxlan:{vni}")),
             )));
         }
@@ -405,17 +469,17 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
             return Err(malformed("geneve", "unsupported version/reserved bits"));
         }
         let options = usize::from(t[0] & 0x3f) * 4;
-        need(t, 8 + options, "geneve_options")?;
+        need_extent(t, 8 + options, "geneve_options", partial)?;
         let mut p = 8;
         let mut critical = false;
         while p < 8 + options {
-            need(&t[..8 + options], p + 4, "geneve_option")?;
+            need_extent(&t[..8 + options], p + 4, "geneve_option", partial)?;
             if t[p + 3] & 0xe0 != 0 {
                 return Err(malformed("geneve_option", "reserved option bits"));
             }
             critical |= t[p + 2] & 0x80 != 0;
             let size = 4 + usize::from(t[p + 3] & 31) * 4;
-            need(&t[..8 + options], p + size, "geneve_option")?;
+            need_extent(&t[..8 + options], p + size, "geneve_option", partial)?;
             p += size;
         }
         if critical || t[1] & 0x40 != 0 {
@@ -431,22 +495,14 @@ pub fn peel(d: &Datagram) -> Result<Option<(Decoded, String)>> {
             ));
         }
         return Ok(Some((
-            ethertype(
-                u16be(t, 2),
-                &d.payload.slice(16 + options..n)?,
-                d.scope.clone(),
-            )?,
+            decode_child(u16be(t, 2), 16 + options, n, udp_end)?,
             tunnel_key(d, &format!("geneve:{vni}")),
         )));
     } else {
         return Ok(None);
     };
     Ok(Some((
-        ethertype(
-            ty,
-            &d.payload.slice(start..d.payload.len())?,
-            d.scope.clone(),
-        )?,
+        decode_child(ty, start, d.payload.len(), ip_end)?,
         tunnel_key(d, &label),
     )))
 }
@@ -564,5 +620,488 @@ pub fn transport_metadata(d: &Datagram) -> Result<Option<(&'static str, Json)>> 
             )))
         }
         _ => Ok(None),
+    }
+}
+
+/// Recover the path and TCP header for loss attribution. A checksum can be
+/// adjudicated when its entire covered extent is captured.
+pub(crate) fn snapped_tcp(
+    link: u32,
+    raw: &EvidenceBytes,
+    scope: Scope,
+    max_depth: usize,
+    policy: wire::ChecksumPolicy,
+) -> Option<(
+    Scope,
+    Vec<String>,
+    wire::TcpHeader,
+    pcap_evidence::provenance::PacketId,
+)> {
+    let Decoded::Ip(datagram, context) = decode_extent(link, raw, scope, true).ok()? else {
+        return None;
+    };
+    tcp_prefix_path(&datagram, context, max_depth, HeaderUse::Loss(policy))
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HeaderUse {
+    Loss(wire::ChecksumPolicy),
+    Pending(wire::ChecksumPolicy),
+    Resolve,
+}
+
+impl HeaderUse {
+    fn policy(self) -> Option<wire::ChecksumPolicy> {
+        match self {
+            Self::Loss(policy) | Self::Pending(policy) => Some(policy),
+            Self::Resolve => None,
+        }
+    }
+}
+
+pub(crate) type TcpPath = (
+    Scope,
+    Vec<String>,
+    wire::TcpHeader,
+    pcap_evidence::provenance::PacketId,
+);
+
+/// TCP identity from a classified fragment set and its position in that set.
+#[derive(Clone)]
+pub(crate) struct PrefixHeader {
+    pub path: TcpPath,
+    offset: usize,
+}
+
+impl PrefixHeader {
+    pub fn witness_for(&self, incoming: &Datagram) -> TcpPath {
+        let mut path = self.path.clone();
+        // A shorter duplicate may not independently identify the header.
+        // In that case the original source remains the witness.
+        if incoming.payload.len().saturating_sub(self.offset) >= wire::TCP_IDENTITY_BYTES {
+            let spans = incoming.payload.spans();
+            if let Some(span) = spans.get(spans.partition_point(|s| s.end <= self.offset)) {
+                path.3 = span.packet;
+            }
+        }
+        path
+    }
+}
+
+pub(crate) fn tcp_prefix_path(
+    first: &Datagram,
+    path: Vec<String>,
+    max_depth: usize,
+    purpose: HeaderUse,
+) -> Option<TcpPath> {
+    inspect_tcp_path(first, path, max_depth, purpose)
+        .ok()
+        .flatten()
+}
+
+/// Identify a new loss witness from agreed bytes. Checksums can depend on
+/// disputed bytes outside the prefix; declared tunnel lengths still apply.
+pub(crate) fn agreed_tcp_header(
+    d: &Datagram,
+    path: Vec<String>,
+    max_depth: usize,
+) -> Result<Option<PrefixHeader>> {
+    inspect_scheduled_tcp_path(
+        d,
+        path,
+        max_depth,
+        HeaderUse::Pending(wire::ChecksumPolicy::Observe),
+        &mut None,
+    )
+}
+
+pub(crate) fn inspect_tcp_path(
+    first: &Datagram,
+    path: Vec<String>,
+    max_depth: usize,
+    purpose: HeaderUse,
+) -> Result<Option<TcpPath>> {
+    inspect_scheduled_tcp_path(first, path, max_depth, purpose, &mut None)
+        .map(|found| found.map(|h| h.path))
+}
+
+pub(crate) fn inspect_scheduled_tcp_path(
+    first: &Datagram,
+    mut path: Vec<String>,
+    max_depth: usize,
+    purpose: HeaderUse,
+    next_check: &mut Option<usize>,
+) -> Result<Option<PrefixHeader>> {
+    // Nested lengths are relative to different headers. Their missing suffixes
+    // all start at the same captured end while the nested payload is partial.
+    let mut recheck_after = |missing: usize| {
+        if missing > 0 {
+            let at = first.payload.len() + missing;
+            *next_check = Some(next_check.map_or(at, |previous| previous.min(at)));
+        }
+    };
+    let mut next;
+    let mut datagram = first;
+    for depth in 0..=max_depth {
+        if purpose.policy() == Some(wire::ChecksumPolicy::RequireValid)
+            && datagram.ip_checksum == wire::Checksum::Invalid
+        {
+            return Ok(None);
+        }
+        if let Some(observation) = wire::inspect_tcp_header(datagram)? {
+            if datagram.fragment.is_none()
+                && purpose.policy() == Some(wire::ChecksumPolicy::RequireValid)
+            {
+                recheck_after(
+                    datagram
+                        .declared_payload_len
+                        .saturating_sub(datagram.payload.len()),
+                );
+            }
+            let header = match purpose {
+                HeaderUse::Loss(policy) => observation.possible_loss(policy),
+                HeaderUse::Pending(policy) => observation.pending_extent(policy),
+                HeaderUse::Resolve => Some(observation.header),
+            };
+            let Some(header) = header else {
+                return Ok(None);
+            };
+            // A tunnel walk preserves packet coordinates across payload slices.
+            let offset = first
+                .payload
+                .spans()
+                .iter()
+                .find_map(|s| {
+                    let within = observation.packet_start.checked_sub(s.packet_start)?;
+                    (s.packet == observation.packet && within < s.end - s.start)
+                        .then(|| s.start + within)
+                })
+                .ok_or_else(|| {
+                    Error::new(
+                        pcap_evidence::ErrorCode::Invariant,
+                        0,
+                        "tcp_prefix",
+                        "TCP header lost its source span",
+                    )
+                })?;
+            return Ok(Some(PrefixHeader {
+                path: (datagram.scope.clone(), path, header, observation.packet),
+                offset,
+            }));
+        }
+        if datagram.fragment.as_ref().is_some_and(|f| f.offset != 0) {
+            return Ok(None);
+        }
+        // The captured start of an outer fragment can identify a tunnel.
+        // This is a header walk only; no fragment bytes enter reassembly.
+        if depth == max_depth {
+            return Ok(None);
+        }
+        if !(matches!(datagram.protocol, 17 | 47)
+            || datagram.ipv6 && matches!(datagram.protocol, 0 | 43 | 51 | 60))
+        {
+            return Ok(None);
+        }
+        // Normalization strips the fragment marker to walk extension headers.
+        // Only the original datagram can establish the enclosing payload extent.
+        let extent = match purpose.policy() {
+            Some(_)
+                if datagram.fragment.is_none()
+                    && datagram.declared_payload_len == datagram.payload.len() =>
+            {
+                TunnelExtent::Complete
+            }
+            Some(_) => TunnelExtent::Prefix {
+                ip_length_known: datagram.fragment.is_none(),
+            },
+            None => TunnelExtent::Resolve,
+        };
+        let normalized;
+        let outer = if matches!(datagram.protocol, 17 | 47) {
+            datagram
+        } else {
+            let mut extensions = datagram.clone();
+            extensions.fragment = None;
+            normalized = normalize(extensions)?;
+            &normalized
+        };
+        if outer.protocol == 17 && purpose.policy() == Some(wire::ChecksumPolicy::RequireValid) {
+            let header = outer.payload.data();
+            need_extent(header, 8, "udp_tunnel", true)?;
+            match wire::udp_checksum_if_captured(outer, outer.checksum_context, header)? {
+                Some(wire::Checksum::Invalid | wire::Checksum::NotChecked) => return Ok(None),
+                None => recheck_after(usize::from(u16be(header, 4)).saturating_sub(header.len())),
+                _ => {}
+            }
+        }
+        if outer.protocol == 47
+            && datagram.fragment.is_none()
+            && outer
+                .payload
+                .data()
+                .first()
+                .is_some_and(|byte| byte & 0x80 != 0)
+        {
+            recheck_after(
+                outer
+                    .declared_payload_len
+                    .saturating_sub(outer.payload.len()),
+            );
+        }
+        let Some((inner, hop)) = peel_extent(outer, extent)? else {
+            return Ok(None);
+        };
+        let Decoded::Ip(inner, context) = inner else {
+            return Ok(None);
+        };
+        path.push(hop);
+        path.extend(context);
+        next = inner;
+        datagram = &next;
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/tiny_capture.rs"]
+mod tiny_capture;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcap_evidence::{
+        fragment::{FragmentOutcome, FragmentReassembler},
+        provenance::PacketId,
+        wire::{Checksum, ChecksumContext, FragmentInfo},
+        Limits,
+    };
+
+    fn fragment_input(
+        frame: &[u8],
+        range: std::ops::Range<usize>,
+        more: bool,
+        sequence: u64,
+    ) -> Datagram {
+        let id = PacketId {
+            capture: [0; 32],
+            frame: sequence,
+            record_offset: sequence * 128,
+        };
+        let bytes = tiny_capture::ipv4_fragment(frame, range, more);
+        let scope = Scope {
+            section: 0,
+            interface: 0,
+            link_interface: None,
+            vlans: vec![],
+        };
+        wire::decode_packet(1, &bytes, id, scope).unwrap()
+    }
+
+    #[test]
+    fn agreed_header_requires_room_for_the_declared_inner_datagram() {
+        let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 32]);
+        let mut frame = tiny_capture::tunneled("vxlan", 7, false, &inner);
+        let length = (frame.len() - 34) as u16;
+        for udp_bytes in [length, length - 1] {
+            frame[38..40].copy_from_slice(&udp_bytes.to_be_bytes());
+            let prefix = fragment_input(&frame, 0..72, true, 1);
+            let header = agreed_tcp_header(&prefix, vec![], 4);
+            if udp_bytes == length {
+                assert_eq!(header.unwrap().unwrap().path.3.frame, 1);
+            } else {
+                assert!(matches!(header, Err(e) if e.field == "tunnel"));
+            }
+        }
+    }
+
+    #[test]
+    fn identified_tunnel_waits_for_the_checksum_extent() {
+        let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 512]);
+        let mut frame = tiny_capture::tunneled("vxlan", 7, false, &inner);
+        let udp_len = frame.len() - 34;
+        // A nonzero checksum needs the full UDP payload for a verdict.
+        frame[40..42].copy_from_slice(&1u16.to_be_bytes());
+        let covered_at = udp_len.next_multiple_of(8);
+        frame.resize(34 + covered_at + 16, 0);
+        let mut reassembler = FragmentReassembler::with_prefix_cache(Limits::default());
+        let mut calls = Vec::new();
+        let mut inspect = |prefix: &Datagram, _: &[PacketId]| {
+            let mut next = None;
+            let found = inspect_scheduled_tcp_path(
+                prefix,
+                vec![],
+                4,
+                HeaderUse::Loss(wire::ChecksumPolicy::RequireValid),
+                &mut next,
+            )
+            .unwrap();
+            calls.push((prefix.payload.len(), found.is_some(), next));
+            (next, Some(found))
+        };
+        // The initial fragment identifies the flow. Later fragments grow the
+        // prefix eight bytes at a time, including one beyond the UDP extent.
+        let ranges =
+            std::iter::once(0..72).chain((72..covered_at + 8).step_by(8).map(|n| n..n + 8));
+        for (i, range) in ranges.enumerate() {
+            let sequence = i as u64 + 1;
+            let d = fragment_input(&frame, range, true, sequence);
+            assert!(matches!(
+                reassembler
+                    .push_caching_prefix(d, sequence, &[], Some(&mut inspect))
+                    .unwrap(),
+                FragmentOutcome::Pending
+            ));
+        }
+        assert_eq!(
+            calls,
+            [(72, true, Some(udp_len)), (covered_at, false, None)]
+        );
+    }
+
+    #[test]
+    fn duplicate_fragment_uses_the_settled_verdict_and_keeps_its_witness() {
+        let inner = tiny_capture::tcp(false, 100, 0, 2, &[0; 512]);
+        let mut frame = tiny_capture::tunneled("vxlan", 7, false, &inner);
+        let mut bytes = frame[26..34].to_vec();
+        bytes.extend_from_slice(&[0, 17]);
+        bytes.extend_from_slice(&frame[38..40]);
+        bytes.extend_from_slice(&frame[34..]);
+        let checksum = wire::internet_checksum(&bytes);
+        let checksum = if checksum == 0 { u16::MAX } else { checksum };
+        let covered = (frame.len() - 34).next_multiple_of(8);
+        frame.resize(34 + covered + 16, 0);
+
+        for (sum, valid) in [(checksum, true), (if checksum == 1 { 2 } else { 1 }, false)] {
+            frame[40..42].copy_from_slice(&sum.to_be_bytes());
+            for cap in [2, 5, 6] {
+                let mut ip = FragmentReassembler::with_prefix_cache(Limits {
+                    max_fragments_per_set: cap,
+                    ..Limits::default()
+                });
+                let mut calls = Vec::new();
+                let ranges = [
+                    0..72,
+                    72..covered,
+                    0..72,
+                    0..48,
+                    0..covered,
+                    covered..covered + 16,
+                ];
+                for (i, range) in ranges.into_iter().enumerate() {
+                    let more = i != 5;
+                    let sequence = i as u64 + 1;
+                    let d = fragment_input(&frame, range, more, sequence);
+                    if (2..5).contains(&i) {
+                        let cached: &Option<PrefixHeader> =
+                            ip.cached_prefix(&d).expect("classified duplicate");
+                        assert_eq!(cached.is_some(), valid);
+                        if let Some(h) = cached {
+                            // Only the 48-byte duplicate stops before the TCP identity.
+                            assert_eq!(
+                                h.witness_for(&d).3.frame,
+                                if i == 3 { 1 } else { sequence }
+                            );
+                        }
+                    } else {
+                        assert!(ip.cached_prefix(&d).is_none());
+                    }
+                    let result = ip.push_caching_prefix(
+                        d,
+                        sequence,
+                        &[],
+                        Some(&mut |prefix, ids| {
+                            let mut next = None;
+                            let header = inspect_scheduled_tcp_path(
+                                prefix,
+                                vec![],
+                                4,
+                                HeaderUse::Loss(wire::ChecksumPolicy::RequireValid),
+                                &mut next,
+                            )
+                            .unwrap();
+                            calls.push((sequence, header.is_some(), ids.len()));
+                            (next, Some(header))
+                        }),
+                    );
+                    if i == cap {
+                        assert_eq!(result.err().unwrap().field, "fragments_per_set");
+                        break;
+                    }
+                    if more {
+                        assert!(matches!(result.unwrap(), FragmentOutcome::Pending));
+                    } else {
+                        let FragmentOutcome::Complete(_, ids) = result.unwrap() else {
+                            panic!("expected all six fragments")
+                        };
+                        assert_eq!(
+                            ids.iter().map(|p| p.frame).collect::<Vec<_>>(),
+                            [1, 2, 3, 4, 5, 6]
+                        );
+                    }
+                }
+                let mut expected = vec![(1, true, 1), (2, valid, 2)];
+                // Refused completion establishes the terminal extent.
+                if cap == 5 {
+                    expected.push((6, valid, 6));
+                }
+                assert_eq!(calls, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_udp_prefix_is_classified_once() {
+        for fragments in [16, 32, 64] {
+            let mut ip = FragmentReassembler::new(Limits::default());
+            let mut inspected = Vec::new();
+            let mut inspect = |prefix: &Datagram, _: &[PacketId]| {
+                assert!(inspect_tcp_path(prefix, vec![], 4, HeaderUse::Resolve)
+                    .unwrap()
+                    .is_none());
+                inspected.push(prefix.payload.len());
+                true
+            };
+            for i in 0..fragments {
+                let mut bytes = [0; 64];
+                if i == 0 {
+                    bytes[2..4].copy_from_slice(&53u16.to_be_bytes());
+                    bytes[4..6].copy_from_slice(&4096u16.to_be_bytes());
+                }
+                let frame = i as u64 + 1;
+                let id = PacketId {
+                    capture: [0; 32],
+                    frame,
+                    record_offset: frame * 100,
+                };
+                let datagram = Datagram {
+                    scope: Scope {
+                        section: 0,
+                        interface: 0,
+                        link_interface: None,
+                        vlans: vec![],
+                    },
+                    source: [192, 0, 2, 1].into(),
+                    destination: [192, 0, 2, 2].into(),
+                    protocol: 17,
+                    ipv6: false,
+                    network_header_len: 20,
+                    declared_payload_len: bytes.len(),
+                    fragment: Some(FragmentInfo {
+                        id: 5,
+                        offset: i * 64,
+                        more: true,
+                    }),
+                    payload: EvidenceBytes::from_packet(&bytes, id, 34),
+                    ip_checksum: Checksum::Valid,
+                    checksum_context: ChecksumContext::BaseAddresses,
+                };
+                assert!(matches!(
+                    ip.push_observing_prefix(datagram, frame, &[], Some(&mut inspect))
+                        .unwrap(),
+                    FragmentOutcome::Pending
+                ));
+            }
+            assert_eq!(inspected, [64]);
+        }
     }
 }

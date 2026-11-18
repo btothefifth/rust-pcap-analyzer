@@ -121,15 +121,15 @@ fn tcp_gap_never_crosses_a_dnp_transport_assembly() {
 fn end_to_end_dnp_reorders_tcp_deduplicates_and_separates_unsolicited() {
     let analysis = analyze(&fixture("dnp3_tcp.pcap"), Config::default()).unwrap();
     assert_eq!(analysis.packets.len(), 10);
-    assert_eq!(analysis.flows.len(), 1);
+    assert_eq!(analysis.flows().len(), 1);
     assert!(analysis
         .packets
         .iter()
         .all(|p| matches!(p.disposition, Disposition::Tcp { flow: 0, .. })));
-    assert_eq!(analysis.flows[0].packets.len(), 10);
-    assert!(analysis.flows[0].reconstruction_errors.is_empty());
+    assert_eq!(analysis.flows()[0].packets.len(), 10);
+    assert!(analysis.flows()[0].reconstruction_errors.is_empty());
     let messages: Vec<_> = analysis
-        .applications
+        .applications()
         .iter()
         .filter_map(|a| match &a.data {
             ApplicationData::Dnp3(d) => Some(&d.messages),
@@ -177,7 +177,7 @@ fn crc_failure_report_does_not_reject_unrelated_valid_unsolicited_message() {
     assert!(analysis.has_diagnostics());
     let mut unsolicited = 0;
     let mut responses = 0;
-    for a in &analysis.applications {
+    for a in analysis.applications() {
         if let ApplicationData::Dnp3(d) = &a.data {
             unsolicited += d
                 .messages
@@ -214,9 +214,9 @@ fn modbus_coalesced_pdus_and_function_shapes() {
 #[test]
 fn modbus_server_initiated_tcp_does_not_invert_protocol_roles() {
     let analysis = analyze(&fixture("modbus_tcp.pcap"), Config::default()).unwrap();
-    assert_eq!(analysis.flows.len(), 1);
+    assert_eq!(analysis.flows().len(), 1);
     let messages: Vec<_> = analysis
-        .applications
+        .applications()
         .iter()
         .filter_map(|a| match &a.data {
             ApplicationData::Modbus(m) => Some(&m.messages),
@@ -279,7 +279,7 @@ fn unsupported_link_is_retained_as_evidence_not_dropped() {
 #[test]
 fn independent_tcp_conflict_fixture_reaches_real_pipeline() {
     let analysis = analyze(&fixture("conflicting_tcp.pcap"), Config::default()).unwrap();
-    let stream = analysis.flows[0].streams[0].as_ref().unwrap();
+    let stream = analysis.flows()[0].streams[0].as_ref().unwrap();
     assert_eq!(stream.chunks[0].bytes.data(), b"abc");
     assert_eq!((stream.conflicts[0].start, stream.conflicts[0].end), (3, 6));
     assert!(analysis.has_diagnostics());

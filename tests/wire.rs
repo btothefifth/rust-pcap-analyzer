@@ -468,7 +468,7 @@ fn sll2_interfaces_partition_actual_tcp_generations() {
     let capture = capture_packets(276, &[sll2(&ip, 2), sll2(&ip, 3), sll2(&ip, 2)]);
     let analysis =
         pcap_evidence::engine::analyze(&capture, pcap_evidence::engine::Config::default()).unwrap();
-    assert_eq!(analysis.flows.len(), 2);
+    assert_eq!(analysis.flows().len(), 2);
     let report = pcap_evidence::report::analysis(&analysis, false).encode();
     assert!(report.contains("\"link_interface\":2"));
     assert!(report.contains("\"link_interface\":3"));

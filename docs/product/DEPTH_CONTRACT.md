@@ -65,7 +65,7 @@ opt-in through these entry points:
 | pcap-evidence-product::deep | Decode one already-framed protocol unit | The caller supplies the protocol hypothesis and EvidenceBytes; no port-only identity is inferred |
 | pcap-depth decode | Inspect a standalone protocol unit | The input is explicitly not a PCAP; the report says so and binds only to the supplied unit hash |
 | pcap-depth analyze | Add depth observations to the existing event stream | ProductSink re-reads packet bytes from the capture and PacketMap verifies their hashes before retaining witnesses |
-| pcap-evidence-history-app | Apply stateful application framing to a sealed history range | History::evidence_range verifies journal/index/source identity and returns candidate bytes or explicit gaps/conflicts |
+| pcap-evidence-history-app | Apply stateful application framing to a sealed history range | History::evidence_page reads candidate bytes and their witnesses, and reports indexed gaps and conflicts |
 | tools.depth.opcua_crypto | Optional authorized OPC UA symmetric transform | Python-only tool boundary; the Rust parser never discovers keys or decrypts automatically |
 
 The product CLI’s ordinary command remains the established product path. The
@@ -169,12 +169,49 @@ scope until the caller cuts it. This is the intended conservative behavior for
 TCP replay bugs, retransmission ambiguity, timing/order anomalies, and history
 page boundaries.
 
+Adjacent unavailable intervals with the same transport status produce one cut
+and one boundary event, including when the interval spans query pages.
+When a page ends in a gap, the reader skips directly to the next indexed
+placement in that direction or the end of the selection. Before reading the
+first page, the consumer checks the selection length against the history's
+`max_query_work` allowance (one unit per selected byte, including gaps).
+An oversized selection aborts at its starting offset with
+`history_app_range_work`. Each history query still enforces its own limits.
+If a page exceeds its scan, work, evidence-reference, interval or encoded-report
+limit, the application reader halves the read size and retries at the same
+offset. It keeps the smaller size for the rest of the selection. If a single
+byte cannot be queried within the limit, the analysis aborts with the query
+error. Direct `range` and `evidence_range` calls evaluate the requested interval
+in one query. Within an overlap, agreeing bytes retain their placement status and
+only offsets with disagreeing observations produce a conflict boundary.
+
 The history application consumer emits a hash-chained NDJSON sequence:
 analysis.start, zero or more message/boundary events, optional incomplete or
 aborted evidence, and analysis.complete. A complete event means that the
 selected verified range was consumed; it never means complete endpoint history.
 The output is no-clobber and uses a partial file until the final hard-link
 publication succeeds.
+
+Once the writer accepts `analysis.start`, the reader flushes the accepted event
+chain before returning. If the completion record exceeds the output cap, the
+caller receives the preceding events and a `history_app_output` error. If a
+write fails, the reader stops appending records and attempts to flush, even if
+the first event was interrupted. The sink may contain a partial final line.
+Only preceding newline-terminated records belong to the accepted chain. A write
+or flush failure returns an I/O error.
+
+Library cancellation is cooperative. The reader checks the flag between pages,
+between pieces, and before publishing further results. If an event writer
+requests cancellation while writing a nonterminal event, that event stays in
+the chain. The reader attempts to append an abort event before flushing the
+prefix and returning `history_app_cancelled`.
+
+The history application CLI selects the full direction and allows 1,024 framed
+units across that range. If a 1,025th unit is reached, the CLI exits with code 4
+and leaves the completed prefix and abort record in the `.history-app.partial`
+file beside the requested output. Library callers can select a smaller interval
+with the `start` and `end` fields of `pcap_evidence_history_app::Request` and set the frame quota
+with `Limits::elements`. Page size controls reads within that interval.
 
 No timing model is invented. Captured timestamps remain source evidence; this
 layer does not sleep, replay traffic, reorder packets by wall clock, or claim

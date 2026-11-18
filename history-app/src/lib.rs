@@ -1,9 +1,9 @@
 //! Finalized disk history -> bounded stateful application interpretation.
 //! Does not assert complete endpoint execution or repair an ambiguous transport.
 #![forbid(unsafe_code)]
-use pcap_evidence::{json::Json, sha256, Error, Result};
+use pcap_evidence::{json::Json, sha256, Error, ErrorCode, Result};
 use pcap_evidence_history::query::History;
-use pcap_evidence_product::deep::{continuation::Parser, Context, Limits};
+use pcap_evidence_product::deep::{continuation::Parser, Context, Limits, Report};
 use std::io::Write;
 #[derive(Clone, Debug)]
 pub struct Request {
@@ -16,6 +16,40 @@ pub struct Request {
     pub protocol: String,
     pub ua_security_none: bool,
 }
+struct Boundary {
+    start: i64,
+    end: i64,
+    status: String,
+    discarded: Report,
+}
+
+impl Boundary {
+    fn emit(self, publish: &mut impl FnMut(&'static str, Json, i64) -> Result<()>) -> Result<()> {
+        publish(
+            "application.boundary",
+            Json::object([
+                ("start", self.start.to_string().into()),
+                ("end", self.end.to_string().into()),
+                ("transport_status", self.status.into()),
+                ("report", self.discarded.json()),
+            ]),
+            self.end,
+        )
+    }
+}
+
+fn page_limit(error: &Error) -> bool {
+    error.code == ErrorCode::LimitExceeded
+        && matches!(
+            error.field,
+            "query_work"
+                | "query_scan"
+                | "query_intervals"
+                | "query_evidence_references"
+                | "report_bytes"
+        )
+}
+
 pub fn analyze<W: Write>(
     history: &mut History,
     request: &Request,
@@ -42,13 +76,19 @@ pub fn analyze<W: Write>(
     let mut seq = 0u64;
     let mut written = 0u64;
     let mut chain = [0u8; 32];
+    let mut write_error: Option<Error> = None;
     let mut emit = |kind: &'static str, data: Json| -> Result<()> {
-        seq = seq
+        // After a short write followed by an error the sink can end mid-record.
+        // Even an abort marker would corrupt that line.
+        if let Some(error) = &write_error {
+            return Err(error.clone());
+        }
+        let next_seq = seq
             .checked_add(1)
             .ok_or_else(|| Error::limit("history_app_sequence"))?;
         let body = Json::object([
             ("schema", "pcap-evidence.history-app.v1".into()),
-            ("sequence", seq.to_string().into()),
+            ("sequence", next_seq.to_string().into()),
             ("kind", kind.into()),
             ("capture_sha256", sha256::hex(&capture_sha256).into()),
             ("generation", sha256::hex(&request.generation).into()),
@@ -67,15 +107,21 @@ pub fn analyze<W: Write>(
             ("event_sha256", sha256::hex(&next).into()),
         ])
         .encode_bounded_line(l.output_bytes)?;
-        written = written
+        let next_written = written
             .checked_add(line.len() as u64)
             .filter(|n| *n <= request.max_output_bytes)
             .ok_or_else(|| Error::limit("history_app_output"))?;
-        output.write_all(line.as_bytes())?;
+        if let Err(e) = output.write_all(line.as_bytes()) {
+            let error = Error::io(e);
+            write_error = Some(error.clone());
+            return Err(error);
+        }
+        seq = next_seq;
+        written = next_written;
         chain = next;
         Ok(())
     };
-    emit(
+    if let Err(error) = emit(
         "analysis.start",
         Json::object([
             ("source_range_start", request.start.to_string().into()),
@@ -85,80 +131,136 @@ pub fn analyze<W: Write>(
             ("semantic_replay_verified", false.into()),
             ("page_boundaries_reset_protocol", false.into()),
         ]),
-    )?;
+    ) {
+        if write_error.is_some() {
+            output.flush()?;
+        }
+        return Err(error);
+    }
+    let check_cancelled = || {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            Err(Error::limit("history_app_cancelled"))
+        } else {
+            Ok(())
+        }
+    };
+    let mut completed_until = request.start;
+    let mut publish = |kind, data, through| {
+        check_cancelled()?;
+        emit(kind, data)?;
+        completed_until = through;
+        check_cancelled()
+    };
+    let mut remaining_frames = l.elements;
     let mut at = request.start;
-    let result = (|| -> Result<()> {
+    let mut boundary: Option<Boundary> = None;
+    let read_result = (|| -> Result<()> {
+        check_cancelled()?;
+        if request.start.abs_diff(request.end) > history.config.max_query_work {
+            return Err(Error::limit("history_app_range_work"));
+        }
+        let mut page_bytes = request.page_bytes;
         while at < request.end {
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(Error::limit("history_app_cancelled"));
-            }
-            let end = at
-                .checked_add(request.page_bytes as i64)
-                .unwrap_or(i64::MAX)
-                .min(request.end);
-            let range = history.evidence_range(request.generation, request.direction, at, end)?;
-            for p in range.pieces {
+            check_cancelled()?;
+            let width = at.abs_diff(request.end).min(page_bytes as u64) as usize;
+            let pieces = match history.evidence_page(
+                request.generation,
+                request.direction,
+                at,
+                request.end,
+                width,
+            ) {
+                Ok(pieces) => pieces,
+                Err(error) if width > 1 && page_limit(&error) => {
+                    // A refused read produced no pieces. Keep the smaller size
+                    // for later reads so a selection only pays for each retry once.
+                    page_bytes = width / 2;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            for p in pieces {
+                check_cancelled()?;
+                at = p.end;
+                if let Some(gap) = &mut boundary {
+                    if p.bytes.is_none() && gap.end == p.start && gap.status == p.status {
+                        gap.end = p.end;
+                        continue;
+                    }
+                }
+                if let Some(gap) = boundary.take() {
+                    gap.emit(&mut publish)?;
+                }
                 if let Some(bytes) = p.bytes {
-                    parser.feed(p.start, &bytes, &mut |record| {
-                        emit(
-                            "protocol.message",
-                            Json::object([
-                                (
-                                    "available_at_frame",
-                                    record.available_at_frame.to_string().into(),
-                                ),
-                                (
-                                    "last_input_stream_start",
-                                    record.stream_start.to_string().into(),
-                                ),
-                                (
-                                    "last_input_stream_end",
-                                    record.stream_end.to_string().into(),
-                                ),
-                                ("report", record.report.json()),
-                            ]),
-                        )
-                    })?;
-                } else {
-                    let report = parser.cut("transport_gap_conflict_or_ambiguous_placement")?;
-                    emit(
-                        "application.boundary",
-                        Json::object([
-                            ("start", p.start.to_string().into()),
-                            ("end", p.end.to_string().into()),
-                            ("transport_status", p.status.into()),
-                            ("report", report.json()),
-                        ]),
+                    parser.feed_with_quota(
+                        p.start,
+                        &bytes,
+                        &mut remaining_frames,
+                        &mut |record| {
+                            publish(
+                                "protocol.message",
+                                Json::object([
+                                    (
+                                        "available_at_frame",
+                                        record.available_at_frame.to_string().into(),
+                                    ),
+                                    (
+                                        "last_input_stream_start",
+                                        record.stream_start.to_string().into(),
+                                    ),
+                                    (
+                                        "last_input_stream_end",
+                                        record.stream_end.to_string().into(),
+                                    ),
+                                    ("report", record.report.json()),
+                                ]),
+                                record.stream_end,
+                            )
+                        },
                     )?;
+                } else {
+                    boundary = Some(Boundary {
+                        start: p.start,
+                        end: p.end,
+                        status: p.status,
+                        discarded: parser.cut("transport_gap_conflict_or_ambiguous_placement")?,
+                    });
                 }
             }
-            at = end;
-        }
-        if let Some(report) = parser.finish()? {
-            emit("application.incomplete", report.json())?;
         }
         Ok(())
     })();
-    match result {
+    let result = (|| -> Result<()> {
+        if let Some(gap) = boundary {
+            gap.emit(&mut publish)?;
+        }
+        read_result?;
+        check_cancelled()?;
+        if let Some(report) = parser.finish()? {
+            publish("application.incomplete", report.json(), request.end)?;
+        }
+        check_cancelled()
+    })();
+    let terminal = match result {
         Ok(()) => emit(
             "analysis.complete",
             Json::object([
                 ("selected_range_consumed", true.into()),
                 ("complete_endpoint_history_claimed", false.into()),
             ]),
-        )?,
+        ),
         Err(e) => {
             let _ = emit(
                 "analysis.aborted",
                 Json::object([
                     ("error", e.code.as_str().into()),
                     ("field", e.field.into()),
-                    ("consumed_until", at.to_string().into()),
+                    ("consumed_until", completed_until.to_string().into()),
                 ]),
             );
-            return Err(e);
+            Err(e)
         }
-    }
+    };
     output.flush()?;
-    Ok(())
+    write_error.map_or(terminal, Err)
 }

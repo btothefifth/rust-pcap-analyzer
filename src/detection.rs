@@ -85,10 +85,13 @@ pub fn classify_flow(flow: &FlowResult, config: &Config) -> Result<Selection> {
     })
 }
 pub fn analysis_json(analysis: &Analysis) -> Result<Json> {
-    let mut records = Vec::new();
-    for flow in &analysis.flows {
-        let s = classify_flow(flow, &analysis.config)?;
-        records.push(Json::object([
+    Ok(Json::Array(flow_records(analysis).collect::<Result<_>>()?))
+}
+
+pub(crate) fn flow_records(analysis: &Analysis) -> impl Iterator<Item = Result<Json>> + '_ {
+    analysis.flows().iter().map(|flow| {
+        let s = classify_flow(flow, analysis.config())?;
+        Ok(Json::object([
             ("flow", flow.id.into()),
             ("basis", s.basis.into()),
             (
@@ -96,7 +99,6 @@ pub fn analysis_json(analysis: &Analysis) -> Result<Json> {
                 Json::array(s.matched.into_iter().map(Json::from)),
             ),
             ("ambiguous", (s.dnp3 && s.modbus).into()),
-        ]));
-    }
-    Ok(Json::Array(records))
+        ]))
+    })
 }

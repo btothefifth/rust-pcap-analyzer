@@ -21,7 +21,7 @@ class SemanticTools(unittest.TestCase):
     def test_manifest_identity_and_no_clobber(self):
         with tempfile.TemporaryDirectory()as t:
             root=Path(t);maker.write(root);manifest=runner.audit(root)
-            self.assertEqual(len(manifest['cases']),18)
+            self.assertEqual(len(manifest['cases']),19)
             maker.write(root)
             (root/'dnp-read.bin').write_bytes(b'bad')
             with self.assertRaises(ValueError):runner.audit(root)

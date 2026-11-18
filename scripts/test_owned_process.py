@@ -138,7 +138,16 @@ class OwnedProcess(unittest.TestCase):
                 self.assertTrue(marker.is_file(),'child must reach the owning boundary')
                 interrupted = True
                 raise KeyboardInterrupt()
-            code='import subprocess,sys,pathlib,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"]);pathlib.Path(sys.argv[1]).write_text(str(p.pid));time.sleep(30)'
+            # Publish readiness only after the PID has been written and closed.
+            code = """
+import pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+marker = pathlib.Path(sys.argv[1])
+pending = marker.with_suffix(".pending")
+pending.write_text(str(child.pid))
+pending.replace(marker)
+time.sleep(30)
+"""
             with mock.patch.object(owned_process.subprocess,'Popen',create),mock.patch.object(owned_process.time,'sleep',interrupt):
                 with self.assertRaises(KeyboardInterrupt) as caught:
                     adapters.execute([sys.executable,'-c',code,str(marker)],timeout=4,output_limit=64)

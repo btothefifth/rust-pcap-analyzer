@@ -192,6 +192,11 @@ def generate(root=ROOT):
     for name,body in inherited.items():
         cap=pcap([packet(body,"udp")]) if name in {"quic","dhcp","dhcpv6"} else tcp_capture(body)
         add(name,"protocol_message",body,cap)
+        if name == "modbus":
+            families[-1]["properties"].append({
+                "path": "tests/semantic_subset.rs",
+                "selector": "modbus_extended_role_and_pair_vectors",
+            })
     # PCAPNG exact timestamp and missing-time representations.
     raw=packet(b"x","udp")
     def block(ty,body):

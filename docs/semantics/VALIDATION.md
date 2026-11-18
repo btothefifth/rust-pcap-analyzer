@@ -43,7 +43,7 @@ python scripts/validate_semantic_product.py \
   --output-dir /new/semantic-product-parity
 ```
 
-The validator runs the five supplied semantic captures, requires a complete
+The validator runs the eleven supplied semantic captures, requires a complete
 source-bound event stream, decodes TLV with `tools/product/tlv.py`, and compares
 the complete NDJSON/TLV event sequences. This is a local projection-consistency
 gate, not normative protocol qualification or linked-ABI proof.
@@ -53,7 +53,7 @@ indices, exact bit patterns, context forgery, request/response padding and sourc
 spans. Capture-driven tests exercise snapshot and streaming paths, segmentation,
 reordering, retransmission, conflicting overlaps, gaps, and window boundaries.
 The independent case runner verifies raw field witnesses and expected values for
-18 explicit payloads. Its own Python process tests are not native semantic runs.
+19 explicit payloads. Its own Python process tests are not native semantic runs.
 The root, product and follow-up validators now select this native gate directly
 after the root all-target build; the two expanded drivers use the release probe
 and the ordered root validator uses the debug probe. They honor Cargo's configured
@@ -62,10 +62,11 @@ No missing probe is replaced with Python interpretation.
 
 ## JSON / TLV / workbench consumers
 
-The product TLV path inherits the existing JSON value model. The completed local
-run exercised the product CLI on all five PCAP fixtures with NDJSON and TLV,
-decoded TLV using the existing Python reader, and asserted complete event-sequence
-parity. This is projection consistency only; native workbench, linked ABI and
+The product TLV path inherits the existing JSON value model. The original local
+run compared NDJSON and TLV on five PCAP fixtures. The current product gate
+compares all events on eleven fixtures, validates semantic reports against
+the v1 schema, and checks split FC23 values and FC43 object hashes against
+their packet spans. This is projection consistency only; native workbench, linked ABI and
 normative protocol gates remain separately executable.
 
 ## Development-only fuzzing

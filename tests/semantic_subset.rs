@@ -15,7 +15,8 @@ fn ev(data: &[u8]) -> EvidenceBytes {
     )
 }
 fn adu(pdu: &[u8]) -> EvidenceBytes {
-    let mut data = vec![0, 42, 0, 0, 0, (pdu.len() + 1) as u8, 1];
+    let length = u16::try_from(pdu.len() + 1).unwrap().to_be_bytes();
+    let mut data = vec![0, 42, 0, 0, length[0], length[1], 1];
     data.extend_from_slice(pdu);
     ev(&data)
 }
@@ -394,6 +395,7 @@ fn streaming_padding_tokens_match_root_policy() {
         "modbus-bits-v1:response:2:129"
     ));
     assert!(modbus::compatibility_matches("count:4", "count:4"));
+    assert!(modbus::compatibility_matches("read:3:10:1", "read:3:10:1"));
     assert!(modbus::compatibility_matches(
         "modbus-bits-v1:quantity:9",
         ""
@@ -1420,5 +1422,387 @@ fn dnp_group4_event_variations_decode_all_double_bit_states_and_align_sibling() 
             values(&r, "time"),
             expected_times.iter().collect::<Vec<_>>()
         );
+    }
+}
+
+#[test]
+fn modbus_extended_role_and_pair_vectors() {
+    // V1.1b3 §§6.14–6.18, 6.21. Each tuple names an independently expected
+    // numeric field from the response, including its contributing wire bytes.
+    type Case<'a> = (&'a [u8], &'a [u8], &'a str, u64, std::ops::Range<usize>);
+    let cases: &[Case<'_>] = &[
+        (
+            &[20, 7, 6, 0, 4, 0, 1, 0, 2],
+            &[20, 6, 5, 6, 0x0d, 0xfe, 0, 0x20],
+            "register_u16",
+            0xdfe,
+            11..13,
+        ),
+        (
+            &[21, 9, 6, 0, 3, 0, 4, 0, 1, 0x12, 0x34],
+            &[21, 9, 6, 0, 3, 0, 4, 0, 1, 0x12, 0x34],
+            "record_number",
+            4,
+            12..14,
+        ),
+        (
+            &[22, 0, 4, 0, 0xf2, 0, 0x25],
+            &[22, 0, 4, 0, 0xf2, 0, 0x25],
+            "or_mask",
+            0x25,
+            12..14,
+        ),
+        (
+            &[23, 0, 3, 0, 2, 0, 7, 0, 1, 2, 0xfa, 0xce],
+            &[23, 4, 0, 12, 0, 13],
+            "register_u16",
+            12,
+            9..11,
+        ),
+        (
+            &[24, 4, 0xde],
+            &[24, 0, 6, 0, 2, 1, 2, 3, 4],
+            "fifo_count",
+            2,
+            10..12,
+        ),
+        (
+            &[43, 14, 4, 1],
+            &[43, 14, 4, 0x81, 0, 0, 1, 1, 2, b'A', b'B'],
+            "object_id",
+            1,
+            14..15,
+        ),
+    ];
+    for (req, rsp, name, value, range) in cases {
+        let request = root_message(&adu(req), Role::Request);
+        let response = root_message(&adu(rsp), Role::Response);
+        assert!(
+            pcap_evidence::modbus::response_matches(&request, &response),
+            "{req:?}"
+        );
+        let report = modbus::decode(&response.raw, Role::Response, Limits::default()).unwrap();
+        assert!(report
+            .records()
+            .iter()
+            .flat_map(|r| r.fields())
+            .any(|f| f.name() == *name
+                && f.value() == &Value::Unsigned(*value)
+                && &f.range() == range));
+        let exception = root_message(&adu(&[req[0] | 0x80, 2]), Role::Response);
+        assert!(pcap_evidence::modbus::response_matches(
+            &request, &exception
+        ));
+        for (data, role) in [(*req, Role::Request), (*rsp, Role::Response)] {
+            let wire = adu(data);
+            for end in 0..wire.len() {
+                let captured = wire.slice(0..end).unwrap();
+                let report = modbus::decode(&captured, role, Limits::default()).unwrap();
+                assert_eq!(report.status(), Status::Incomplete);
+                assert_eq!(report.consumed(), 0);
+                assert_eq!(
+                    report.issues()[0].code,
+                    if end < 8 {
+                        "modbus_mbap_truncated"
+                    } else {
+                        "modbus_adu_truncated"
+                    }
+                );
+            }
+            for end in 0..data.len() {
+                let partial = adu(&data[..end]);
+                assert_ne!(
+                    modbus::decode(&partial, role, Limits::default())
+                        .unwrap()
+                        .status(),
+                    Status::DecodedSubset
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn modbus_extended_boundaries() {
+    let valid = |bytes: &[u8], role| {
+        modbus::decode(&adu(bytes), role, Limits::default())
+            .unwrap()
+            .status()
+            == Status::DecodedSubset
+    };
+    // A write-file response echoes the entire request. A single subrecord
+    // with 122 words fills the 253-byte PDU exactly.
+    let record = |words: u8| {
+        let mut bytes = vec![6, 0, 1, 0, 0, 0, words];
+        bytes.resize(7 + 2 * usize::from(words), 0);
+        bytes
+    };
+    for (records, size, expected) in [
+        (record(122), 253, Status::DecodedSubset),
+        ([record(1), record(118)].concat(), 254, Status::Rejected),
+    ] {
+        let mut pdu = vec![21, u8::try_from(records.len()).unwrap()];
+        pdu.extend(records);
+        assert_eq!(pdu.len(), size);
+        let wire = adu(&pdu);
+        for role in [Role::Request, Role::Response] {
+            let report = modbus::decode(&wire, role, Limits::default()).unwrap();
+            assert_eq!(report.status(), expected);
+            if expected == Status::Rejected {
+                assert_eq!(report.issues()[0].code, "modbus_mbap_fields");
+            }
+        }
+        if expected == Status::DecodedSubset {
+            assert!(pcap_evidence::modbus::response_matches(
+                &root_message(&wire, Role::Request),
+                &root_message(&wire, Role::Response)
+            ));
+        }
+    }
+    for (count, ok) in [(0, true), (31, true), (32, false)] {
+        let mut p = vec![24, 0, 2 + count * 2, 0, count];
+        p.resize(5 + 2 * count as usize, 0);
+        assert_eq!(valid(&p, Role::Response), ok);
+    }
+    for (count, ok) in [(1, true), (121, true), (122, false)] {
+        let mut p = vec![23, 0, 1, 0, 125, 0, 0, 0, count, 2 * count];
+        p.resize(10 + 2 * usize::from(count), 0);
+        assert_eq!(valid(&p, Role::Request), ok);
+    }
+    assert!(valid(&[20, 7, 6, 0, 1, 0x27, 0x0f, 0, 1], Role::Request));
+    assert!(!valid(&[20, 7, 6, 0, 1, 0x27, 0x0f, 0, 2], Role::Request));
+    assert!(!valid(&[20, 7, 6, 0, 1, 0, 0, 0, 125], Role::Request));
+    assert!(!valid(&[21, 9, 6, 0, 0, 0, 4, 0, 1, 1, 2], Role::Request));
+    assert!(!valid(
+        &[43, 14, 4, 0x81, 255, 2, 1, 1, 1, 65],
+        Role::Response
+    ));
+    assert!(!valid(
+        &[43, 14, 1, 1, 0, 0, 2, 1, 1, 65, 1, 1, 66],
+        Role::Response
+    ));
+    assert_eq!(
+        modbus::decode(&adu(&[43, 13, 0]), Role::Request, Limits::default())
+            .unwrap()
+            .status(),
+        Status::Unsupported
+    );
+}
+
+#[test]
+fn modbus_rejects_disagreeing_extended_replies_but_allows_device_stream_restart() {
+    let paired = |req: &[u8], rsp: &[u8]| {
+        let req = root_message(&adu(req), Role::Request);
+        let rsp = root_message(&adu(rsp), Role::Response);
+        assert!(req.shape_valid && rsp.shape_valid);
+        pcap_evidence::modbus::response_matches(&req, &rsp)
+    };
+    assert!(!paired(
+        &[20, 14, 6, 0, 1, 0, 3, 0, 2, 6, 0, 1, 0, 8, 0, 1],
+        &[20, 10, 3, 6, 0, 1, 5, 6, 0, 2, 0, 3]
+    ));
+    assert!(!paired(
+        &[21, 9, 6, 0, 1, 0, 3, 0, 1, 0, 10],
+        &[21, 9, 6, 0, 1, 0, 3, 0, 1, 0, 11]
+    ));
+    assert!(!paired(
+        &[22, 0, 5, 0, 255, 0, 0],
+        &[22, 0, 5, 0, 254, 0, 0]
+    ));
+    assert!(!paired(
+        &[23, 0, 1, 0, 2, 0, 2, 0, 1, 2, 0, 9],
+        &[23, 2, 0, 1]
+    ));
+    assert!(!paired(
+        &[43, 14, 4, 1],
+        &[43, 14, 4, 0x81, 0, 0, 1, 0, 1, 65]
+    ));
+    assert!(paired(
+        &[43, 14, 1, 7],
+        &[43, 14, 1, 1, 0, 0, 3, 0, 1, 65, 1, 1, 66, 2, 1, 67]
+    ));
+}
+
+#[test]
+fn modbus_device_pages_exceptions_and_legacy_short_writes() {
+    for (bytes, role, status, issue) in [
+        (
+            &[16, 0, 1][..],
+            Role::Request,
+            Status::Incomplete,
+            "modbus_write_header_truncated",
+        ),
+        (
+            &[16, 0, 1],
+            Role::Response,
+            Status::Rejected,
+            "modbus_pdu_shape",
+        ),
+        (
+            &[3],
+            Role::Response,
+            Status::Incomplete,
+            "modbus_byte_count_truncated",
+        ),
+        (
+            &[43],
+            Role::Request,
+            Status::Rejected,
+            "modbus_pdu_missing_field",
+        ),
+        (
+            &[0x96, 8],
+            Role::Response,
+            Status::Rejected,
+            "modbus_exception_role_or_code",
+        ),
+    ] {
+        let raw = adu(bytes);
+        let report = modbus::decode(&raw, role, Limits::default()).unwrap();
+        assert_eq!(report.status(), status);
+        assert_eq!(report.issues()[0].code, issue);
+    }
+    for bytes in [[0x94, 8], [0x95, 8], [0x83, 8]] {
+        assert_eq!(
+            modbus::decode(&adu(&bytes), Role::Response, Limits::default())
+                .unwrap()
+                .status(),
+            Status::DecodedSubset
+        );
+    }
+    for category in 1..=3 {
+        for (more, next, ids, expected) in [
+            (0, 0, &[0][..], Status::Rejected),
+            (0, 0, &[0, 2], Status::Rejected),
+            (255, 2, &[0], Status::Rejected),
+            (255, 1, &[0], Status::DecodedSubset),
+            (0, 0, &[2], Status::DecodedSubset),
+        ] {
+            let mut pdu = vec![43, 14, category, 3, more, next, ids.len() as u8];
+            for &id in ids {
+                pdu.extend([id, 1, b'A']);
+            }
+            assert_eq!(
+                modbus::decode(&adu(&pdu), Role::Response, Limits::default())
+                    .unwrap()
+                    .status(),
+                expected
+            );
+        }
+    }
+    let token = |mask, role| {
+        pcap_evidence::modbus::correlation_token(&[22, 0, 1, 0, mask, 0, 0], role).unwrap()
+    };
+    assert_eq!(
+        pcap_evidence::modbus::mismatch_fields(&token(8, Role::Request), &token(7, Role::Response))
+            .unwrap()
+            .encode(),
+        r#"["and_mask"]"#
+    );
+}
+
+#[test]
+fn modbus_file_read_limits_and_a_malformed_second_record() {
+    for (words, status) in [(121, Status::DecodedSubset), (122, Status::Rejected)] {
+        let mut response = vec![20, 2 + 2 * words, 1 + 2 * words, 6];
+        response.resize(4 + 2 * usize::from(words), 9);
+        for (bytes, role) in [
+            (&[20, 7, 6, 0, 1, 0, 0, 0, words][..], Role::Request),
+            (response.as_slice(), Role::Response),
+        ] {
+            assert_eq!(
+                modbus::decode(&adu(bytes), role, Limits::default())
+                    .unwrap()
+                    .status(),
+                status
+            );
+        }
+    }
+    for declared in [4, 5, 8, 9] {
+        let wire = adu(&[20, declared, 3, 6, 0x12, 0x34, 3, 7, 0x56, 0x78]);
+        let report = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+        assert_eq!(report.status(), Status::Rejected);
+        assert_eq!(report.consumed(), 13);
+        assert_eq!(values(&report, "register_u16"), [&Value::Unsigned(0x1234)]);
+        assert!(!root_message(&wire, Role::Response).shape_valid);
+    }
+    let clipped = adu(&[20, 3, 3, 6, 0x12, 0x34]);
+    let report = modbus::decode(&clipped, Role::Response, Limits::default()).unwrap();
+    assert_eq!(report.status(), Status::Rejected);
+    assert!(values(&report, "register_u16").is_empty());
+}
+
+#[test]
+fn device_pages_keep_valid_objects_before_a_rejected_suffix() {
+    let wire = adu(&[43, 14, 1, 1, 0, 0, 2, 0, 1, b'A', 2, 1, b'B']);
+    let r = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+    assert_eq!(r.status(), Status::Rejected);
+    assert_eq!(values(&r, "object_id"), [&Value::Unsigned(0)]);
+    let req = root_message(&adu(&[43, 14, 2, 3]), Role::Request);
+    let rsp = root_message(
+        &adu(&[43, 14, 2, 2, 255, 3, 3, 0, 1, b'A', 1, 1, b'B', 2, 1, b'C']),
+        Role::Response,
+    );
+    assert!(req.shape_valid && rsp.shape_valid);
+    assert!(!pcap_evidence::modbus::response_matches(&req, &rsp));
+}
+
+#[test]
+fn unresolved_role_tail_witnesses_share_the_span_limit() {
+    use pcap_evidence::json::Json;
+    fn spans(json: &Json) -> usize {
+        match json {
+            Json::Object(fields) => fields
+                .iter()
+                .map(|(key, value)| match (key, value) {
+                    (&"spans", Json::Array(items)) => items.len(),
+                    _ => spans(value),
+                })
+                .sum(),
+            Json::Array(items) => items.iter().map(spans).sum(),
+            _ => 0,
+        }
+    }
+    let adu = ev(&[0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1]);
+    for limit in 1..=16 {
+        let output = modbus::alternatives_json(
+            &adu,
+            Role::Unknown,
+            Limits {
+                max_source_spans: limit,
+                ..Limits::default()
+            },
+        );
+        assert!(spans(&output) <= limit, "span budget {limit}: {output:?}");
+        if limit == 13 {
+            assert_eq!(spans(&output), 13);
+            assert!(output.encode().contains("semantic_tail_spans"));
+        }
+        if limit == 16 {
+            assert_eq!(spans(&output), 16);
+            assert_eq!(output.encode().matches("decoded_subset").count(), 2);
+        }
+    }
+}
+
+#[test]
+fn complete_malformed_modbus_records_preserve_their_witnessed_prefix() {
+    for (pdu, consumed, field) in [
+        (&[20, 5, 3, 6, 0x12, 0x34, 3][..], 13, "register_u16"),
+        (
+            &[43, 14, 1, 1, 0, 0, 3, 0, 1, 65, 1][..],
+            17,
+            "object_value_octet_count",
+        ),
+    ] {
+        let wire = adu(pdu);
+        let report = modbus::decode(&wire, Role::Response, Limits::default()).unwrap();
+        assert_eq!(report.status(), Status::Rejected);
+        assert_eq!(report.consumed(), consumed);
+        assert_eq!(values(&report, field).len(), 1);
+        let short = wire.slice(0..wire.len() - 1).unwrap();
+        let incomplete = modbus::decode(&short, Role::Response, Limits::default()).unwrap();
+        assert_eq!(incomplete.status(), Status::Incomplete);
+        assert_eq!(incomplete.consumed(), 0);
     }
 }

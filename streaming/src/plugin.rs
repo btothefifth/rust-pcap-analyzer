@@ -107,6 +107,8 @@ pub struct Output<'a> {
     pub dnp3_confirmations: &'a mut Vec<Dnp3StreamingConfirmationRecord>,
     pub remaining: &'a mut usize,
     pub max_message_bytes: usize,
+    native: &'a Limits,
+    modbus_queue: Option<&'a mut Vec<PendingModbus>>,
     sink_failed: bool,
 }
 
@@ -118,6 +120,12 @@ pub struct RegistryOutput<'a> {
     pub records: &'a mut Vec<MessageRecord>,
     pub dnp3_confirmations: &'a mut Vec<Dnp3StreamingConfirmationRecord>,
     pub remaining: &'a mut usize,
+}
+
+struct PendingModbus {
+    raw: EvidenceBytes,
+    offset: i64,
+    boundary: bool,
 }
 
 struct BufferedSink {
@@ -232,6 +240,24 @@ impl Output<'_> {
         hint: Option<CorrelationHint>,
         complete: bool,
     ) -> Result<u64> {
+        let status = if complete {
+            EvidenceStatus::Candidate
+        } else {
+            EvidenceStatus::Incomplete
+        };
+        self.emit_message(protocol, bytes, range, data, hint, status)
+    }
+
+    fn emit_message(
+        &mut self,
+        protocol: &'static str,
+        bytes: &EvidenceBytes,
+        range: Option<(i64, i64)>,
+        data: Json,
+        hint: Option<CorrelationHint>,
+        status: EvidenceStatus,
+    ) -> Result<u64> {
+        let complete = status == EvidenceStatus::Candidate;
         if *self.remaining == 0 {
             return Err(Error::limit("plugin_events"));
         }
@@ -241,10 +267,8 @@ impl Output<'_> {
         *self.remaining -= 1;
         let status = if self.context.ambiguous {
             EvidenceStatus::Ambiguous
-        } else if !complete {
-            EvidenceStatus::Incomplete
         } else {
-            EvidenceStatus::Candidate
+            status
         };
         let mut e = Event::new(EventKind::Message, status, data);
         e.session = Some(self.context.session);
@@ -287,6 +311,31 @@ impl Output<'_> {
         }
         *self.remaining -= 1;
         let code: String = code.into();
+        let prefix = (protocol == "modbus").then(|| {
+            if matches!(
+                code.as_str(),
+                "incomplete_application_at_gap_or_window_end"
+                    | "modbus_application_bytes"
+                    | "modbus_protocol_messages"
+            ) {
+                let role = if self
+                    .context
+                    .modbus_ports
+                    .contains(&self.context.source.port)
+                    && !self
+                        .context
+                        .modbus_ports
+                        .contains(&self.context.destination.port)
+                {
+                    modbus::Role::Response
+                } else {
+                    modbus::Role::Unknown
+                };
+                modbus::observation_prefix(bytes.data(), role)
+            } else {
+                String::new()
+            }
+        });
         let mut e = Event::new(
             EventKind::ProtocolIssue,
             EvidenceStatus::Incomplete,
@@ -297,7 +346,25 @@ impl Output<'_> {
         e.protocol = Some(protocol.into());
         e.evidence = Evidence::bytes(bytes);
         match self.sink.emit(&e) {
-            Ok(_) => Ok(()),
+            Ok(event) => {
+                if let Some(key) = prefix {
+                    self.records.push(MessageRecord {
+                        event,
+                        session: self.context.session,
+                        direction: self.context.direction,
+                        protocol,
+                        hint: CorrelationHint {
+                            key,
+                            role: Role::Unknown,
+                            compatibility: String::new(),
+                        },
+                        complete: false,
+                        ambiguous: self.context.ambiguous,
+                        boundary_verified: false,
+                    });
+                }
+                Ok(())
+            }
             Err(error) => {
                 self.sink_failed = true;
                 Err(error)
@@ -348,7 +415,17 @@ impl TransactionCorrelator for IdentifierCorrelator {
         }
         let mut groups: BTreeMap<(u64, &'static str, String), Vec<&MessageRecord>> =
             BTreeMap::new();
+        let mut incomplete: BTreeMap<u64, modbus::CompetingEvidence<u64>> = BTreeMap::new();
+        let mut reference_budget = max_checks - records.len();
         for r in records {
+            if r.protocol == "modbus"
+                && (!r.complete || r.hint.role == Role::Unknown || r.ambiguous)
+            {
+                incomplete
+                    .entry(r.session)
+                    .or_default()
+                    .record(r.hint.key.clone(), r.event);
+            }
             if r.complete && !r.ambiguous && r.hint.role != Role::Unknown {
                 groups
                     .entry((r.session, r.protocol, r.hint.key.clone()))
@@ -377,7 +454,22 @@ impl TransactionCorrelator for IdentifierCorrelator {
                         || rsp[0].hint.compatibility.is_empty()
                         || req[0].hint.compatibility == rsp[0].hint.compatibility
                 };
-            let (status, reason) = if req.is_empty() {
+            let witnesses = match incomplete.get(&session).filter(|_| protocol == "modbus") {
+                Some(evidence) => evidence.witnesses(
+                    &key,
+                    rsp.iter().any(|r| r.hint.compatibility == "modbus-pdu-v2:"),
+                    &mut reference_budget,
+                )?,
+                None => Vec::new(),
+            };
+            let (status, reason) = if !witnesses.is_empty() {
+                (EvidenceStatus::Ambiguous, "competing_modbus_observation")
+            } else if protocol == "modbus" && (req.len() > 1 || rsp.len() > 1) {
+                (
+                    EvidenceStatus::Ambiguous,
+                    "identifier_reuse_or_direction_conflict",
+                )
+            } else if req.is_empty() {
                 (EvidenceStatus::Incomplete, "orphan_response")
             } else if rsp.is_empty() {
                 (EvidenceStatus::Incomplete, "unanswered_in_window")
@@ -413,9 +505,35 @@ impl TransactionCorrelator for IdentifierCorrelator {
                     ("scope", "bounded_analysis_window".into()),
                 ]),
             );
+            if protocol == "modbus" && status == EvidenceStatus::Candidate {
+                let boundary = if reason == "candidate_unverified_boundary" {
+                    reason
+                } else {
+                    "candidate_pair"
+                };
+                if let Some(mapping) = modbus::pair_projection(
+                    &req[0].hint.compatibility,
+                    &rsp[0].hint.compatibility,
+                    boundary,
+                    req[0].event.to_string().into(),
+                    rsp[0].event.to_string().into(),
+                ) {
+                    if let Json::Object(fields) = &mut e.data {
+                        fields.push(("read_mapping", mapping));
+                    }
+                }
+            }
+            if protocol == "modbus" && reason == "inconsistent_response" {
+                if let (Some(names), Json::Object(fields)) = (
+                    modbus::mismatch_fields(&req[0].hint.compatibility, &rsp[0].hint.compatibility),
+                    &mut e.data,
+                ) {
+                    fields.push(("disagreeing_fields", names));
+                }
+            }
             e.session = Some(session);
             e.protocol = Some(protocol.into());
-            e.related_events = group.iter().map(|r| r.event).collect();
+            e.related_events = group.iter().map(|r| r.event).chain(witnesses).collect();
             sink.emit(&e)?;
         }
         Ok(())
@@ -822,6 +940,7 @@ impl Registry {
     ) -> Result<()> {
         struct BufferedAnalysis {
             sink: BufferedSink,
+            context: Context,
             records: Vec<MessageRecord>,
             confirmations: Vec<Dnp3StreamingConfirmationRecord>,
             fallback_frame: u64,
@@ -837,6 +956,10 @@ impl Registry {
         }
 
         let run_id = output.sink.run_id().to_owned();
+        // A frame consumes at least one plugin event. Only defer decoding if
+        // the native allowance can actually exclude a frame in this window.
+        let schedule_modbus = c.base.limits.max_protocol_messages < *output.remaining;
+        let mut pending = Vec::new();
         let mut analyses = Vec::new();
         let mut buffered_bytes = 0usize;
         for (ctx, stream) in inputs {
@@ -853,7 +976,9 @@ impl Registry {
                     .packets()
                     .into_iter()
                     .max_by_key(|packet| (packet.frame, packet.record_offset));
+                let mut frames = Vec::new();
                 let mut analysis = BufferedAnalysis {
+                    context,
                     sink: BufferedSink {
                         run_id: run_id.clone(),
                         events: Vec::new(),
@@ -876,12 +1001,14 @@ impl Registry {
                         continue;
                     };
                     let mut out = Output {
-                        context: &context,
+                        context: &analysis.context,
                         sink: &mut analysis.sink,
                         records: &mut analysis.records,
                         dnp3_confirmations: &mut analysis.confirmations,
                         remaining: output.remaining,
                         max_message_bytes: c.max_plugin_bytes,
+                        native: &c.base.limits,
+                        modbus_queue: schedule_modbus.then_some(&mut frames),
                         sink_failed: false,
                     };
                     let result = analyzer
@@ -889,7 +1016,7 @@ impl Registry {
                             &StreamInput {
                                 offset: chunk.offset,
                                 bytes: &chunk.bytes,
-                                boundary_verified: context.boundary_verified,
+                                boundary_verified: ctx.boundary_verified,
                             },
                             &mut out,
                         )
@@ -904,7 +1031,8 @@ impl Registry {
                         return Err(Error::limit("plugin_retained_bytes"));
                     }
                 }
-                if !analysis.sink.events.is_empty() {
+                if !frames.is_empty() || !analysis.sink.events.is_empty() {
+                    pending.extend(frames.into_iter().map(|frame| (analyses.len(), frame)));
                     buffered_bytes = buffered_bytes
                         .checked_add(analysis.sink.retained_bytes)
                         .filter(|bytes| *bytes <= c.max_event_bytes)
@@ -912,6 +1040,47 @@ impl Registry {
                     analyses.push(analysis);
                 }
             }
+        }
+
+        pending.sort_by_cached_key(|(index, frame)| {
+            let completion = frame
+                .raw
+                .spans()
+                .iter()
+                .map(|s| (s.packet.frame, s.packet.record_offset))
+                .max();
+            (
+                completion,
+                frame.offset,
+                analyses[*index].context.direction,
+                *index,
+            )
+        });
+        let native_limit = c.base.limits.max_protocol_messages;
+        let limits = AnalyzerLimits::from_config(c);
+        for (ordinal, (index, frame)) in pending.into_iter().enumerate() {
+            let analysis = &mut analyses[index];
+            let previous = analysis.sink.retained_bytes;
+            analysis.sink.byte_limit = previous + (c.max_event_bytes - buffered_bytes);
+            // The framer reserved this event when it retained the ADU.
+            let mut reserved = 1;
+            let mut out = Output {
+                context: &analysis.context,
+                sink: &mut analysis.sink,
+                records: &mut analysis.records,
+                dnp3_confirmations: &mut analysis.confirmations,
+                remaining: &mut reserved,
+                max_message_bytes: c.max_plugin_bytes,
+                native: &c.base.limits,
+                modbus_queue: None,
+                sink_failed: false,
+            };
+            if ordinal < native_limit {
+                emit_modbus(&frame.raw, frame.offset, frame.boundary, &mut out, &limits)?;
+            } else {
+                out.issue("modbus", "modbus_protocol_messages", &frame.raw)?;
+            }
+            buffered_bytes += analysis.sink.retained_bytes - previous;
         }
 
         let mut scheduled = Vec::new();
@@ -1004,6 +1173,8 @@ impl Registry {
                 dnp3_confirmations: output.dnp3_confirmations,
                 remaining: output.remaining,
                 max_message_bytes: c.max_plugin_bytes,
+                native: &c.base.limits,
+                modbus_queue: None,
                 sink_failed: false,
             };
             if let Err(e) = analyzer.analyze(&DatagramInput { bytes }, &mut out) {
@@ -1377,7 +1548,23 @@ impl Framer {
             let range = Some((at, at + raw.len() as i64));
             match self.kind {
                 Kind::Dns => emit_dns(&raw, range, out)?,
-                Kind::Modbus => emit_modbus(&raw, at, self.boundary, out, &self.limits)?,
+                Kind::Modbus => {
+                    if raw.len() > out.native.max_application_bytes {
+                        out.issue("modbus", "modbus_application_bytes", &raw)?;
+                    } else if let Some(queue) = &mut out.modbus_queue {
+                        *out.remaining = out
+                            .remaining
+                            .checked_sub(1)
+                            .ok_or_else(|| Error::limit("plugin_events"))?;
+                        queue.push(PendingModbus {
+                            raw,
+                            offset: at,
+                            boundary: self.boundary,
+                        });
+                    } else {
+                        emit_modbus(&raw, at, self.boundary, out, &self.limits)?;
+                    }
+                }
                 Kind::Smb => {
                     out.message(
                         "smb2",
@@ -1549,18 +1736,16 @@ fn emit_modbus(
     out: &mut Output<'_>,
     l: &AnalyzerLimits,
 ) -> Result<()> {
-    let stream = one_stream(raw, at, boundary);
-    let limits = native_limits(l);
-    let request = modbus::decode(&stream, modbus::Role::Request, &limits)?;
-    let response = modbus::decode(&stream, modbus::Role::Response, &limits)?;
-    let a = request
-        .messages
-        .first()
-        .ok_or_else(|| malformed("modbus", "no framed request interpretation"))?;
-    let b = response
-        .messages
-        .first()
-        .ok_or_else(|| malformed("modbus", "no framed response interpretation"))?;
+    let mut native = out.native.clone();
+    native.max_application_bytes = native.max_application_bytes.min(l.max_buffer_bytes);
+    native.max_protocol_messages = native.max_protocol_messages.min(l.max_messages);
+    let parsed = pcap_evidence::semantics::modbus::FramedAdu::new(raw)?;
+    let (request_valid, response_valid) = parsed.shapes();
+    let supported = parsed.supported();
+    let bytes = raw.data();
+    let transaction = protocols::be16(bytes, 0);
+    let unit = bytes[6];
+    let function = bytes[7];
     let source_server = out.context.modbus_ports.contains(&out.context.source.port);
     let destination_server = out
         .context
@@ -1574,84 +1759,68 @@ fn emit_modbus(
             Role::Request
         }
     } else {
-        match (a.shape_valid, b.shape_valid) {
+        match (request_valid, response_valid) {
             (true, false) => Role::Request,
             (false, true) => Role::Response,
             _ => Role::Unknown,
         }
     };
-    let chosen = if role == Role::Response { b } else { a };
     let valid = match role {
-        Role::Request => a.shape_valid,
-        Role::Response => b.shape_valid,
-        Role::Unknown => a.shape_valid || b.shape_valid,
+        Role::Request => request_valid,
+        Role::Response => response_valid,
+        Role::Unknown => request_valid || response_valid,
     };
-    let bytes = raw.data();
-    let compatibility = match (chosen.function & 0x7f, role) {
-        (1 | 2, Role::Request) if bytes.len() == 12 => {
-            format!("modbus-bits-v1:quantity:{}", protocols::be16(bytes, 10))
-        }
-        (3 | 4, Role::Request) if bytes.len() == 12 => {
-            format!("count:{}", 2 * usize::from(protocols::be16(bytes, 10)))
-        }
-        (1 | 2, Role::Response) if bytes.len() >= 10 && chosen.function & 0x80 == 0 => {
-            format!(
-                "modbus-bits-v1:response:{}:{}",
-                bytes[8],
-                bytes[bytes.len() - 1]
-            )
-        }
-        (3 | 4, Role::Response) if bytes.len() >= 9 && chosen.function & 0x80 == 0 => {
-            format!("count:{}", bytes[8])
-        }
-        (5 | 6 | 15 | 16, _) if bytes.len() >= 12 && chosen.function & 0x80 == 0 => {
-            format!("echo:{}", pcap_evidence::sha256::hex(&bytes[8..12]))
-        }
-        _ => String::new(),
+    let decoded_role = match role {
+        Role::Request => modbus::Role::Request,
+        Role::Response => modbus::Role::Response,
+        Role::Unknown => modbus::Role::Unknown,
     };
-    let hint = if valid && chosen.semantics_supported && role != Role::Unknown {
+    let hint = if valid && supported && role != Role::Unknown {
         Some(CorrelationHint {
-            key: format!(
-                "{}:{}:{}",
-                chosen.transaction,
-                chosen.unit,
-                chosen.function & 0x7f
-            ),
+            key: format!("{}:{}:{}", transaction, unit, function & 0x7f),
             role,
-            compatibility,
+            compatibility: parsed
+                .token(decoded_role)
+                .ok_or_else(|| malformed("modbus", "missing compatibility summary"))?,
         })
     } else {
-        None
+        Some(CorrelationHint {
+            key: modbus::observation_prefix(raw.data(), decoded_role),
+            role: Role::Unknown,
+            compatibility: String::new(),
+        })
     };
-    out.message(
+    let status = if valid {
+        EvidenceStatus::Candidate
+    } else if supported && matches!(function & 0x7f, 20..=24 | 43) {
+        EvidenceStatus::Rejected
+    } else {
+        EvidenceStatus::Incomplete
+    };
+    out.emit_message(
         "modbus",
         raw,
         Some((at, at + raw.len() as i64)),
         Json::object([
-            ("transaction_id", chosen.transaction.into()),
-            ("unit", chosen.unit.into()),
-            ("function", chosen.function.into()),
+            ("transaction_id", transaction.into()),
+            ("unit", unit.into()),
+            ("function", function.into()),
             ("role", format!("{role:?}").to_ascii_lowercase().into()),
             ("role_from_configuration", configured.into()),
-            ("request_shape_valid", a.shape_valid.into()),
-            ("response_shape_valid", b.shape_valid.into()),
-            ("semantics_supported", chosen.semantics_supported.into()),
+            ("request_shape_valid", request_valid.into()),
+            ("response_shape_valid", response_valid.into()),
+            ("semantics_supported", supported.into()),
             ("boundary_verified", boundary.into()),
             (
                 "semantic_subset",
-                pcap_evidence::semantics::modbus::alternatives_json(
-                    raw,
-                    match role {
-                        Role::Request => modbus::Role::Request,
-                        Role::Response => modbus::Role::Response,
-                        Role::Unknown => modbus::Role::Unknown,
-                    },
-                    pcap_evidence::semantics::Limits::from_capture(&native_limits(l)),
+                parsed.fields(
+                    decoded_role,
+                    pcap_evidence::semantics::Limits::from_capture(&native),
                 ),
             ),
         ]),
         hint,
-        valid,
+        status,
     )?;
     Ok(())
 }

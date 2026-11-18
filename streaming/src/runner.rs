@@ -15,7 +15,7 @@ use pcap_evidence::{
     protocol::ProbeTransport,
     provenance::{EvidenceBytes, PacketId},
     sha256::{self, Sha256},
-    tcp::{Assignment, FlowResult, TcpTracker},
+    tcp::{Assignment, FlowResult, HeaderDisposition, TcpTracker},
     wire::{self, Checksum, ChecksumPolicy, Endpoint, Scope, Transport},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,19 +148,110 @@ struct Active {
     tracker: Option<TcpTracker>,
     flow_ids: BTreeMap<usize, u64>,
     udp_id: Option<u64>,
-    payload: usize,
     packet_refs: usize,
+    // Pending fragments consume packet slots but cannot renew an idle window.
     last_frame: u64,
     last_ns: Option<i128>,
     messages: Vec<MessageRecord>,
     dnp3_confirmations: Vec<Dnp3StreamingConfirmationRecord>,
     remaining: usize,
 }
+impl Active {
+    fn payload(&self) -> usize {
+        self.tracker
+            .as_ref()
+            .map_or(0, TcpTracker::retained_payload_bytes)
+    }
+}
+enum PrefixVerdict {
+    Pending(network::PrefixHeader),
+    Rejected(network::PrefixHeader),
+    Unidentified,
+}
+fn prefix_tracker<'a>(
+    active: &'a mut BTreeMap<Key, Active>,
+    scope: &Scope,
+    path: &[String],
+    header: wire::TcpHeader,
+) -> Option<&'a mut TcpTracker> {
+    let (key, _) = Key::new(
+        scope.clone(),
+        path.to_vec(),
+        6,
+        header.source,
+        header.destination,
+    );
+    active.get_mut(&key)?.tracker.as_mut()
+}
+
+impl PrefixVerdict {
+    fn invalidate(&self, active: &mut BTreeMap<Key, Active>, packets: &[PacketId]) {
+        let Some((header, disposition)) = self.observation() else {
+            return;
+        };
+        let (scope, path, segment, _) = &header.path;
+        if disposition == HeaderDisposition::RejectedPrefix || segment.payload_len == Some(0) {
+            if let Some(tracker) = prefix_tracker(active, scope, path, *segment) {
+                tracker.invalidate_reassembly_extent(scope, *segment, packets);
+            }
+        }
+    }
+
+    fn inspect(
+        datagram: &wire::Datagram,
+        path: &[String],
+        max_depth: usize,
+        purpose: network::HeaderUse,
+    ) -> (Option<usize>, Self) {
+        let mut next = None;
+        match network::inspect_scheduled_tcp_path(
+            datagram,
+            path.to_vec(),
+            max_depth,
+            purpose,
+            &mut next,
+        ) {
+            Ok(Some(header)) => return (next, Self::Pending(header)),
+            Err(e) if e.code == pcap_evidence::ErrorCode::Truncated => {
+                return (Some(datagram.payload.len() + 1), Self::Unidentified)
+            }
+            _ => {}
+        }
+        // Recheck structural bounds before retaining an identity rejected by
+        // checksum policy. A permissive walk is only for retiring existing evidence.
+        match network::agreed_tcp_header(datagram, path.to_vec(), max_depth) {
+            Ok(Some(header)) => (None, Self::Rejected(header)),
+            Err(e) if e.code == pcap_evidence::ErrorCode::Truncated => {
+                (Some(datagram.payload.len() + 1), Self::Unidentified)
+            }
+            _ => (None, Self::Unidentified),
+        }
+    }
+
+    fn observation(&self) -> Option<(&network::PrefixHeader, HeaderDisposition)> {
+        match self {
+            Self::Pending(h) => Some((h, HeaderDisposition::AwaitingReassembly)),
+            Self::Rejected(h) => Some((h, HeaderDisposition::RejectedPrefix)),
+            Self::Unidentified => None,
+        }
+    }
+}
 struct FragSlot {
-    reassembler: FragmentReassembler,
+    reassembler: FragmentReassembler<PrefixVerdict>,
     last_frame: u64,
 }
+#[derive(Clone, Copy)]
+enum WindowInput<'a> {
+    Tcp(&'a wire::TcpSegment),
+    Udp,
+    Header(wire::TcpHeader, HeaderDisposition),
+}
+enum LayerReassembly {
+    Complete(wire::Datagram, Vec<PacketId>),
+    Incomplete { quarantined: bool, retained: bool },
+}
 struct LayerContext<'a> {
+    ancestors: &'a [PacketId],
     path: Vec<String>,
     depth: usize,
     frame: u64,
@@ -181,7 +272,28 @@ struct State<'a> {
     next_window: u64,
     summary: Summary,
 }
-impl State<'_> {
+impl<'a> State<'a> {
+    fn new(
+        c: &'a StreamConfig,
+        registry: &'a Registry,
+        sink: &'a mut dyn EventSink,
+        namespace: [u8; 32],
+    ) -> Self {
+        Self {
+            c,
+            registry,
+            sink,
+            namespace,
+            active: BTreeMap::new(),
+            order: BTreeSet::new(),
+            fragments: BTreeMap::new(),
+            retained: 0,
+            next_session: 0,
+            next_window: 0,
+            summary: Summary::default(),
+        }
+    }
+
     fn session(&mut self) -> Result<u64> {
         self.next_session = self
             .next_session
@@ -189,7 +301,7 @@ impl State<'_> {
             .ok_or_else(|| Error::limit("session_id"))?;
         Ok(self.next_session)
     }
-    fn create(&mut self, key: Key, frame: u64, time: Option<i128>) -> Result<Active> {
+    fn create(&mut self, key: Key, frame: u64) -> Result<Active> {
         self.next_window = self
             .next_window
             .checked_add(1)
@@ -214,10 +326,9 @@ impl State<'_> {
             tracker,
             flow_ids: BTreeMap::new(),
             udp_id,
-            payload: 0,
             packet_refs: 0,
             last_frame: frame,
-            last_ns: time,
+            last_ns: None,
             messages: Vec::new(),
             dnp3_confirmations: Vec::new(),
             remaining: self.c.max_plugin_events,
@@ -246,13 +357,13 @@ impl State<'_> {
     fn take(&mut self, key: &Key) -> Option<Active> {
         let a = self.active.remove(key)?;
         self.order.remove(&(a.last_frame, key.clone()));
-        self.retained -= a.payload;
+        self.retained -= a.payload();
         Some(a)
     }
     fn put(&mut self, a: Active) -> Result<()> {
         self.retained = self
             .retained
-            .checked_add(a.payload)
+            .checked_add(a.payload())
             .ok_or_else(|| Error::limit("active_payload"))?;
         if self.retained > self.c.max_active_payload || self.active.len() >= self.c.max_active_keys
         {
@@ -288,7 +399,7 @@ impl State<'_> {
         }
         Ok(())
     }
-    fn expire(&mut self, frame: u64) -> Result<()> {
+    fn expire_windows(&mut self, frame: u64) -> Result<()> {
         loop {
             let expired = self
                 .order
@@ -299,6 +410,9 @@ impl State<'_> {
             }
             self.evict_oldest("idle_frame_boundary")?;
         }
+        Ok(())
+    }
+    fn expire_fragments(&mut self, frame: u64) -> Result<()> {
         let keys: Vec<_> = self.fragments.keys().cloned().collect();
         for key in keys {
             let notices = self
@@ -306,12 +420,23 @@ impl State<'_> {
                 .get_mut(&key)
                 .ok_or_else(|| Error::limit("fragment_context"))?
                 .reassembler
-                .expire(frame);
-            for n in notices {
-                self.fragment_notice(n)?;
+                .expire_with(frame, |n, v| (n, v));
+            for (n, v) in notices {
+                self.retire_fragment(n, v)?;
             }
         }
         Ok(())
+    }
+    fn retire_fragment(
+        &mut self,
+        notice: FragmentNotice,
+        verdict: Option<PrefixVerdict>,
+    ) -> Result<()> {
+        if let Some(PrefixVerdict::Rejected(header)) = verdict {
+            let (scope, path, segment, _) = header.path;
+            self.resolve_header(scope, path, segment, &notice.packets);
+        }
+        self.fragment_notice(notice)
     }
     fn fragment_notice(&mut self, n: FragmentNotice) -> Result<()> {
         let mut e = Event::new(
@@ -344,7 +469,10 @@ impl State<'_> {
         d: wire::Datagram,
         path: &[String],
         frame: u64,
-    ) -> Result<Option<(wire::Datagram, Vec<PacketId>)>> {
+        ancestors: &[PacketId],
+        inspect: &mut pcap_evidence::fragment::CachedPrefixObserver<'_, PrefixVerdict>,
+        mut inspect_disputed: impl FnMut(&wire::Datagram) -> Option<usize>,
+    ) -> Result<LayerReassembly> {
         if !self.fragments.contains_key(path) {
             if self.fragments.len() >= self.c.max_tunnel_contexts {
                 let oldest = self
@@ -357,8 +485,8 @@ impl State<'_> {
                     .fragments
                     .remove(&oldest)
                     .ok_or_else(|| Error::limit("fragment_context"))?;
-                for n in slot.reassembler.finish() {
-                    self.fragment_notice(n)?;
+                for (n, v) in slot.reassembler.finish_with(|n, v| (n, v)) {
+                    self.retire_fragment(n, v)?;
                 }
                 self.diagnostic(
                     "fragment_context_evicted",
@@ -369,26 +497,45 @@ impl State<'_> {
             self.fragments.insert(
                 path.to_vec(),
                 FragSlot {
-                    reassembler: FragmentReassembler::new(self.c.fragment_limits()),
+                    reassembler: FragmentReassembler::with_prefix_cache(self.c.fragment_limits()),
                     last_frame: frame,
                 },
             );
         }
         let contributors = d.payload.packets();
+        let mut quarantined = false;
         let result = {
             let slot = self
                 .fragments
                 .get_mut(path)
                 .ok_or_else(|| Error::limit("fragment_context"))?;
             slot.last_frame = frame;
-            slot.reassembler.push(d, frame)
+            slot.reassembler.push_with_invalidation(
+                d,
+                frame,
+                ancestors,
+                Some(inspect),
+                |agreed, previous, packets| {
+                    quarantined = true;
+                    if let Some(verdict) = previous {
+                        verdict.invalidate(&mut self.active, packets);
+                    }
+                    agreed.and_then(&mut inspect_disputed)
+                },
+            )
         };
         match result {
-            Ok(FragmentOutcome::Pending) => Ok(None),
-            Ok(FragmentOutcome::Complete(d, ids)) => Ok(Some((d, ids))),
+            Ok(FragmentOutcome::Pending) => Ok(LayerReassembly::Incomplete {
+                quarantined,
+                retained: true,
+            }),
+            Ok(FragmentOutcome::Complete(d, ids)) => Ok(LayerReassembly::Complete(d, ids)),
             Ok(FragmentOutcome::Rejected(n)) => {
                 self.fragment_notice(n)?;
-                Ok(None)
+                Ok(LayerReassembly::Incomplete {
+                    quarantined,
+                    retained: false,
+                })
             }
             Err(error) => {
                 // Never silently discard a contradictory fragment and continue
@@ -397,15 +544,18 @@ impl State<'_> {
                     .fragments
                     .remove(path)
                     .ok_or_else(|| Error::limit("fragment_context"))?;
-                for n in slot.reassembler.finish() {
-                    self.fragment_notice(n)?;
+                for (n, v) in slot.reassembler.finish_with(|n, v| (n, v)) {
+                    self.retire_fragment(n, v)?;
                 }
                 self.diagnostic(
                     format!("fragment_context_reset:{error}"),
                     contributors,
                     EvidenceStatus::Incomplete,
                 )?;
-                Ok(None)
+                Ok(LayerReassembly::Incomplete {
+                    quarantined,
+                    retained: false,
+                })
             }
         }
     }
@@ -416,7 +566,7 @@ impl State<'_> {
         record_offset: u64,
         warnings: Vec<String>,
     ) -> Result<()> {
-        self.expire(meta.frame)?;
+        self.expire_fragments(meta.frame)?;
         let id = PacketId {
             capture: self.namespace,
             frame: meta.frame,
@@ -488,9 +638,25 @@ impl State<'_> {
             link_interface: None,
             vlans: vec![],
         };
-        let decoded = match network::decode(meta.link_type, &raw, scope) {
+        let decoded = match network::decode(meta.link_type, &raw, scope.clone()) {
             Ok(d) => d,
             Err(e) => {
+                if meta.captured_len < meta.original_len {
+                    if let Some(header) = network::snapped_tcp(
+                        meta.link_type,
+                        &raw,
+                        scope,
+                        self.c.max_tunnel_depth,
+                        self.c.base.checksum_policy,
+                    ) {
+                        self.observe_tcp_header(
+                            header,
+                            meta.frame,
+                            exact,
+                            HeaderDisposition::Omitted,
+                        )?;
+                    }
+                }
                 self.diagnostic(e.to_string(), vec![id], EvidenceStatus::Unsupported)?;
                 return Ok(());
             }
@@ -499,6 +665,7 @@ impl State<'_> {
             decoded,
             LayerContext {
                 path: vec![],
+                ancestors: &[],
                 depth: 0,
                 frame: meta.frame,
                 time: exact,
@@ -509,6 +676,7 @@ impl State<'_> {
     }
     fn layers(&mut self, decoded: Decoded, context: LayerContext<'_>) -> Result<()> {
         let LayerContext {
+            ancestors,
             mut path,
             depth,
             frame,
@@ -546,12 +714,115 @@ impl State<'_> {
                 EvidenceStatus::Incomplete,
             )?;
             if self.c.base.checksum_policy == ChecksumPolicy::RequireValid {
+                self.resolve_rejected_reassembly(&d, &path, depth, ancestors);
                 return Ok(());
             }
         }
         let fragmented = d.fragment.is_some();
-        let Some((datagram, mut contributors)) = self.reassemble(d, &path, frame)? else {
-            return Ok(());
+        let max_depth = self.c.max_tunnel_depth.saturating_sub(depth);
+        let policy = self.c.base.checksum_policy;
+        let purpose = network::HeaderUse::Pending(policy);
+        let slot = self.fragments.get(&path);
+        let previous = slot
+            .and_then(|s| s.reassembler.last_prefix_verdict(&d))
+            .and_then(PrefixVerdict::observation)
+            .map(|(h, disposition)| (h.clone(), disposition));
+        let was_rejected = previous
+            .as_ref()
+            .is_some_and(|(_, d)| *d == HeaderDisposition::RejectedPrefix);
+        let mut disposition = HeaderDisposition::AwaitingReassembly;
+        let mut header = d.fragment.as_ref().filter(|f| f.offset == 0).and_then(|_| {
+            let classified;
+            let verdict = match slot.and_then(|s| s.reassembler.cached_prefix(&d)) {
+                Some(cached) => cached,
+                None => {
+                    classified = PrefixVerdict::inspect(&d, &path, max_depth, purpose).1;
+                    &classified
+                }
+            };
+            let (h, current) = verdict.observation()?;
+            disposition = current;
+            Some(h.witness_for(&d))
+        });
+        let mut resolved = None;
+        let mut refine_packets = Vec::new();
+        let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
+            let complete =
+                prefix.fragment.is_none() && prefix.payload.len() == prefix.declared_payload_len;
+            let purpose = if complete {
+                network::HeaderUse::Loss(policy)
+            } else {
+                purpose
+            };
+            let (next, mut verdict) = PrefixVerdict::inspect(prefix, &path, max_depth, purpose);
+            if next.is_none() && matches!(verdict, PrefixVerdict::Unidentified) {
+                if let Some((earlier, _)) = &previous {
+                    verdict = PrefixVerdict::Rejected(earlier.clone());
+                }
+            }
+            let arriving = header.take().map(|h| h.3);
+            if let Some((candidate, current)) = verdict.observation() {
+                let (scope, path, segment, packet) = &candidate.path;
+                disposition = current;
+                if complete {
+                    // Complete prefixes reach this callback only on capacity refusal.
+                    resolved = Some((scope.clone(), path.clone(), *segment, contributors.to_vec()));
+                    if current != HeaderDisposition::RejectedPrefix {
+                        disposition = HeaderDisposition::Omitted;
+                        header = Some(candidate.path.clone());
+                    }
+                } else {
+                    if current == HeaderDisposition::RejectedPrefix
+                        || was_rejected
+                        || segment.payload_len == Some(0)
+                    {
+                        refine_packets.extend_from_slice(contributors);
+                    }
+                    header = Some((
+                        scope.clone(),
+                        path.clone(),
+                        *segment,
+                        arriving.unwrap_or(*packet),
+                    ));
+                }
+            }
+            (next, Some(verdict))
+        };
+        let mut agreed_header = None;
+        let reassembly = self.reassemble(d, &path, frame, ancestors, &mut inspect, |prefix| {
+            match network::agreed_tcp_header(prefix, path.clone(), max_depth) {
+                Ok(observation) => {
+                    agreed_header = observation.map(|h| h.path);
+                    None
+                }
+                Err(e) => (e.code == pcap_evidence::ErrorCode::Truncated)
+                    .then(|| prefix.payload.len() + 1),
+            }
+        })?;
+        let (datagram, mut contributors) = match reassembly {
+            LayerReassembly::Complete(d, ids) => (d, ids),
+            LayerReassembly::Incomplete {
+                quarantined,
+                retained,
+            } => {
+                if let Some((scope, path, segment, packets)) = resolved {
+                    self.resolve_header(scope, path, segment, &packets);
+                }
+                if let Some(mut header) = header.or(agreed_header) {
+                    // The header still identifies possible owners. The disputed
+                    // outer bytes cannot establish the inner payload length.
+                    if quarantined {
+                        header.2.payload_len = None;
+                        disposition = HeaderDisposition::AwaitingReassembly;
+                    } else if !retained && disposition == HeaderDisposition::RejectedPrefix {
+                        let (scope, path, segment, _) = header;
+                        self.resolve_header(scope, path, segment, &refine_packets);
+                        return Ok(());
+                    }
+                    self.apply_pending_header(header, disposition, &refine_packets, frame, time)?;
+                }
+                return Ok(());
+            }
         };
         if contributors.is_empty() {
             contributors.push(id);
@@ -593,6 +864,7 @@ impl State<'_> {
                     EvidenceStatus::Unsupported,
                 )?,
                 Err(e) => {
+                    self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
                     self.diagnostic(e.to_string(), contributors, EvidenceStatus::Rejected)?;
                     return Ok(());
                 }
@@ -626,6 +898,7 @@ impl State<'_> {
                     LayerContext {
                         path,
                         depth: depth + 1,
+                        ancestors: &contributors,
                         frame,
                         time,
                         raw: &datagram.payload,
@@ -634,6 +907,7 @@ impl State<'_> {
                 );
             }
             Err(e) => {
+                self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
                 self.diagnostic(
                     format!("tunnel_candidate_rejected:{e}"),
                     contributors.clone(),
@@ -705,11 +979,183 @@ impl State<'_> {
         let transport = match wire::decode_transport(&datagram, self.c.base.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
+                self.resolve_rejected_reassembly(&datagram, &path, depth, &contributors);
                 self.diagnostic(e.to_string(), contributors, EvidenceStatus::Unsupported)?;
                 return Ok(());
             }
         };
         self.transport(datagram.scope, path, transport, contributors, frame, time)
+    }
+    fn resolve_rejected_reassembly(
+        &mut self,
+        datagram: &wire::Datagram,
+        path: &[String],
+        depth: usize,
+        packets: &[PacketId],
+    ) {
+        if let Some((scope, path, header, _)) = network::tcp_prefix_path(
+            datagram,
+            path.to_vec(),
+            self.c.max_tunnel_depth.saturating_sub(depth),
+            network::HeaderUse::Resolve,
+        ) {
+            self.resolve_header(scope, path, header, packets);
+        }
+    }
+    fn resolve_header(
+        &mut self,
+        scope: Scope,
+        path: Vec<String>,
+        header: wire::TcpHeader,
+        packets: &[PacketId],
+    ) {
+        let (key, _) = Key::new(scope.clone(), path, 6, header.source, header.destination);
+        if let Some(active) = self.active.get_mut(&key) {
+            if let Some(tracker) = &mut active.tracker {
+                let released = tracker.resolve_reassembly(scope, header, packets);
+                if released > 0 {
+                    active.packet_refs -= released;
+                    if active.packet_refs == 0 {
+                        self.order.remove(&(active.last_frame, key.clone()));
+                        self.active.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+    fn apply_pending_header(
+        &mut self,
+        header: network::TcpPath,
+        disposition: HeaderDisposition,
+        contributors: &[PacketId],
+        frame: u64,
+        time: Option<i128>,
+    ) -> Result<()> {
+        if !contributors.is_empty() {
+            let (scope, path, segment, _) = &header;
+            if let Some(tracker) = prefix_tracker(&mut self.active, scope, path, *segment) {
+                tracker.set_reassembly_prefix_rejected(
+                    scope,
+                    *segment,
+                    contributors,
+                    disposition == HeaderDisposition::RejectedPrefix,
+                );
+            }
+        }
+        self.observe_tcp_header(header, frame, time, disposition)
+    }
+    fn observe_tcp_header(
+        &mut self,
+        (scope, path, segment, id): (Scope, Vec<String>, wire::TcpHeader, PacketId),
+        frame: u64,
+        time: Option<i128>,
+        disposition: HeaderDisposition,
+    ) -> Result<()> {
+        let (key, _) = Key::new(scope.clone(), path, 6, segment.source, segment.destination);
+        let mut active = self.admit_window(
+            &key,
+            frame,
+            time,
+            &[id],
+            WindowInput::Header(segment, disposition),
+        )?;
+        active
+            .tracker
+            .as_mut()
+            .ok_or_else(|| Error::limit("tcp_tracker"))?
+            .observe_header(scope, id, time, segment, disposition)?;
+        self.put(active)
+    }
+
+    fn admit_window(
+        &mut self,
+        key: &Key,
+        frame: u64,
+        time: Option<i128>,
+        packets: &[PacketId],
+        input: WindowInput<'_>,
+    ) -> Result<Active> {
+        self.expire_windows(frame)?;
+        let (bytes, header) = match input {
+            WindowInput::Header(h, _) => (0, Some(h)),
+            WindowInput::Tcp(s) => (s.payload.len(), Some(s.header())),
+            WindowInput::Udp => (0, None),
+        };
+        let mut a = match self.take(key) {
+            Some(a) => a,
+            None => {
+                self.room(bytes)?;
+                self.create(key.clone(), frame)?
+            }
+        };
+        let provisional = matches!(
+            input,
+            WindowInput::Header(
+                _,
+                HeaderDisposition::AwaitingReassembly | HeaderDisposition::RejectedPrefix
+            )
+        );
+        let idle = !provisional
+            && match (time, a.last_ns) {
+                (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
+                _ => false,
+            };
+        let already_charged = header.zip(a.tracker.as_ref()).map_or(0, |(h, tracker)| {
+            tracker.provisional_count(key.scope.clone(), h, packets)
+        });
+        let mut packet_refs = packets.len() - already_charged;
+        let mut projected = a.payload().saturating_add(bytes);
+        // Most arrivals fit without a second assignment check. At a byte limit,
+        // ask the tracker whether this segment actually increases retention.
+        if projected > self.c.window_payload
+            || self.retained.saturating_add(projected) > self.c.max_active_payload
+        {
+            if let (WindowInput::Tcp(segment), Some(tracker)) = (input, &a.tracker) {
+                projected = tracker.projected_payload_bytes(key.scope.clone(), time, segment)?;
+            }
+        }
+        if idle
+            || a.packet_refs
+                .checked_add(packet_refs)
+                .is_none_or(|n| n > self.c.window_packets)
+            || projected > self.c.window_payload
+        {
+            if !idle
+                && !matches!(
+                    input,
+                    WindowInput::Header(_, HeaderDisposition::RejectedPrefix)
+                )
+            {
+                if let (WindowInput::Header(header, _), Some(tracker)) = (input, &mut a.tracker) {
+                    tracker.observe_at_cut(key.scope.clone(), packets[0], time, header)?;
+                }
+            }
+            packet_refs = packets.len();
+            projected = bytes;
+            self.flush(
+                a,
+                if idle {
+                    "idle_time_boundary"
+                } else {
+                    "reconstruction_window_budget"
+                },
+            )?;
+            a = self.create(key.clone(), frame)?;
+        }
+        self.room(projected)?;
+        if !provisional && matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
+            self.diagnostic(
+                "capture_clock_reversal",
+                packets.to_vec(),
+                EvidenceStatus::Ambiguous,
+            )?;
+        }
+        if !provisional {
+            a.last_frame = frame;
+            a.last_ns = a.last_ns.max(time);
+        }
+        a.packet_refs += packet_refs;
+        Ok(a)
     }
     fn transport(
         &mut self,
@@ -737,7 +1183,24 @@ impl State<'_> {
                 EvidenceStatus::Unsupported,
             )?;
         }
+        if let Transport::Tcp(segment) = &transport {
+            if packets.len() > 1 {
+                // Retire provisional evidence before any idle or capacity cut.
+                // The complete segment now has the same admission as a whole packet.
+                self.resolve_header(scope.clone(), path.clone(), segment.header(), &packets);
+            }
+        }
         if bytes > self.c.window_payload || packets.len() > self.c.window_packets {
+            if let Transport::Tcp(segment) = &transport {
+                if segment.contributes_stream_extent() {
+                    self.observe_tcp_header(
+                        (scope, path, segment.header(), packets[0]),
+                        frame,
+                        time,
+                        HeaderDisposition::Omitted,
+                    )?;
+                }
+            }
             self.diagnostic(
                 "segment_or_fragment_provenance_exceeds_window_budget",
                 packets,
@@ -746,50 +1209,11 @@ impl State<'_> {
             return Ok(());
         }
         let (key, direction) = Key::new(scope.clone(), path, protocol, source, destination);
-        let mut a = match self.take(&key) {
-            Some(a) => a,
-            None => {
-                self.room(bytes)?;
-                self.create(key.clone(), frame, time)?
-            }
+        let input = match &transport {
+            Transport::Tcp(segment) => WindowInput::Tcp(segment),
+            Transport::Udp(_) => WindowInput::Udp,
         };
-        let idle = match (time, a.last_ns) {
-            (Some(now), Some(last)) => now.saturating_sub(last) > self.c.base.idle_timeout_ns,
-            _ => false,
-        };
-        if idle
-            || a.packet_refs
-                .checked_add(packets.len())
-                .is_none_or(|n| n > self.c.window_packets)
-            || a.payload
-                .checked_add(bytes)
-                .is_none_or(|n| n > self.c.window_payload)
-        {
-            self.flush(
-                a,
-                if idle {
-                    "idle_time_boundary"
-                } else {
-                    "reconstruction_window_budget"
-                },
-            )?;
-            a = self.create(key.clone(), frame, time)?;
-        }
-        self.room(a.payload + bytes)?;
-        if matches!((time,a.last_ns),(Some(now),Some(last)) if now<last) {
-            self.diagnostic(
-                "capture_clock_reversal",
-                packets.clone(),
-                EvidenceStatus::Ambiguous,
-            )?;
-        }
-        a.last_frame = frame;
-        a.last_ns = match (time, a.last_ns) {
-            (Some(x), Some(y)) => Some(x.max(y)),
-            (x, None) => x,
-            (None, y) => y,
-        };
-        a.packet_refs += packets.len();
+        let mut a = self.admit_window(&key, frame, time, &packets, input)?;
         match transport {
             Transport::Tcp(segment) => {
                 let syn = segment.syn();
@@ -801,15 +1225,34 @@ impl State<'_> {
                     .ingest_with_packets(scope.clone(), &packets, time, segment);
                 let assignment = match result {
                     Ok(x) => x,
+                    // A window may roll over at a transport capacity limit.
+                    // If loss attribution itself failed, the window cannot
+                    // establish unique transactions from the remaining inputs.
+                    Err(error)
+                        if !matches!(
+                            error.field,
+                            "flows" | "segments_per_flow" | "tcp_retained_payload"
+                        ) =>
+                    {
+                        return Err(error)
+                    }
                     Err(error) => {
                         self.diagnostic(
                             format!("tcp_window_reset:{error}"),
                             packets.clone(),
                             EvidenceStatus::Incomplete,
                         )?;
+                        if retry.contributes_stream_extent() {
+                            a.tracker
+                                .as_mut()
+                                .ok_or_else(|| Error::limit("tcp_tracker"))?
+                                .observe_at_cut(scope.clone(), packets[0], time, retry.header())?;
+                        }
                         self.flush(a, "tracker_admission_boundary")?;
-                        a = self.create(key.clone(), frame, time)?;
+                        self.room(bytes)?;
+                        a = self.create(key.clone(), frame)?;
                         a.packet_refs = packets.len();
+                        a.last_ns = time;
                         a.tracker
                             .as_mut()
                             .ok_or_else(|| Error::limit("tcp_tracker"))?
@@ -834,7 +1277,6 @@ impl State<'_> {
                             )?;
                             id
                         };
-                        a.payload += bytes;
                         (Some(id), "assigned", vec![])
                     }
                     Assignment::Ambiguous { candidate_flow_ids } => {
@@ -931,6 +1373,34 @@ impl State<'_> {
         dnp3_confirmations: &mut Vec<Dnp3StreamingConfirmationRecord>,
         remaining: &mut usize,
     ) -> Result<()> {
+        if !flow.outside_syn_span.is_empty() {
+            let mut event = Event::new(
+                EventKind::Diagnostic,
+                EvidenceStatus::Observed,
+                Json::object([
+                    ("reason", "stream_position_outside_syn_span".into()),
+                    ("window", window.into()),
+                    ("generation", flow.generation.into()),
+                ]),
+            );
+            event.session = Some(id);
+            event.evidence = Evidence::packets(flow.outside_syn_span.clone());
+            self.sink.emit(&event)?;
+        }
+        if let Some(packet) = flow.uncertain_payload {
+            let mut event = Event::new(
+                EventKind::Diagnostic,
+                EvidenceStatus::Ambiguous,
+                Json::object([
+                    ("reason", "tcp_generation_payload_uncertain".into()),
+                    ("window", window.into()),
+                    ("generation", flow.generation.into()),
+                ]),
+            );
+            event.session = Some(id);
+            event.evidence = Evidence::packets(vec![packet]);
+            self.sink.emit(&event)?;
+        }
         let flow_ambiguous = !flow.reconstruction_errors.is_empty()
             || !flow.anomalies.is_empty()
             || flow
@@ -1024,6 +1494,7 @@ impl State<'_> {
             };
             protocol_inputs.push((ctx, stream));
         }
+        let first_record = messages.len();
         let mut output = RegistryOutput {
             sink: self.sink,
             records: messages,
@@ -1032,6 +1503,13 @@ impl State<'_> {
         };
         self.registry
             .streams(&protocol_inputs, self.c, &mut output)?;
+        if flow.uncertain_payload.is_some() {
+            for r in &mut messages[first_record..] {
+                if r.protocol == "modbus" {
+                    r.ambiguous = true;
+                }
+            }
+        }
         Ok(())
     }
     fn flush(&mut self, mut a: Active, reason: &'static str) -> Result<()> {
@@ -1126,8 +1604,8 @@ impl State<'_> {
         while self.evict_oldest("eof")? {}
         let fragments = std::mem::take(&mut self.fragments);
         for (_, slot) in fragments {
-            for n in slot.reassembler.finish() {
-                self.fragment_notice(n)?;
+            for (n, v) in slot.reassembler.finish_with(|n, v| (n, v)) {
+                self.retire_fragment(n, v)?;
             }
         }
         Ok(())
@@ -1177,19 +1655,7 @@ pub fn analyze_reader<R: Read>(
     };
     let mut reader =
         CaptureReader::new(hash_reader, config.reader_limits(), config.base.parse_mode)?;
-    let mut state = State {
-        c: &config,
-        registry,
-        sink: &mut meter,
-        namespace,
-        active: BTreeMap::new(),
-        order: BTreeSet::new(),
-        fragments: BTreeMap::new(),
-        retained: 0,
-        next_session: 0,
-        next_window: 0,
-        summary: Summary::default(),
-    };
+    let mut state = State::new(&config, registry, &mut meter, namespace);
     let result = (|| -> Result<()> {
         while let Some(record) = reader.next_record()? {
             state.summary.records = state
@@ -1213,6 +1679,9 @@ pub fn analyze_reader<R: Read>(
                         .map(|w| w.code.to_owned())
                         .collect(),
                 )?;
+                // A rejection on this record can release a fragment witness
+                // before the idle window publishes its final transactions.
+                state.expire_windows(meta.frame)?;
             } else {
                 let secrets = matches!(record.kind(), RecordKind::Secrets { .. });
                 state.sink.emit(&Event::new(
@@ -1284,3 +1753,6 @@ pub fn analyze_reader<R: Read>(
     ))?;
     Ok(summary)
 }
+
+#[cfg(test)]
+mod tests;

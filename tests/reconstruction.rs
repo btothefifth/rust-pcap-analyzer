@@ -106,6 +106,97 @@ fn payload_before_syn_and_excessive_span_rejected() {
     );
 }
 #[test]
+fn omitted_handshake_checks_all_provisional_fin_positions_across_wrap() {
+    let first = u32::MAX - 3;
+    for (offset, survives) in [(0u32, true), (8, true), (9, false)] {
+        for reverse_fins in [false, true] {
+            let witness = |omitted: &[u8]| {
+                let mut tracker = TcpTracker::new(
+                    Limits {
+                        max_stream_span: 8,
+                        ..Limits::default()
+                    },
+                    100,
+                )
+                .unwrap();
+                let reverse = |mut segment: TcpSegment| {
+                    std::mem::swap(&mut segment.source, &mut segment.destination);
+                    segment
+                };
+                let mut fins = [first - 1, first.wrapping_add(offset)];
+                if reverse_fins {
+                    fins.reverse();
+                }
+                let packets = [
+                    segment(100, 0, 2, b"", 1),
+                    reverse(segment(first.wrapping_add(4), 101, 0x10, b"", 2)),
+                    reverse(segment(fins[0], 101, 0x11, b"", 3)),
+                    reverse(segment(fins[1], 101, 0x11, b"", 4)),
+                    segment(101, 0, 0x11, b"", 5),
+                ];
+                for (i, packet) in packets.into_iter().enumerate() {
+                    let assigned = tracker
+                        .ingest(scope(), id(i as u64 + 1), None, packet)
+                        .unwrap();
+                    assert!(matches!(assigned, Assignment::Assigned { flow_id: 0, .. }));
+                }
+                let header = reverse(segment(first - 1, 101, 0x12, omitted, 6)).header();
+                tracker
+                    .observe_header(scope(), id(6), None, header, HeaderDisposition::Omitted)
+                    .unwrap();
+                let flows = tracker.finish(OverlapPolicy::RejectConflict).unwrap();
+                flows[0].uncertain_payload
+            };
+            assert_eq!(witness(b"x"), (!survives).then_some(id(6)));
+            assert_eq!(witness(b""), None);
+        }
+    }
+}
+
+#[test]
+fn failed_handshake_reconciliation_preserves_retained_inputs() {
+    let mut tracker = TcpTracker::new(
+        Limits {
+            max_correlation_checks: 1,
+            ..Limits::default()
+        },
+        100,
+    )
+    .unwrap();
+    tracker
+        .ingest(scope(), id(1), Some(1), segment(1000, 0, 2, b"", 1))
+        .unwrap();
+    let reverse = |mut s: TcpSegment| {
+        std::mem::swap(&mut s.source, &mut s.destination);
+        s
+    };
+    for (frame, sequence) in [(2, 450), (3, 454)] {
+        tracker
+            .ingest(
+                scope(),
+                id(frame),
+                Some(i128::from(frame)),
+                reverse(segment(sequence, 1001, 0x18, b"data", frame)),
+            )
+            .unwrap();
+    }
+    let correction = reverse(segment(500, 1001, 0x12, b"", 4));
+    let err = tracker
+        .ingest(scope(), id(4), Some(4), correction)
+        .unwrap_err();
+    assert_eq!(err.field, "unretained_tcp_generation_checks");
+    assert_eq!(tracker.retained_payload_bytes(), 8);
+    let flows = tracker.finish(OverlapPolicy::RejectConflict).unwrap();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].syn, [Some(1000), None]);
+    assert!(flows[0].outside_syn_span.is_empty());
+    assert_eq!(
+        flows[0].streams[1].as_ref().unwrap().chunks[0].bytes.data(),
+        b"datadata"
+    );
+}
+
+#[test]
 fn connection_reuse_creates_generation_and_same_syn_is_not_recounted() {
     let mut t = TcpTracker::new(Limits::default(), 120_000_000_000).unwrap();
     let first = t
@@ -266,6 +357,7 @@ fn fragment(start: usize, more: bool, data: &[u8], frame: u64, ipv6: bool) -> Da
         protocol: 17,
         ipv6,
         network_header_len: if ipv6 { 48 } else { 20 },
+        declared_payload_len: data.len(),
         fragment: Some(FragmentInfo {
             id: 7,
             offset: start,
@@ -309,6 +401,147 @@ fn conflicting_ipv4_fragments_quarantine_set() {
     ));
     assert_eq!(r.finish()[0].code, "fragment_quarantine_at_eof");
 }
+#[test]
+fn quarantine_exposes_only_the_contiguous_agreed_prefix() {
+    // An opaque record spells the alphabet. The two suffix observations
+    // disagree at 'l'. Identify the agreed bytes independently of admission.
+    let pieces = [
+        (0, &b"abcd"[..]),
+        (4, &b"efghijkLm"[..]),
+        (8, &b"ijklm"[..]),
+        (0, &b"abc"[..]),
+    ];
+    for (order, capacity, expected) in [
+        ([0, 2, 1], 3, Some(&b"abcdefghijk"[..])),
+        ([0, 2, 1], 2, Some(&b"abcdefghijk"[..])),
+        ([2, 1, 0], 3, Some(&b"abcdefghijk"[..])),
+        ([1, 2, 0], 3, Some(&b"abcdefghijk"[..])),
+        ([3, 2, 1], 3, None),
+        ([3, 2, 1], 2, None),
+    ] {
+        let mut sets = FragmentReassembler::<()>::with_prefix_cache(Limits {
+            max_fragments_per_set: capacity,
+            ..Limits::default()
+        });
+        let mut observed = None;
+        for (index, piece) in order.into_iter().enumerate() {
+            let (offset, bytes) = pieces[piece];
+            let frame = index as u64 + 1;
+            let outcome = sets.push_with_invalidation(
+                fragment(offset, true, bytes, frame, false),
+                frame,
+                &[],
+                Some(&mut |_, _| (Some(5), None)),
+                |prefix, _, _| {
+                    if let Some(prefix) = prefix {
+                        assert!(prefix.fragment.is_some());
+                        assert!(prefix.declared_payload_len > prefix.payload.len());
+                        for span in prefix.payload.spans() {
+                            let (_, source) = pieces[order[span.packet.frame as usize - 1]];
+                            let source_start = span.packet_start - 54;
+                            let stop = source_start + span.end - span.start;
+                            assert_eq!(
+                                &prefix.payload.data()[span.start..span.end],
+                                &source[source_start..stop]
+                            );
+                        }
+                        assert!(prefix.payload.validate());
+                        observed = Some(prefix.payload.data().to_vec());
+                    }
+                    None
+                },
+            );
+            if index >= capacity {
+                assert!(matches!(outcome, Err(e) if e.code == ErrorCode::LimitExceeded));
+            } else {
+                assert!(matches!(
+                    outcome.unwrap(),
+                    FragmentOutcome::Pending | FragmentOutcome::Rejected(_)
+                ));
+            }
+        }
+        assert_eq!(
+            observed.as_deref(),
+            expected,
+            "{order:?} capacity {capacity}"
+        );
+        assert_eq!(sets.finish()[0].code, "fragment_quarantine_at_eof");
+    }
+}
+
+#[test]
+fn quarantine_charges_only_retained_bytes_and_schedules_only_retained_progress() {
+    fn neighbor(offset: usize, more: bool, bytes: &[u8], frame: u64) -> Datagram {
+        let mut d = fragment(offset, more, bytes, frame, false);
+        d.fragment.as_mut().unwrap().id += 1;
+        d
+    }
+    for next in [5, 10] {
+        let limits = Limits {
+            max_retained_payload: 13,
+            ..Limits::default()
+        };
+        let mut sets = FragmentReassembler::<()>::with_prefix_cache(limits);
+        let mut inspect =
+            |_: &Datagram, _: &[pcap_evidence::provenance::PacketId]| (Some(next), None);
+        for (i, d) in [
+            fragment(0, true, b"abcd", 1, false),
+            fragment(8, true, b"ijkl", 2, false),
+            neighbor(0, true, b"1234", 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(matches!(
+                sets.push_caching_prefix(d, i as u64 + 1, &[], Some(&mut inspect))
+                    .unwrap(),
+                FragmentOutcome::Pending
+            ));
+        }
+        let mut previews = Vec::new();
+        let mut disputed = |sets: &mut FragmentReassembler<()>, bytes: &[u8], frame| {
+            sets.push_with_invalidation(
+                fragment(4, true, bytes, frame, false),
+                frame,
+                &[],
+                Some(&mut inspect),
+                |prefix, _, _| {
+                    if let Some(d) = prefix {
+                        previews.push(d.payload.data().to_vec());
+                    }
+                    None
+                },
+            )
+        };
+        let first = disputed(&mut sets, b"efghX", 4);
+        if next == 5 {
+            assert!(matches!(first, Err(e) if e.field == "fragment_payload"));
+        } else {
+            // The new disagreement is before the scheduled inspector. It
+            // costs nothing even though the input exceeds the free byte.
+            assert!(matches!(first.unwrap(), FragmentOutcome::Rejected(_)));
+            assert!(matches!(
+                disputed(&mut sets, b"efghY", 5).unwrap(),
+                FragmentOutcome::Rejected(_)
+            ));
+        }
+        let FragmentOutcome::Complete(d, _) = sets.push(neighbor(4, false, b"5", 6), 6).unwrap()
+        else {
+            panic!("independent set must complete at the cap")
+        };
+        assert_eq!(d.payload.data(), b"12345");
+        assert!(matches!(
+            disputed(&mut sets, b"EFGHZ", 7).unwrap(),
+            FragmentOutcome::Rejected(_)
+        ));
+        if next == 5 {
+            assert_eq!(previews, [b"abcdefgh", b"abcdEFGH"]);
+        } else {
+            assert!(previews.is_empty());
+        }
+    }
+}
+
 #[test]
 fn identical_ipv6_overlaps_are_still_rejected() {
     let mut r = FragmentReassembler::new(Limits::default());
@@ -356,3 +589,28 @@ fn provenance_clipping_and_append_are_exact_and_nonmutating_on_rejection() {
     assert!(bytes.slice(invalid_start..invalid_end).is_err());
     assert!(EvidenceBytes::default().validate());
 }
+
+#[test]
+fn prefix_decoding_cannot_admit_partial_transport_or_fragment_bytes() {
+    let frame = small_tcp::tcp(false, 101, 501, 0x18, b"12345678");
+    let first = small_tcp::ipv4_fragment(&frame, 0..24, true);
+    for full in [&frame, &first] {
+        let prefix = &full[..56];
+        assert!(decode_packet(1, prefix, id(1), scope()).is_err());
+        let partial = decode_packet_extent(1, prefix, id(1), scope(), true).unwrap();
+        assert!(tcp_loss_header(&partial).is_some());
+        assert!(decode_transport(&partial, ChecksumPolicy::Observe).is_err());
+        let mut assembly = FragmentReassembler::new(Limits::default());
+        assert!(assembly.push(partial, 1).is_err());
+        assert!(assembly.finish().is_empty());
+    }
+    let full = decode_packet(1, &frame, id(1), scope()).unwrap();
+    let Transport::Tcp(segment) = decode_transport(&full, ChecksumPolicy::RequireValid).unwrap()
+    else {
+        panic!("expected TCP");
+    };
+    assert_eq!(segment.payload.data(), b"12345678");
+}
+
+#[path = "support/tiny_capture.rs"]
+mod small_tcp;

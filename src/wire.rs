@@ -50,11 +50,33 @@ pub struct Datagram {
     pub protocol: u8,
     pub ipv6: bool,
     pub network_header_len: usize,
+    /// IP payload length after decoded extensions, including bytes lost to snaplen.
+    pub declared_payload_len: usize,
     pub fragment: Option<FragmentInfo>,
     pub payload: EvidenceBytes,
     pub ip_checksum: Checksum,
     pub checksum_context: ChecksumContext,
 }
+/// Fixed header fields sufficient to distinguish TCP generations. This value
+/// carries no payload or checksum verdict and cannot be admitted as a segment.
+#[derive(Clone, Copy, Debug)]
+pub struct TcpHeader {
+    pub source: Endpoint,
+    pub destination: Endpoint,
+    pub sequence: u32,
+    pub acknowledgement: u32,
+    pub flags: u8,
+    /// Declared TCP payload size when the enclosing datagram extent is known.
+    pub payload_len: Option<usize>,
+}
+
+impl TcpHeader {
+    /// The enclosing length establishes that this FIN carries no payload bytes.
+    pub fn is_empty_fin(&self) -> bool {
+        self.flags & 1 != 0 && self.payload_len == Some(0)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TcpSegment {
     pub source: Endpoint,
@@ -66,6 +88,17 @@ pub struct TcpSegment {
     pub payload: EvidenceBytes,
 }
 impl TcpSegment {
+    pub fn header(&self) -> TcpHeader {
+        TcpHeader {
+            source: self.source,
+            destination: self.destination,
+            sequence: self.sequence,
+            acknowledgement: self.acknowledgement,
+            flags: self.flags,
+            payload_len: Some(self.payload.len()),
+        }
+    }
+
     pub fn syn(&self) -> bool {
         self.flags & 0x02 != 0
     }
@@ -77,6 +110,10 @@ impl TcpSegment {
     }
     pub fn rst(&self) -> bool {
         self.flags & 0x04 != 0
+    }
+    /// Data and FIN both contribute positions to the reconstructed stream.
+    pub fn contributes_stream_extent(&self) -> bool {
+        !self.payload.is_empty() || self.fin()
     }
     pub fn data_sequence(&self) -> u32 {
         self.sequence.wrapping_add(u32::from(self.syn()))
@@ -109,7 +146,122 @@ pub fn decode_packet(
     link_type: u32,
     packet: &[u8],
     id: PacketId,
+    scope: Scope,
+) -> Result<Datagram> {
+    decode_packet_extent(link_type, packet, id, scope, false)
+}
+
+/// Read only enough of a snapped packet to locate a TCP generation which
+/// may be missing data. Its bytes never enter transport reassembly.
+pub fn snapped_tcp(
+    link_type: u32,
+    packet: &[u8],
+    id: PacketId,
+    scope: Scope,
+) -> Option<(Scope, TcpHeader)> {
+    snapped_tcp_with_policy(link_type, packet, id, scope, ChecksumPolicy::Observe)
+}
+
+pub(crate) fn snapped_tcp_with_policy(
+    link_type: u32,
+    packet: &[u8],
+    id: PacketId,
+    scope: Scope,
+    policy: ChecksumPolicy,
+) -> Option<(Scope, TcpHeader)> {
+    let d = decode_packet_extent(link_type, packet, id, scope, true).ok()?;
+    Some((
+        d.scope.clone(),
+        tcp_header_observation(&d)?.possible_loss(policy)?,
+    ))
+}
+
+/// Read only the fields needed to identify potentially missing TCP data.
+pub fn tcp_loss_header(d: &Datagram) -> Option<TcpHeader> {
+    tcp_header_observation(d)?.possible_loss(ChecksumPolicy::Observe)
+}
+
+/// Capture evidence for TCP identity before transport admission. The ports,
+/// sequence numbers, data offset and flags occupy the first 14 TCP bytes.
+pub struct TcpHeaderObservation {
+    /// Offset of the first TCP byte in the source packet.
+    pub packet_start: usize,
+    pub header: TcpHeader,
+    pub packet: PacketId,
+    possible_extent: bool,
+    checksum_allowed: bool,
+}
+
+impl TcpHeaderObservation {
+    pub fn possible_loss(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
+        self.policy_allows(policy).filter(|_| self.possible_extent)
+    }
+
+    /// While a fragment set is pending, even a zero payload length can be disputed.
+    pub fn pending_extent(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
+        self.policy_allows(policy)
+            .filter(|h| self.possible_extent || h.payload_len == Some(0))
+    }
+
+    fn policy_allows(&self, policy: ChecksumPolicy) -> Option<TcpHeader> {
+        (policy == ChecksumPolicy::Observe || self.checksum_allowed).then_some(self.header)
+    }
+}
+
+pub fn tcp_header_observation(d: &Datagram) -> Option<TcpHeaderObservation> {
+    inspect_tcp_header(d).ok().flatten()
+}
+
+/// Inspect a transport prefix, distinguishing a short header from a different
+/// protocol or an invalid header. Only a short header needs additional bytes.
+pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> {
+    if d.fragment.as_ref().is_some_and(|f| f.offset != 0) {
+        return Ok(None);
+    }
+    let (protocol, offset, checksum_context) = transport_offset(d)?;
+    if protocol != 6 {
+        return Ok(None);
+    }
+    let (header, header_len) = tcp_identity(d, offset)?;
+    let spans = d.payload.spans();
+    let span = spans
+        .get(spans.partition_point(|s| s.end <= offset))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Invariant,
+                offset as u64,
+                "tcp_header",
+                "missing source span",
+            )
+        })?;
+    let complete = d.fragment.is_none() && d.payload.len() == d.declared_payload_len;
+    let checksum_allowed = d.ip_checksum != Checksum::Invalid
+        && checksum_context != ChecksumContext::Unsupported
+        && (!complete
+            || checked_transport_checksum(d, checksum_context, 6, &d.payload.data()[offset..])?
+                == Checksum::Valid);
+    Ok(Some(TcpHeaderObservation {
+        header,
+        packet: span.packet,
+        packet_start: span
+            .packet_start
+            .checked_add(offset - span.start)
+            .ok_or_else(|| Error::limit("tcp_header_offset"))?,
+        possible_extent: d.fragment.is_some()
+            || d.declared_payload_len > offset + header_len
+            || header.is_empty_fin(),
+        checksum_allowed,
+    }))
+}
+
+/// Read captured network headers for loss attribution. In prefix mode the
+/// returned datagram may have fewer bytes than the declared IP length.
+pub fn decode_packet_extent(
+    link_type: u32,
+    packet: &[u8],
+    id: PacketId,
     mut scope: Scope,
+    partial: bool,
 ) -> Result<Datagram> {
     let (mut start, mut ether_type) = match link_type {
         1 => {
@@ -179,8 +331,8 @@ pub fn decode_packet(
         start += 4;
     }
     match ether_type {
-        0x0800 => ipv4(packet, start, id, scope),
-        0x86dd => ipv6(packet, start, id, scope),
+        0x0800 => ipv4(packet, start, id, scope, partial),
+        0x86dd => ipv6(packet, start, id, scope, partial),
         _ => Err(Error::new(
             ErrorCode::UnsupportedNetwork,
             id.record_offset + start as u64,
@@ -190,7 +342,13 @@ pub fn decode_packet(
     }
 }
 
-fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datagram> {
+fn ipv4(
+    packet: &[u8],
+    start: usize,
+    id: PacketId,
+    scope: Scope,
+    partial: bool,
+) -> Result<Datagram> {
     require(packet, start + 20, id.record_offset, "ipv4")?;
     let b = &packet[start..];
     if b[0] >> 4 != 4 {
@@ -205,7 +363,9 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
     if total < header {
         return Err(bad("ipv4_total_length", "length smaller than header"));
     }
-    require(b, total, id.record_offset + start as u64, "ipv4_payload")?;
+    if !partial {
+        require(b, total, id.record_offset + start as u64, "ipv4_payload")?;
+    }
     let flags = be16(&b[6..8]);
     let off = usize::from(flags & 0x1fff) * 8;
     let more = flags & 0x2000 != 0;
@@ -224,6 +384,8 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
     if off.checked_add(total - header).is_none_or(|n| n > 65_535) {
         return Err(bad("ipv4_fragment", "fragment range too large"));
     }
+    let declared_payload_len = total - header;
+    let total = total.min(b.len());
     let source = IpAddr::V4(Ipv4Addr::new(b[12], b[13], b[14], b[15]));
     let destination = IpAddr::V4(Ipv4Addr::new(b[16], b[17], b[18], b[19]));
     let checksum_context = ipv4_checksum_context(&b[20..header])?;
@@ -234,6 +396,7 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         protocol: b[9],
         ipv6: false,
         network_header_len: header,
+        declared_payload_len,
         fragment: if more || off != 0 {
             Some(FragmentInfo {
                 id: u32::from(be16(&b[4..6])),
@@ -252,7 +415,13 @@ fn ipv4(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         checksum_context,
     })
 }
-fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datagram> {
+fn ipv6(
+    packet: &[u8],
+    start: usize,
+    id: PacketId,
+    scope: Scope,
+    partial: bool,
+) -> Result<Datagram> {
     require(packet, start + 40, id.record_offset, "ipv6")?;
     let b = &packet[start..];
     if b[0] >> 4 != 6 {
@@ -267,8 +436,14 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
             "jumbogram semantics are not implemented",
         ));
     }
-    let total = 40 + n;
-    require(b, total, id.record_offset + start as u64, "ipv6_payload")?;
+    let declared_end = 40 + n;
+    let total = declared_end;
+    let total = if partial {
+        total.min(b.len())
+    } else {
+        require(b, total, id.record_offset + start as u64, "ipv6_payload")?;
+        total
+    };
     let mut s = [0u8; 16];
     let mut d = [0u8; 16];
     s.copy_from_slice(&b[8..24]);
@@ -305,7 +480,7 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
             let frag_id = be32(&b[p + 4..p + 8]);
             next = b[p];
             p += 8;
-            if more && (total - p) % 8 != 0 {
+            if more && (declared_end - p) % 8 != 0 {
                 return Err(bad(
                     "ipv6_fragment",
                     "non-final fragment length not a multiple of 8",
@@ -349,6 +524,7 @@ fn ipv6(packet: &[u8], start: usize, id: PacketId, scope: Scope) -> Result<Datag
         protocol: next,
         ipv6: true,
         network_header_len: p,
+        declared_payload_len: declared_end - p,
         fragment,
         payload: EvidenceBytes::from_packet(&b[p..total], id, start + p),
         ip_checksum: Checksum::NotPresent,
@@ -417,21 +593,40 @@ pub fn ipv6_checksum_context(protocol: u8, header: &[u8]) -> Result<ChecksumCont
     Ok(context)
 }
 
-pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<Transport> {
-    if datagram.fragment.is_some() {
-        return Err(bad(
-            "fragment",
-            "reassemble IP fragments before parsing transport",
-        ));
+/// Bytes through the TCP flags, required for generation attribution.
+pub const TCP_IDENTITY_BYTES: usize = 14;
+
+fn tcp_identity(datagram: &Datagram, offset: usize) -> Result<(TcpHeader, usize)> {
+    let data = &datagram.payload.data()[offset..];
+    require(data, TCP_IDENTITY_BYTES, 0, "tcp_identity")?;
+    let header = usize::from(data[12] >> 4) * 4;
+    if header < 20 {
+        return Err(bad("tcp_offset", "data offset smaller than fixed header"));
     }
-    if policy == ChecksumPolicy::RequireValid && datagram.ip_checksum == Checksum::Invalid {
-        return Err(Error::new(
-            ErrorCode::Checksum,
-            0,
-            "ipv4",
-            "invalid IPv4 checksum",
-        ));
-    }
+    Ok((
+        TcpHeader {
+            source: Endpoint {
+                address: datagram.source,
+                port: be16(&data[..2]),
+            },
+            destination: Endpoint {
+                address: datagram.destination,
+                port: be16(&data[2..4]),
+            },
+            sequence: be32(&data[4..8]),
+            acknowledgement: be32(&data[8..12]),
+            flags: data[13],
+            payload_len: if datagram.fragment.is_none() {
+                datagram.declared_payload_len.checked_sub(offset + header)
+            } else {
+                None
+            },
+        },
+        header,
+    ))
+}
+
+fn transport_offset(datagram: &Datagram) -> Result<(u8, usize, ChecksumContext)> {
     let mut protocol = datagram.protocol;
     let mut prefix = 0;
     let all = datagram.payload.data();
@@ -458,14 +653,46 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
         protocol = all[prefix];
         prefix += n;
     }
+    Ok((protocol, prefix, checksum_context))
+}
+
+impl Datagram {
+    /// Only a complete declared extent may enter reassembly or normal decoding.
+    pub fn require_complete(&self) -> Result<()> {
+        if self.payload.len() != self.declared_payload_len {
+            return Err(Error::new(
+                ErrorCode::Truncated,
+                self.payload.len() as u64,
+                "ip_payload_extent",
+                "captured IP payload differs from declared length",
+            ));
+        }
+        Ok(())
+    }
+}
+pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<Transport> {
+    datagram.require_complete()?;
+    if datagram.fragment.is_some() {
+        return Err(bad(
+            "fragment",
+            "reassemble IP fragments before parsing transport",
+        ));
+    }
+    if policy == ChecksumPolicy::RequireValid && datagram.ip_checksum == Checksum::Invalid {
+        return Err(Error::new(
+            ErrorCode::Checksum,
+            0,
+            "ipv4",
+            "invalid IPv4 checksum",
+        ));
+    }
+    let (protocol, prefix, checksum_context) = transport_offset(datagram)?;
+    let all = datagram.payload.data();
     let data = &all[prefix..];
     match protocol {
         6 => {
             require(data, 20, 0, "tcp")?;
-            let header = usize::from(data[12] >> 4) * 4;
-            if header < 20 {
-                return Err(bad("tcp_offset", "data offset smaller than fixed header"));
-            }
+            let (fixed, header) = tcp_identity(datagram, prefix)?;
             require(data, header, 0, "tcp_options")?;
             let checksum = checked_transport_checksum(datagram, checksum_context, 6, data)?;
             require_supported_checksum(checksum, policy)?;
@@ -478,17 +705,11 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
                 ));
             }
             Ok(Transport::Tcp(TcpSegment {
-                source: Endpoint {
-                    address: datagram.source,
-                    port: be16(&data[..2]),
-                },
-                destination: Endpoint {
-                    address: datagram.destination,
-                    port: be16(&data[2..4]),
-                },
-                sequence: be32(&data[4..8]),
-                acknowledgement: be32(&data[8..12]),
-                flags: data[13],
+                source: fixed.source,
+                destination: fixed.destination,
+                sequence: fixed.sequence,
+                acknowledgement: fixed.acknowledgement,
+                flags: fixed.flags,
                 checksum,
                 payload: datagram.payload.slice(prefix + header..all.len())?,
             }))
@@ -503,15 +724,8 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
                 ));
             }
             require(data, len, 0, "udp_payload")?;
-            let checksum = if be16(&data[6..8]) == 0 {
-                if datagram.ipv6 {
-                    Checksum::Invalid
-                } else {
-                    Checksum::NotPresent
-                }
-            } else {
-                checked_transport_checksum(datagram, checksum_context, 17, &data[..len])?
-            };
+            let checksum = udp_checksum_if_captured(datagram, checksum_context, data)?
+                .ok_or_else(|| bad("udp_checksum", "missing complete UDP extent"))?;
             require_supported_checksum(checksum, policy)?;
             if policy == ChecksumPolicy::RequireValid && checksum == Checksum::Invalid {
                 return Err(Error::new(
@@ -541,6 +755,47 @@ pub fn decode_transport(datagram: &Datagram, policy: ChecksumPolicy) -> Result<T
             format!("protocol {protocol} is not decoded"),
         )),
     }
+}
+
+/// A UDP checksum verdict determined by the header alone. The caller supplies
+/// the transmitted checksum and the effective pseudo-header context.
+pub fn udp_header_checksum(
+    datagram: &Datagram,
+    context: ChecksumContext,
+    transmitted: u16,
+) -> Option<Checksum> {
+    if transmitted == 0 {
+        Some(if datagram.ipv6 {
+            Checksum::Invalid
+        } else {
+            Checksum::NotPresent
+        })
+    } else if context == ChecksumContext::Unsupported {
+        Some(Checksum::NotChecked)
+    } else {
+        None
+    }
+}
+
+/// A UDP prefix can establish a checksum verdict from the header or once
+/// every byte covered by the UDP length has arrived.
+pub fn udp_checksum_if_captured(
+    datagram: &Datagram,
+    context: ChecksumContext,
+    bytes: &[u8],
+) -> Result<Option<Checksum>> {
+    require(bytes, 8, 0, "udp")?;
+    let len = usize::from(be16(&bytes[4..6]));
+    if len < 8 {
+        return Err(bad("udp_length", "UDP length smaller than header"));
+    }
+    if let Some(verdict) = udp_header_checksum(datagram, context, be16(&bytes[6..8])) {
+        return Ok(Some(verdict));
+    }
+    bytes
+        .get(..len)
+        .map(|udp| checked_transport_checksum(datagram, context, 17, udp))
+        .transpose()
 }
 
 fn checked_transport_checksum(

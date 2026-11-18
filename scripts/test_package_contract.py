@@ -46,6 +46,7 @@ class PackageContract(unittest.TestCase):
                 if profile == 'core' and prefix.startswith(('product/', 'history/')):continue
                 for path in (ROOT / prefix).rglob('*'):
                     if path.is_file():self.assertIn(path.relative_to(ROOT).as_posix(), names)
+            self.assertIn('docs/product/NEXT_PARSER_SLICE.md', names)
             if profile == 'core':
                 self.assertNotIn('scripts/validate_product.py', names)
                 self.assertNotIn('scripts/requirements-qualification.txt', names)

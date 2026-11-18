@@ -11,11 +11,14 @@ use crate::tcp::StreamResult;
 use crate::time::{Resolution, Timestamp};
 use crate::wire::Endpoint;
 use crate::{Error, Limits, Result};
-fn ids(packets: &[PacketId]) -> J {
-    J::array(packets.iter().map(packet_id))
+mod projection;
+use projection::{Output, Projection as P};
+
+fn ids(packets: &[PacketId]) -> P<'_> {
+    P::array(packets.iter().map(packet_id))
 }
-fn strings(values: &[&'static str]) -> J {
-    J::array(values.iter().map(|s| J::from(*s)))
+fn strings<'a>(values: &'a [&'static str]) -> P<'a> {
+    P::array(values.iter().map(|s| J::from(*s)))
 }
 fn optional_u32(value: Option<u32>) -> J {
     value.map_or(J::Null, J::from)
@@ -81,30 +84,30 @@ fn endpoint(value: Endpoint) -> J {
         ("port", value.port.into()),
     ])
 }
-fn evidence(bytes: &EvidenceBytes, include_payload: bool) -> J {
+fn evidence(bytes: &EvidenceBytes, include_payload: bool) -> P<'_> {
     let mut fields = vec![
         ("length", bytes.len().into()),
         ("sha256", sha256::hex(&sha256::digest(bytes.data())).into()),
         (
             "spans",
-            J::array(bytes.spans().iter().map(|span| {
-                J::object([
+            P::array(bytes.spans().iter().map(move |span| {
+                P::object([
                     ("start", span.start.into()),
                     ("end", span.end.into()),
-                    ("packet", packet_id(&span.packet)),
+                    ("packet", packet_id(&span.packet).into()),
                     ("packet_start", span.packet_start.into()),
                 ])
             })),
         ),
     ];
     if include_payload {
-        fields.push(("hex", sha256::hex(bytes.data()).into()));
+        fields.push(("hex", P::Hex(bytes.data())));
     }
-    J::object(fields)
+    P::object(fields)
 }
-fn stream(value: &StreamResult, include_payload: bool) -> J {
-    J::object([
-        ("base_sequence", optional_u32(value.base_sequence)),
+fn stream(value: &StreamResult, include_payload: bool) -> P<'_> {
+    P::object([
+        ("base_sequence", optional_u32(value.base_sequence).into()),
         ("anchored_by_syn", value.anchored_by_syn.into()),
         (
             "duplicate_observed_bytes",
@@ -112,40 +115,40 @@ fn stream(value: &StreamResult, include_payload: bool) -> J {
         ),
         (
             "chunks",
-            J::array(value.chunks.iter().map(|chunk| {
-                J::object([
-                    ("offset", J::string(chunk.offset.to_string())),
+            P::array(value.chunks.iter().map(move |chunk| {
+                P::object([
+                    ("offset", chunk.offset.to_string().into()),
                     ("evidence", evidence(&chunk.bytes, include_payload)),
                 ])
             })),
         ),
         (
             "gaps",
-            J::array(value.gaps.iter().map(|gap| {
-                J::object([
-                    ("start", J::string(gap.start.to_string())),
-                    ("end", J::string(gap.end.to_string())),
+            P::array(value.gaps.iter().map(move |gap| {
+                P::object([
+                    ("start", gap.start.to_string().into()),
+                    ("end", gap.end.to_string().into()),
                     ("reason", gap.reason.into()),
                 ])
             })),
         ),
         (
             "conflicts",
-            J::array(value.conflicts.iter().map(|conflict| {
-                J::object([
-                    ("start", J::string(conflict.start.to_string())),
-                    ("end", J::string(conflict.end.to_string())),
+            P::array(value.conflicts.iter().map(move |conflict| {
+                P::object([
+                    ("start", conflict.start.to_string().into()),
+                    ("end", conflict.end.to_string().into()),
                     ("packets", ids(&conflict.packets)),
                 ])
             })),
         ),
     ])
 }
-fn issues(values: &[ProtocolIssue]) -> J {
-    J::array(values.iter().map(|issue| {
-        J::object([
+fn issues(values: &[ProtocolIssue]) -> P<'_> {
+    P::array(values.iter().map(move |issue| {
+        P::object([
             ("code", issue.code.into()),
-            ("stream_offset", J::string(issue.stream_offset.to_string())),
+            ("stream_offset", issue.stream_offset.to_string().into()),
             ("packets", ids(&issue.packets)),
         ])
     }))
@@ -156,11 +159,11 @@ fn fragment_reference(value: &crate::correlate::FragmentRef) -> J {
         ("fragment", value.fragment.into()),
     ])
 }
-fn confirmation_fragment(value: &crate::correlate::Dnp3ConfirmationFragment) -> J {
+fn confirmation_fragment(value: &crate::correlate::Dnp3ConfirmationFragment) -> P<'_> {
     let witness = &value.witness;
     let h = witness.header;
-    J::object([
-        ("reference", fragment_reference(&value.reference)),
+    P::object([
+        ("reference", fragment_reference(&value.reference).into()),
         ("captured_direction", value.direction.into()),
         ("source", witness.source.into()),
         ("destination", witness.destination.into()),
@@ -178,8 +181,8 @@ fn confirmation_fragment(value: &crate::correlate::Dnp3ConfirmationFragment) -> 
         ("packets", ids(&witness.packets)),
         (
             "link_witnesses",
-            J::array(witness.links.iter().map(|link| {
-                J::object([
+            P::array(witness.links.iter().map(move |link| {
+                P::object([
                     ("frame", link.frame.into()),
                     ("raw_control", link.control.into()),
                     ("header", evidence(&link.header, true)),
@@ -192,8 +195,8 @@ fn confirmation_fragment(value: &crate::correlate::Dnp3ConfirmationFragment) -> 
         ),
     ])
 }
-fn confirmation_candidate(value: &crate::correlate::Dnp3ConfirmationCandidate) -> J {
-    J::object([
+fn confirmation_candidate(value: &crate::correlate::Dnp3ConfirmationCandidate) -> P<'_> {
+    P::object([
         ("flow", value.flow.into()),
         ("status", value.status.into()),
         ("reason", value.reason.into()),
@@ -206,16 +209,16 @@ fn confirmation_candidate(value: &crate::correlate::Dnp3ConfirmationCandidate) -
         ("normative_conformance_certified", false.into()),
         (
             "confirms",
-            J::array(value.confirms.iter().map(confirmation_fragment)),
+            P::array(value.confirms.iter().map(confirmation_fragment)),
         ),
         (
             "targets",
-            J::array(value.targets.iter().map(confirmation_fragment)),
+            P::array(value.targets.iter().map(confirmation_fragment)),
         ),
         (
             "excluded_targets",
-            J::array(value.excluded_targets.iter().map(|excluded| {
-                J::object([
+            P::array(value.excluded_targets.iter().map(move |excluded| {
+                P::object([
                     ("reason", excluded.reason.into()),
                     ("fragment", confirmation_fragment(&excluded.fragment)),
                 ])
@@ -223,15 +226,76 @@ fn confirmation_candidate(value: &crate::correlate::Dnp3ConfirmationCandidate) -
         ),
         (
             "unclassified_fragments",
-            J::array(value.unclassified_fragments.iter().map(fragment_reference)),
+            P::array(value.unclassified_fragments.iter().map(fragment_reference)),
         ),
-        ("error", value.error.as_ref().map_or(J::Null, error)),
+        ("error", value.error.as_ref().map_or(J::Null, error).into()),
     ])
 }
-pub fn analysis(value: &Analysis, include_payload: bool) -> J {
-    let config = &value.config;
+fn bound_modbus_pair<'a>(
+    value: &Analysis,
+    t: &'a crate::correlate::Transaction,
+) -> Option<&'a crate::correlate::ModbusPair> {
+    let (status, reason, pair) = t.modbus_pair.as_ref()?;
+    let ([req], [rsp]) = (t.requests.as_slice(), t.responses.as_slice()) else {
+        return None;
+    };
+    if t.protocol != "modbus"
+        || t.status != *status
+        || t.reason != *reason
+        || pair.refs != [*req, *rsp]
+        || pair.capture != value.capture_sha256
+        || pair.flow != t.flow
+        || !value.flows().get(pair.flow).is_some_and(|f| {
+            f.id == pair.flow
+                && pair
+                    .generation
+                    .as_ref()
+                    .is_some_and(|(generation, key)| *generation == f.generation && key == &f.key)
+                && !f.has_transport_loss()
+        })
+    {
+        return None;
+    }
+    for ((r, binding), direction) in pair.refs.iter().zip(&pair.bindings).zip(pair.directions) {
+        let app = value.applications().get(r.application)?;
+        let ApplicationData::Modbus(data) = &app.data else {
+            return None;
+        };
+        if app.direction != direction
+            || app.protocol != "modbus"
+            || t.flow != app.flow
+            || !binding.matches(data.messages.get(r.message)?)
+        {
+            return None;
+        }
+    }
+    Some(pair)
+}
+
+fn modbus_pair_fields(
+    pair: &crate::correlate::ModbusPair,
+    status: &'static str,
+) -> Option<(&'static str, J)> {
+    let [a, b] = &pair.tokens;
+    let [req, rsp] = &pair.refs;
+    match status {
+        "inconsistent_response" => {
+            Some(("disagreeing_fields", crate::modbus::mismatch_fields(a, b)?))
+        }
+        "candidate_pair" | "candidate_unverified_boundary" => Some((
+            "read_mapping",
+            crate::modbus::pair_projection(a, b, status, reference(req), reference(rsp))?,
+        )),
+        _ => None,
+    }
+}
+fn snapshot_fields(
+    value: &Analysis,
+    include_payload: bool,
+) -> impl IntoIterator<Item = (&'static str, P<'_>)> {
+    let config = value.config();
     let limits = &config.limits;
-    J::object([
+    [
         ("schema", "pcap-evidence.analysis.v1".into()),
         ("implementation_version", env!("CARGO_PKG_VERSION").into()),
         ("capture_sha256", sha256::hex(&value.capture_sha256).into()),
@@ -240,7 +304,8 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
             "labels_sha256",
             value
                 .labels_sha256
-                .map_or(J::Null, |h| sha256::hex(&h).into()),
+                .map_or(J::Null, |h| sha256::hex(&h).into())
+                .into(),
         ),
         (
             "status",
@@ -257,28 +322,25 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
         ),
         (
             "config",
-            J::object([
+            P::object([
                 ("parse_mode", format!("{:?}", config.parse_mode).into()),
                 ("overlap_policy", config.overlap_policy.as_str().into()),
                 (
                     "checksum_policy",
                     format!("{:?}", config.checksum_policy).into(),
                 ),
-                (
-                    "idle_timeout_ns",
-                    J::string(config.idle_timeout_ns.to_string()),
-                ),
+                ("idle_timeout_ns", config.idle_timeout_ns.to_string().into()),
                 (
                     "dnp3_ports",
-                    J::array(config.dnp3_ports.iter().map(|p| J::from(*p))),
+                    P::array(config.dnp3_ports.iter().map(move |p| J::from(*p))),
                 ),
                 (
                     "modbus_ports",
-                    J::array(config.modbus_ports.iter().map(|p| J::from(*p))),
+                    P::array(config.modbus_ports.iter().map(move |p| J::from(*p))),
                 ),
                 (
                     "limits",
-                    J::object([
+                    P::object([
                         ("input_bytes", limits.max_input_bytes.into()),
                         ("block_bytes", limits.max_block_bytes.into()),
                         ("packet_bytes", limits.max_packet_bytes.into()),
@@ -308,30 +370,36 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
         ("secret_blocks_redacted", value.secret_blocks.into()),
         (
             "packets",
-            J::array(value.packets.iter().map(|packet| {
+            P::array(value.packets.iter().map(move |packet| {
                 let assignment = match &packet.disposition {
                     Disposition::Tcp { flow, direction } => {
-                        J::object([("flow", (*flow).into()), ("direction", (*direction).into())])
+                        P::object([("flow", (*flow).into()), ("direction", (*direction).into())])
                     }
                     Disposition::Rejected { code, detail } => {
-                        J::object([("code", (*code).into()), ("detail", detail.clone().into())])
+                        P::object([("code", (*code).into()), ("detail", detail.clone().into())])
                     }
                     Disposition::FragmentIncomplete { reason } => {
-                        J::object([("reason", (*reason).into())])
+                        P::object([("reason", (*reason).into())])
                     }
-                    Disposition::Ambiguous { flows } => J::object([(
+                    Disposition::Ambiguous { flows } => P::object([(
                         "candidate_flows",
-                        J::array(flows.iter().map(|f| J::from(*f))),
+                        P::array(flows.iter().map(move |f| J::from(*f))),
                     )]),
-                    _ => J::Null,
+                    _ => J::Null.into(),
                 };
-                J::object([
-                    ("id", packet_id(&packet.id)),
-                    ("metadata", metadata(&packet.metadata)),
+                P::object([
+                    ("id", packet_id(&packet.id).into()),
+                    ("metadata", metadata(&packet.metadata).into()),
                     ("packet_sha256", sha256::hex(&packet.packet_sha256).into()),
-                    ("source", packet.source.map_or(J::Null, endpoint)),
-                    ("destination", packet.destination.map_or(J::Null, endpoint)),
-                    ("transport", packet.transport.map_or(J::Null, J::from)),
+                    ("source", packet.source.map_or(J::Null, endpoint).into()),
+                    (
+                        "destination",
+                        packet.destination.map_or(J::Null, endpoint).into(),
+                    ),
+                    (
+                        "transport",
+                        packet.transport.map_or(J::Null, J::from).into(),
+                    ),
                     ("disposition", packet.disposition.as_str().into()),
                     ("assignment", assignment),
                     ("warnings", strings(&packet.warnings)),
@@ -340,72 +408,81 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
         ),
         (
             "flows",
-            J::array(value.flows.iter().map(|flow| {
-                J::object([
+            P::array(value.flows().iter().map(move |flow| {
+                P::object([
                     ("id", flow.id.into()),
                     ("generation", flow.generation.into()),
                     (
                         "scope",
-                        J::object([
+                        P::object([
                             ("section", flow.key.scope.section.into()),
                             ("interface", flow.key.scope.interface.into()),
                             (
                                 "link_interface",
-                                optional_u32(flow.key.scope.link_interface),
+                                optional_u32(flow.key.scope.link_interface).into(),
                             ),
                             (
                                 "vlans",
-                                J::array(flow.key.scope.vlans.iter().map(|v| J::from(*v))),
+                                P::array(flow.key.scope.vlans.iter().map(move |v| J::from(*v))),
                             ),
                         ]),
                     ),
-                    ("endpoint_a", endpoint(flow.key.a)),
-                    ("endpoint_b", endpoint(flow.key.b)),
+                    ("endpoint_a", endpoint(flow.key.a).into()),
+                    ("endpoint_b", endpoint(flow.key.b).into()),
                     (
                         "syn_sequences",
-                        J::array(flow.syn.iter().map(|v| optional_u32(*v))),
+                        P::array(flow.syn.iter().map(move |v| optional_u32(*v))),
                     ),
                     ("closed", flow.closed.into()),
                     ("midstream", flow.midstream.into()),
-                    ("first_unix_ns", exact(flow.first_ns)),
-                    ("last_unix_ns", exact(flow.last_ns)),
+                    ("first_unix_ns", exact(flow.first_ns).into()),
+                    ("last_unix_ns", exact(flow.last_ns).into()),
                     ("packets", ids(&flow.packets)),
                     ("anomalies", strings(&flow.anomalies)),
                     (
+                        "uncertain_payload_packet",
+                        flow.uncertain_payload
+                            .as_ref()
+                            .map_or(J::Null, packet_id)
+                            .into(),
+                    ),
+                    (
                         "reconstruction_errors",
-                        J::array(flow.reconstruction_errors.iter().map(error)),
+                        P::array(flow.reconstruction_errors.iter().map(error)),
                     ),
                     (
                         "streams",
-                        J::array(
-                            flow.streams.iter().map(|s| {
-                                s.as_ref().map_or(J::Null, |s| stream(s, include_payload))
-                            }),
-                        ),
+                        P::array(flow.streams.iter().map(move |s| {
+                            s.as_ref()
+                                .map_or(J::Null.into(), |s| stream(s, include_payload))
+                        })),
                     ),
                 ])
             })),
         ),
         (
             "applications",
-            J::array(
+            P::array(
                 value
-                    .applications
+                    .applications()
                     .iter()
                     .enumerate()
-                    .map(|(index, application)| {
+                    .map(move |(index, application)| {
                         let data = match &application.data {
-                            ApplicationData::Failed(e) => J::object([("error", error(e))]),
+                            ApplicationData::Failed(e)
+                            | ApplicationData::ModbusFailed { error: e, .. } => {
+                                P::object([("error", error(e).into())])
+                            }
                             ApplicationData::Dnp3(d) => dnp3_data(d, include_payload, limits),
-                            ApplicationData::Modbus(m) => J::object([
+                            ApplicationData::Modbus(m) => P::object([
                                 ("issues", issues(&m.issues)),
                                 (
                                     "messages",
-                                    J::array(m.messages.iter().map(|message| {
-                                        J::object([
+                                    P::array(m.messages.iter().map(move |message| {
+                                        P::object([
                                             (
                                                 "stream_offset",
-                                                J::string(message.stream_offset.to_string()),
+                                                message.stream_offset.to_string().into(),
                                             ),
                                             ("transaction", message.transaction.into()),
                                             ("unit", message.unit.into()),
@@ -420,18 +497,18 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                                             ("raw", evidence(&message.raw, include_payload)),
                                             (
                                                 "semantic_subset",
-                                                crate::semantics::modbus::alternatives_json(
-                                                    &message.raw,
-                                                    message.role,
+                                                crate::semantics::modbus::message_fields(
+                                                    message,
                                                     crate::semantics::Limits::from_capture(limits),
-                                                ),
+                                                )
+                                                .into(),
                                             ),
                                         ])
                                     })),
                                 ),
                             ]),
                         };
-                        J::object([
+                        P::object([
                             ("id", index.into()),
                             ("flow", application.flow.into()),
                             ("direction", application.direction.into()),
@@ -443,12 +520,12 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
         ),
         (
             "udp_applications",
-            J::array(value.datagrams.iter().enumerate().map(|(id, app)| {
+            P::array(value.datagrams.iter().enumerate().map(move |(id, app)| {
                 let data = match &app.data {
                     Ok(d) => dnp3_data(d, include_payload, limits),
-                    Err(e) => J::object([("error", error(e))]),
+                    Err(e) => P::object([("error", error(e).into())]),
                 };
-                J::object([
+                P::object([
                     ("id", id.into()),
                     ("transport", "udp".into()),
                     ("protocol", "dnp3".into()),
@@ -459,18 +536,21 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
                     ),
                     (
                         "scope",
-                        J::object([
+                        P::object([
                             ("section", app.scope.section.into()),
                             ("interface", app.scope.interface.into()),
-                            ("link_interface", optional_u32(app.scope.link_interface)),
+                            (
+                                "link_interface",
+                                optional_u32(app.scope.link_interface).into(),
+                            ),
                             (
                                 "vlans",
-                                J::array(app.scope.vlans.iter().map(|v| J::from(*v))),
+                                P::array(app.scope.vlans.iter().map(move |v| J::from(*v))),
                             ),
                         ]),
                     ),
-                    ("source", endpoint(app.source)),
-                    ("destination", endpoint(app.destination)),
+                    ("source", endpoint(app.source).into()),
+                    ("destination", endpoint(app.destination).into()),
                     ("packets", ids(&app.packets)),
                     ("payload", evidence(&app.payload, include_payload)),
                     ("data", data),
@@ -479,33 +559,55 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
         ),
         (
             "fragment_notices",
-            J::array(
-                value
-                    .fragment_notices
-                    .iter()
-                    .map(|n| J::object([("code", n.code.into()), ("packets", ids(&n.packets))])),
+            P::array(
+                value.fragment_notices.iter().map(move |n| {
+                    P::object([("code", n.code.into()), ("packets", ids(&n.packets))])
+                }),
             ),
         ),
         (
             "transaction_candidates",
-            J::array(value.transactions.iter().map(|t| {
-                J::object([
+            P::array(value.transactions.iter().filter_map(move |t| {
+                let pair = bound_modbus_pair(value, t);
+                let needs_binding = t.modbus_pair.is_some()
+                    || (t.protocol == "modbus"
+                        && matches!(t.status, "candidate_pair" | "candidate_unverified_boundary"));
+                if needs_binding && pair.is_none() {
+                    return None;
+                }
+                let mut fields = vec![
                     ("protocol", t.protocol.into()),
                     ("flow", t.flow.into()),
-                    ("requests", J::array(t.requests.iter().map(reference))),
-                    ("responses", J::array(t.responses.iter().map(reference))),
+                    ("requests", P::array(t.requests.iter().map(reference))),
+                    ("responses", P::array(t.responses.iter().map(reference))),
                     ("status", t.status.into()),
                     ("reason", t.reason.into()),
-                ])
+                ];
+                if !t.competing.is_empty() {
+                    fields.push((
+                        "competing_observations",
+                        P::array(t.competing.iter().map(move |(app, kind, index)| {
+                            P::object([("application", (*app).into()), (*kind, (*index).into())])
+                        })),
+                    ));
+                }
+                if let Some((key, field)) = pair.and_then(|p| modbus_pair_fields(p, t.status)) {
+                    fields.push((key, field.into()));
+                }
+                Some(P::Object(fields))
             })),
         ),
         (
             "correlation_error",
-            value.correlation_error.as_ref().map_or(J::Null, error),
+            value
+                .correlation_error
+                .as_ref()
+                .map_or(J::Null, error)
+                .into(),
         ),
         (
             "dnp3_confirmation_candidates",
-            J::array(
+            P::array(
                 value
                     .dnp3_confirmation_candidates
                     .iter()
@@ -517,22 +619,60 @@ pub fn analysis(value: &Analysis, include_payload: bool) -> J {
             value
                 .dnp3_confirmation_error
                 .as_ref()
-                .map_or(J::Null, error),
+                .map_or(J::Null, error)
+                .into(),
         ),
         (
             "attempt_label_matches",
-            J::array(value.attempt_matches.iter().map(|m| {
-                J::object([
+            P::array(value.attempt_matches.iter().map(move |m| {
+                P::object([
                     ("attempt_id", m.attempt_id.clone().into()),
                     ("status", m.status.into()),
                     ("matched_packets", ids(&m.matched_packets)),
                     ("unresolved_time_packets", ids(&m.unresolved_time_packets)),
-                    ("flows", J::array(m.flows.iter().map(|f| J::from(*f)))),
-                    ("messages", J::array(m.messages.iter().map(reference))),
+                    ("flows", P::array(m.flows.iter().map(move |f| J::from(*f)))),
+                    ("messages", P::array(m.messages.iter().map(reference))),
                 ])
             })),
         ),
-    ])
+    ]
+}
+
+/// Collect the full JSON tree for callers that need to inspect or edit it.
+pub fn analysis(value: &Analysis, include_payload: bool) -> J {
+    P::object(snapshot_fields(value, include_payload)).into_json()
+}
+
+fn snapshot_output(value: &Analysis, include_payload: bool, limit: usize) -> Result<Output> {
+    let mut out = Output {
+        text: String::new(),
+        limit,
+    };
+    out.push("{")?;
+    out.fields(snapshot_fields(value, include_payload))?;
+    Ok(out)
+}
+
+/// Encode the same fields as `analysis` within a byte limit including the newline.
+pub fn snapshot_line(value: &Analysis, include_payload: bool, limit: usize) -> Result<String> {
+    let mut out = snapshot_output(value, include_payload, limit)?;
+    out.push("}\n")?;
+    Ok(out.text)
+}
+
+/// Encode the CLI report without retaining the projected capture-wide JSON tree.
+/// The limit includes protocol detection and the final newline.
+pub fn analysis_line(value: &Analysis, include_payload: bool, limit: usize) -> Result<String> {
+    let mut out = snapshot_output(value, include_payload, limit)?;
+    out.push(",\"protocol_detection\":[")?;
+    for (i, record) in crate::detection::flow_records(value).enumerate() {
+        if i != 0 {
+            out.push(",")?;
+        }
+        out.value(&record?)?;
+    }
+    out.push("]}\n")?;
+    Ok(out.text)
 }
 
 pub fn inspect(source: &[u8], limits: Limits, mode: ParseMode, include_payload: bool) -> Result<J> {
@@ -657,8 +797,12 @@ pub fn inspect(source: &[u8], limits: Limits, mode: ParseMode, include_payload: 
     ]))
 }
 
-fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits) -> J {
-    J::object([
+fn dnp3_data<'a>(
+    d: &'a crate::dnp3::Dnp3Result,
+    include_payload: bool,
+    limits: &'a Limits,
+) -> P<'a> {
+    P::object([
         (
             "object_semantics",
             "bounded_source_bound_non_secure_subset".into(),
@@ -666,15 +810,16 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
         ("issues", issues(&d.issues)),
         (
             "rejected_link_ranges",
-            J::array(d.rejected_link_ranges.iter().map(|range| {
-                J::object([
+            P::array(d.rejected_link_ranges.iter().map(move |range| {
+                P::object([
                     ("stream_offset", range.stream_offset.to_string().into()),
                     ("captured_length", range.raw.len().to_string().into()),
                     (
                         "declared_length",
                         range
                             .declared_length
-                            .map_or(J::Null, |n| n.to_string().into()),
+                            .map_or(J::Null, |n| n.to_string().into())
+                            .into(),
                     ),
                     (
                         "status",
@@ -692,21 +837,30 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
         ),
         (
             "link_frames",
-            J::array(d.frames.iter().map(|frame| {
-                J::object([
-                    ("stream_offset", J::string(frame.stream_offset.to_string())),
+            P::array(d.frames.iter().map(move |frame| {
+                P::object([
+                    ("stream_offset", frame.stream_offset.to_string().into()),
                     ("control", frame.control.into()),
                     (
                         "control_semantics",
-                        J::object([
+                        P::object([
                             ("direction_bit", frame.link_control.direction.into()),
                             ("primary", frame.link_control.primary.into()),
-                            ("fcb", frame.link_control.fcb.map_or(J::Null, J::from)),
-                            ("fcv", frame.link_control.fcv.map_or(J::Null, J::from)),
-                            ("dfc", frame.link_control.dfc.map_or(J::Null, J::from)),
+                            (
+                                "fcb",
+                                frame.link_control.fcb.map_or(J::Null, J::from).into(),
+                            ),
+                            (
+                                "fcv",
+                                frame.link_control.fcv.map_or(J::Null, J::from).into(),
+                            ),
+                            (
+                                "dfc",
+                                frame.link_control.dfc.map_or(J::Null, J::from).into(),
+                            ),
                             (
                                 "reserved",
-                                frame.link_control.reserved.map_or(J::Null, J::from),
+                                frame.link_control.reserved.map_or(J::Null, J::from).into(),
                             ),
                             ("function", frame.link_control.function.into()),
                             ("function_name", frame.link_control.function_name.into()),
@@ -724,14 +878,16 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
                         crate::semantics::dnp3_workflow::broadcast_confirm_policy(
                             frame.destination,
                         )
-                        .map_or(J::Null, J::from),
+                        .map_or(J::Null, J::from)
+                        .into(),
                     ),
                     (
                         "link_workflow",
                         crate::semantics::as_json(crate::semantics::dnp3_workflow::link(
                             &frame.raw,
                             crate::semantics::Limits::from_capture(limits),
-                        )),
+                        ))
+                        .into(),
                     ),
                     ("raw", evidence(&frame.raw, false)),
                     ("user_data", evidence(&frame.user_data, include_payload)),
@@ -740,8 +896,8 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
         ),
         (
             "application_fragments",
-            J::array(d.fragments.iter().map(|fragment| {
-                J::object([
+            P::array(d.fragments.iter().map(move |fragment| {
+                P::object([
                     ("control", fragment.control.into()),
                     ("function", fragment.function.into()),
                     (
@@ -752,7 +908,7 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
                     ),
                     ("sequence", fragment.sequence.into()),
                     ("class", fragment.class.as_str().into()),
-                    ("iin", fragment.iin.map_or(J::Null, J::from)),
+                    ("iin", fragment.iin.map_or(J::Null, J::from).into()),
                     ("first", fragment.first.into()),
                     ("final", fragment.final_fragment.into()),
                     (
@@ -761,7 +917,7 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
                     ),
                     (
                         "link_frames",
-                        J::array(fragment.frames.iter().map(|f| J::from(*f))),
+                        P::array(fragment.frames.iter().map(move |f| J::from(*f))),
                     ),
                     ("raw", evidence(&fragment.raw, include_payload)),
                     (
@@ -769,22 +925,24 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
                         crate::semantics::as_json(crate::semantics::dnp3_workflow::application(
                             &fragment.raw,
                             crate::semantics::Limits::from_capture(limits),
-                        )),
+                        ))
+                        .into(),
                     ),
                     (
                         "message_object_semantic_subset",
                         crate::semantics::dnp3::fragment_json(
                             fragment,
                             crate::semantics::Limits::from_capture(limits),
-                        ),
+                        )
+                        .into(),
                     ),
                 ])
             })),
         ),
         (
             "messages",
-            J::array(d.messages.iter().map(|message| {
-                J::object([
+            P::array(d.messages.iter().map(move |message| {
+                P::object([
                     ("source", message.source.into()),
                     ("destination", message.destination.into()),
                     ("function", message.function.into()),
@@ -797,7 +955,7 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
                     ("complete", message.complete.into()),
                     (
                         "fragments",
-                        J::array(message.fragments.iter().map(|f| J::from(*f))),
+                        P::array(message.fragments.iter().map(move |f| J::from(*f))),
                     ),
                     ("packets", ids(&message.packets)),
                     ("objects", evidence(&message.objects, include_payload)),
@@ -808,7 +966,8 @@ fn dnp3_data(d: &crate::dnp3::Dnp3Result, include_payload: bool, limits: &Limits
                             message.function,
                             message.complete,
                             crate::semantics::Limits::from_capture(limits),
-                        ),
+                        )
+                        .into(),
                     ),
                 ])
             })),

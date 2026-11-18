@@ -33,11 +33,17 @@ fn root_engine_recognizes_modbus_without_configured_fixture_port() {
         ..Config::default()
     };
     let analysis = analyze(include_bytes!("fixtures/modbus_tcp.pcap"), config).unwrap();
-    assert!(analysis.applications.iter().any(|a| a.protocol == "modbus"));
     assert!(analysis
-        .flows
+        .applications()
         .iter()
-        .any(|f| detection::classify_flow(f, &analysis.config).unwrap().basis == "content"));
+        .any(|a| a.protocol == "modbus"));
+    assert!(analysis
+        .flows()
+        .iter()
+        .any(|f| detection::classify_flow(f, analysis.config())
+            .unwrap()
+            .basis
+            == "content"));
 }
 #[test]
 fn timestamp_secondary_index_preserves_file_order_and_unknowns() {

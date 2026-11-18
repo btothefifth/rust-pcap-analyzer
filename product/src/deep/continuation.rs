@@ -58,8 +58,8 @@ impl Parser {
             requires_cut: false,
         })
     }
-    fn length(&self) -> Result<Option<usize>> {
-        let b = self.buffer.bytes().data();
+    fn length(&self, consumed: usize) -> Result<Option<usize>> {
+        let b = &self.buffer.bytes().data()[consumed..];
         let n = match self.protocol.as_str() {
             "modbus" => {
                 if b.len() < 6 {
@@ -138,7 +138,19 @@ impl Parser {
         bytes: &EvidenceBytes,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
-        let result = self.feed_inner(offset, bytes, emit);
+        let mut remaining = self.limits.elements;
+        self.feed_with_quota(offset, bytes, &mut remaining, emit)
+    }
+
+    /// Share a frame allowance across all pieces of a logical input range.
+    pub fn feed_with_quota(
+        &mut self,
+        offset: i64,
+        bytes: &EvidenceBytes,
+        remaining: &mut usize,
+        emit: &mut dyn FnMut(Completed) -> Result<()>,
+    ) -> Result<()> {
+        let result = self.feed_inner(offset, bytes, remaining, emit);
         if result.is_err() {
             self.requires_cut = true;
             // Rejected continuation cannot retain an assembly for a later feed.
@@ -153,6 +165,7 @@ impl Parser {
         &mut self,
         offset: i64,
         bytes: &EvidenceBytes,
+        remaining: &mut usize,
         emit: &mut dyn FnMut(Completed) -> Result<()>,
     ) -> Result<()> {
         if self.requires_cut {
@@ -166,11 +179,15 @@ impl Parser {
                 "explicit cut required after rejected evidence",
             ));
         }
+        if *remaining > self.limits.elements {
+            return Err(Error::limit("frame_quota"));
+        }
         if !bytes.validate() {
             return Err(bad("continuation_provenance", 0, "invalid input"));
         }
         let mut p = 0;
-        let mut messages = 0;
+        let mut input_span = 0;
+
         while p < bytes.len() {
             let room = self
                 .limits
@@ -179,73 +196,91 @@ impl Parser {
             if room == 0 {
                 return Err(Error::limit("application_buffer"));
             }
-            let n = room.min(bytes.len() - p);
-            let chunk = bytes.slice(p..p + n)?;
+            let end = self
+                .buffer
+                .span_limited_end(bytes, p, input_span)?
+                .min(p + room.min(bytes.len() - p));
+            let chunk = bytes.slice_sequential(p..end, &mut input_span)?;
             self.buffer.push(
                 offset
                     .checked_add(p as i64)
                     .ok_or_else(|| Error::limit("stream_offset"))?,
                 &chunk,
             )?;
-            p += n;
-            while let Some(n) = match self.length() {
-                Ok(n) => n,
+            p = end;
+            let mut consumed = 0;
+            let result = self.emit_buffered(&mut consumed, remaining, emit);
+            self.buffer.discard_prefix(consumed)?;
+            result?;
+        }
+        Ok(())
+    }
+    fn emit_buffered(
+        &mut self,
+        consumed: &mut usize,
+        remaining: &mut usize,
+        emit: &mut dyn FnMut(Completed) -> Result<()>,
+    ) -> Result<()> {
+        let mut span_cursor = 0;
+        while let Some(n) = self.length(*consumed)? {
+            *remaining = remaining
+                .checked_sub(1)
+                .ok_or_else(|| Error::limit("messages_per_feed"))?;
+            let at = self.buffer.offset() + *consumed as i64;
+            let end = *consumed + n;
+            let raw = self
+                .buffer
+                .bytes()
+                .slice_sequential(*consumed..end, &mut span_cursor)?;
+            *consumed = end;
+            self.last_frame = self.last_frame.max(
+                raw.spans()
+                    .iter()
+                    .map(|s| s.packet.frame)
+                    .max()
+                    .unwrap_or(0),
+            );
+            let report = match self.unit(&raw) {
+                Ok(report) => report,
                 Err(e) => {
-                    self.requires_cut = true;
+                    if self.protocol == "dnp3" {
+                        self.requires_cut = true;
+                        let mut rejected = Report::new("dnp3.rejected", &raw, &self.limits)?;
+                        rejected.note(
+                            match e.code {
+                                pcap_evidence::ErrorCode::LimitExceeded => Status::Limited,
+                                pcap_evidence::ErrorCode::Truncated => Status::Incomplete,
+                                pcap_evidence::ErrorCode::UnsupportedTransport
+                                | pcap_evidence::ErrorCode::UnsupportedVersion => {
+                                    Status::Unsupported
+                                }
+                                _ => Status::Rejected,
+                            },
+                            e.field,
+                            0,
+                            raw.len(),
+                        )?;
+                        emit(Completed {
+                            stream_start: at,
+                            stream_end: at
+                                .checked_add(n as i64)
+                                .ok_or_else(|| Error::limit("stream_offset"))?,
+                            available_at_frame: self.last_frame,
+                            report: rejected,
+                        })?;
+                    }
                     return Err(e);
                 }
-            } {
-                messages += 1;
-                if messages > self.limits.elements {
-                    return Err(Error::limit("messages_per_feed"));
-                }
-                let at = self.buffer.offset();
-                let raw = self.buffer.take(n)?;
-                self.last_frame = self
-                    .last_frame
-                    .max(raw.packets().iter().map(|p| p.frame).max().unwrap_or(0));
-                let report = match self.unit(&raw) {
-                    Ok(report) => report,
-                    Err(e) => {
-                        if self.protocol == "dnp3" {
-                            self.requires_cut = true;
-                            let mut rejected = Report::new("dnp3.rejected", &raw, &self.limits)?;
-                            rejected.note(
-                                match e.code {
-                                    pcap_evidence::ErrorCode::LimitExceeded => Status::Limited,
-                                    pcap_evidence::ErrorCode::Truncated => Status::Incomplete,
-                                    pcap_evidence::ErrorCode::UnsupportedTransport
-                                    | pcap_evidence::ErrorCode::UnsupportedVersion => {
-                                        Status::Unsupported
-                                    }
-                                    _ => Status::Rejected,
-                                },
-                                e.field,
-                                0,
-                                raw.len(),
-                            )?;
-                            emit(Completed {
-                                stream_start: at,
-                                stream_end: at
-                                    .checked_add(n as i64)
-                                    .ok_or_else(|| Error::limit("stream_offset"))?,
-                                available_at_frame: self.last_frame,
-                                report: rejected,
-                            })?;
-                        }
-                        return Err(e);
-                    }
-                };
-                if let Some(report) = report {
-                    emit(Completed {
-                        stream_start: at,
-                        stream_end: at
-                            .checked_add(n as i64)
-                            .ok_or_else(|| Error::limit("stream_offset"))?,
-                        available_at_frame: self.last_frame,
-                        report,
-                    })?;
-                }
+            };
+            if let Some(report) = report {
+                emit(Completed {
+                    stream_start: at,
+                    stream_end: at
+                        .checked_add(n as i64)
+                        .ok_or_else(|| Error::limit("stream_offset"))?,
+                    available_at_frame: self.last_frame,
+                    report,
+                })?;
             }
         }
         Ok(())
@@ -257,7 +292,7 @@ impl Parser {
                 let value = pcap_evidence::semantics::modbus::alternatives_json(
                     raw,
                     pcap_evidence::modbus::Role::Unknown,
-                    pcap_evidence::semantics::Limits::default(),
+                    self.semantic_limits(),
                 );
                 r.add(
                     "wire_semantic_alternatives",
@@ -290,7 +325,7 @@ impl Parser {
                         pcap_evidence::semantics::as_json(
                             pcap_evidence::semantics::dnp3_workflow::link(
                                 raw,
-                                self.dnp_semantic_limits(),
+                                self.semantic_limits(),
                             ),
                         ),
                         0..raw.len(),
@@ -424,7 +459,7 @@ impl Parser {
                 };
                 let root = pcap_evidence::semantics::dnp3_workflow::application(
                     &state.pending,
-                    self.dnp_semantic_limits(),
+                    self.semantic_limits(),
                 )?;
                 let status = match root.status() {
                     pcap_evidence::semantics::Status::DecodedSubset => Status::Observed,
@@ -634,7 +669,7 @@ impl Parser {
         }
         Ok(())
     }
-    fn dnp_semantic_limits(&self) -> pcap_evidence::semantics::Limits {
+    fn semantic_limits(&self) -> pcap_evidence::semantics::Limits {
         let d = pcap_evidence::semantics::Limits::default();
         pcap_evidence::semantics::Limits {
             max_input_bytes: d.max_input_bytes.min(self.limits.input_bytes),

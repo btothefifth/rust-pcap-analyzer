@@ -71,6 +71,7 @@ fn fragment(frame: u64, offset: usize, more: bool, protocol: u8, bytes: &[u8]) -
         protocol,
         ipv6: true,
         network_header_len: 48,
+        declared_payload_len: bytes.len(),
         fragment: Some(FragmentInfo {
             id: 123,
             offset,
@@ -204,6 +205,41 @@ fn ipv6_next_header_variation_cannot_hide_an_overlap() {
     match r.push(fragment(2, 0, true, 6, b"XXXXXXXX"), 2).unwrap() {
         FragmentOutcome::Rejected(n) => assert_eq!(n.code, "ipv6_overlapping_fragments"),
         _ => panic!("overlap must not create a separate protocol-keyed set"),
+    }
+}
+#[test]
+fn identical_ipv4_overlap_uses_offset_order_for_source_spans() {
+    let data = (0..40u8).collect::<Vec<_>>();
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let mut r = FragmentReassembler::new(Limits::default());
+        let ranges = [0..16, 16..32, 8..32, 32..40];
+        for i in order.into_iter().chain([3]) {
+            let range = ranges[i].clone();
+            let mut part = fragment(i as u64 + 1, range.start, i != 3, 17, &data[range]);
+            part.ipv6 = false;
+            part.source = "192.0.2.1".parse().unwrap();
+            part.destination = "192.0.2.2".parse().unwrap();
+            if let FragmentOutcome::Complete(d, _) = r.push(part, i as u64 + 1).unwrap() {
+                assert_eq!(i, 3);
+                assert_eq!(d.payload.data(), &data);
+                let spans: Vec<_> = d
+                    .payload
+                    .spans()
+                    .iter()
+                    .map(|s| (s.start, s.end, s.packet.frame, s.packet_start))
+                    .collect();
+                assert_eq!(spans, [(0, 16, 1, 0), (16, 32, 3, 8), (32, 40, 4, 0)]);
+            } else {
+                assert_ne!(i, 3);
+            }
+        }
     }
 }
 #[test]
@@ -493,7 +529,7 @@ fn udp_dnp3_reaches_engine_and_report_with_original_contributors() {
     let capture = udp_capture(&[dnp_frame(&[0xc0, 0xc0, 1, 0x3c, 2, 6], 1, 2)]);
     let parsed = engine::analyze(&capture, Config::default()).unwrap();
     assert_eq!(parsed.datagrams.len(), 1);
-    assert!(parsed.flows.is_empty());
+    assert!(parsed.flows().is_empty());
     assert!(matches!(parsed.packets[0].disposition, Disposition::Udp));
     assert_eq!(parsed.datagrams[0].packets, vec![parsed.packets[0].id]);
     let dnp = parsed.datagrams[0].data.as_ref().unwrap();
@@ -723,7 +759,7 @@ fn engine_does_not_silently_choose_between_conflicting_protocol_endpoints() {
     // observed flow. Configuring that distinct port as DNP3 creates a conflict.
     let capture = fixture("modbus_tcp.pcap");
     let initial = engine::analyze(&capture, Config::default()).unwrap();
-    let flow = &initial.flows[0];
+    let flow = &initial.flows()[0];
     let other = if flow.key.a.port == 502 {
         flow.key.b.port
     } else {
@@ -734,9 +770,9 @@ fn engine_does_not_silently_choose_between_conflicting_protocol_endpoints() {
         ..Config::default()
     };
     let analysis = engine::analyze(&capture, config).unwrap();
-    assert!(!analysis.applications.is_empty());
+    assert!(!analysis.applications().is_empty());
     assert!(analysis
-        .applications
+        .applications()
         .iter()
         .all(|app| app.protocol == "ambiguous" && matches!(app.data, ApplicationData::Failed(_))));
     assert!(analysis.transactions.is_empty());

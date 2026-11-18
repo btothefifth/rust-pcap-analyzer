@@ -70,6 +70,25 @@ impl EvidenceBytes {
     }
 
     pub fn slice(&self, range: Range<usize>) -> Result<Self> {
+        self.slice_from(range, &mut 0)
+    }
+
+    /// Use the supplied span index when it covers the requested start;
+    /// otherwise locate that start by binary search.
+    pub fn slice_from(&self, range: Range<usize>, cursor: &mut usize) -> Result<Self> {
+        if !self
+            .spans
+            .get(*cursor)
+            .is_some_and(|s| s.start <= range.start && range.start < s.end)
+        {
+            *cursor = self.spans.partition_point(|s| s.end <= range.start);
+        }
+        self.slice_sequential(range, cursor)
+    }
+
+    /// Read consecutive slices with an index initially set to zero. A stale
+    /// index is an error, so a sequential consumer never searches past input.
+    pub fn slice_sequential(&self, range: Range<usize>, cursor: &mut usize) -> Result<Self> {
         if !self.layout_valid {
             return Err(invalid("invalid source-span layout"));
         }
@@ -81,14 +100,24 @@ impl EvidenceBytes {
                 "slice outside retained evidence",
             ));
         }
-        // Spans are contiguous and sorted by construction. Do not walk unrelated
-        // prefix spans for every small protocol field extracted from a stream.
-        let first = self.spans.partition_point(|span| span.end <= range.start);
+        let first = *cursor;
+        if first > self.spans.len()
+            || (!range.is_empty()
+                && !self
+                    .spans
+                    .get(first)
+                    .is_some_and(|span| span.start <= range.start && range.start < span.end))
+        {
+            return Err(invalid("span cursor does not cover requested range"));
+        }
         let mut spans = Vec::new();
         for s in self.spans[first..]
             .iter()
             .take_while(|s| s.start < range.end)
         {
+            if s.end <= range.end {
+                *cursor += 1;
+            }
             let a = s.start.max(range.start);
             let b = s.end.min(range.end);
             if a < b {
@@ -110,6 +139,21 @@ impl EvidenceBytes {
         })
     }
 
+    /// Adjacent slices of one physical packet share a single retained span.
+    pub fn appended_span_count(&self, other: &Self) -> usize {
+        let merged = self
+            .spans
+            .last()
+            .zip(other.spans.first())
+            .is_some_and(|(a, b)| Self::contiguous_source(a, b));
+        self.spans
+            .len()
+            .saturating_add(other.spans.len())
+            .saturating_sub(usize::from(merged))
+    }
+    fn contiguous_source(a: &SourceSpan, b: &SourceSpan) -> bool {
+        a.packet == b.packet && a.packet_start.checked_add(a.end - a.start) == Some(b.packet_start)
+    }
     pub fn append(&mut self, other: &Self, limit: usize) -> Result<()> {
         if !self.layout_valid || !other.layout_valid {
             return Err(invalid("invalid source-span layout"));
@@ -138,11 +182,7 @@ impl EvidenceBytes {
                 packet_start: s.packet_start,
             };
             if let Some(last) = self.spans.last_mut() {
-                if last.packet == next.packet
-                    && last.end == next.start
-                    && last.packet_start.checked_add(last.end - last.start)
-                        == Some(next.packet_start)
-                {
+                if last.end == next.start && Self::contiguous_source(last, &next) {
                     last.end = next.end;
                     continue;
                 }
@@ -151,6 +191,13 @@ impl EvidenceBytes {
         }
         Ok(())
     }
+    /// Capture identity shared by every contributing byte, if established.
+    pub(crate) fn capture_scope(&self) -> Option<[u8; 32]> {
+        let capture = self.spans.first()?.packet.capture;
+        (self.validate() && self.spans.iter().all(|s| s.packet.capture == capture))
+            .then_some(capture)
+    }
+
     pub fn packets(&self) -> Vec<PacketId> {
         let mut ids: Vec<_> = self.spans.iter().map(|s| s.packet).collect();
         ids.sort();

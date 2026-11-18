@@ -58,14 +58,14 @@ fuzz_target!(|data: &[u8]| {
                 Disposition::Pending | Disposition::FragmentPending
             ));
         }
-        for flow in &analysis.flows {
+        for flow in analysis.flows() {
             for stream in flow.streams.iter().flatten() {
                 for chunk in &stream.chunks {
                     check(&chunk.bytes);
                 }
             }
         }
-        for app in &analysis.applications {
+        for app in analysis.applications() {
             match &app.data {
                 ApplicationData::Dnp3(d) => dnp_bytes(d, &check),
                 ApplicationData::Modbus(m) => {
@@ -73,7 +73,7 @@ fuzz_target!(|data: &[u8]| {
                         check(&message.raw);
                     }
                 }
-                ApplicationData::Failed(_) => {}
+                ApplicationData::Failed(_) | ApplicationData::ModbusFailed { .. } => {}
             }
         }
         for datagram in &analysis.datagrams {

@@ -666,3 +666,164 @@ fn ua_open_and_close_obey_channel_budget_and_sequence_wrap() {
     }
     assert_eq!(output.len(), 3);
 }
+
+#[test]
+fn modbus_coalesced_and_fragmented_input_preserve_values_and_packet_offsets() {
+    let adu = [0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1];
+    for size in [16, 32, 64] {
+        let wire = adu.repeat(size);
+        let packet = PacketId {
+            capture: [9; 32],
+            frame: 7,
+            record_offset: 400,
+        };
+        let mut expected = None;
+        for stride in [wire.len(), 1] {
+            let mut parser = Parser::new(
+                "modbus",
+                Limits {
+                    input_bytes: 2048,
+                    elements: 128,
+                    spans: 2048,
+                    output_bytes: 65536,
+                    ..Limits::default()
+                },
+                Context::default(),
+            )
+            .unwrap();
+            let started = std::time::Instant::now();
+            let mut reports = Vec::new();
+            for (i, page) in wire.chunks(stride).enumerate() {
+                let offset = i * stride;
+                parser
+                    .feed(
+                        offset as i64,
+                        &EvidenceBytes::from_packet(page, packet, offset),
+                        &mut |item| {
+                            let span = &item.report.evidence.spans()[0];
+                            assert_eq!(span.packet_start, reports.len() * adu.len());
+                            assert_eq!(item.report.evidence.data(), adu);
+                            let encoded = item.report.json().encode();
+                            assert!(encoded.contains("and_mask"));
+                            reports.push(pcap_evidence::sha256::digest(encoded.as_bytes()));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+            }
+            assert!(parser.finish().unwrap().is_none());
+            assert_eq!(reports.len(), size);
+            eprintln!(
+                "messages={size} stride={stride} elapsed_us={} digest={:?}",
+                started.elapsed().as_micros(),
+                reports.last().unwrap()
+            );
+            if let Some(previous) = &expected {
+                assert_eq!(&reports, previous)
+            } else {
+                expected = Some(reports)
+            }
+        }
+    }
+}
+
+#[test]
+fn modbus_many_packet_spans_survive_batch_and_byte_feeds() {
+    let adu = [0, 1, 0, 0, 0, 8, 1, 22, 0, 8, 0xff, 0, 0, 1];
+    for count in [16, 32, 64] {
+        let mut wire = EvidenceBytes::default();
+        for (i, byte) in adu.iter().cycle().take(count * adu.len()).enumerate() {
+            let packet = PacketId {
+                capture: [7; 32],
+                frame: i as u64 + 1,
+                record_offset: 64 * i as u64,
+            };
+            wire.append(&EvidenceBytes::from_packet(&[*byte], packet, 42), 2048)
+                .unwrap();
+        }
+        let mut expected = None;
+        for pass in ["first", "repeat"] {
+            for (stride, input_bytes) in [
+                (wire.len(), 2048),
+                (wire.len(), adu.len() + 1),
+                (wire.len(), adu.len()),
+                (1, 2048),
+            ] {
+                let mut parser = Parser::new(
+                    "modbus",
+                    Limits {
+                        input_bytes,
+                        elements: 128,
+                        spans: 2048,
+                        output_bytes: 65536,
+                        ..Limits::default()
+                    },
+                    Context::default(),
+                )
+                .unwrap();
+                let started = std::time::Instant::now();
+                let mut hashes = Vec::new();
+                let mut emitted_spans = 0;
+                for start in (0..wire.len()).step_by(stride) {
+                    parser
+                        .feed(
+                            start as i64,
+                            &wire.slice(start..start + stride).unwrap(),
+                            &mut |item| {
+                                assert_eq!(item.report.evidence.data(), adu);
+                                for s in item.report.evidence.spans() {
+                                    assert_eq!(s.packet.frame, emitted_spans + 1);
+                                    assert_eq!((s.end - s.start, s.packet_start), (1, 42));
+                                    emitted_spans += 1;
+                                }
+                                let encoded = item.report.encode().unwrap();
+                                assert!(encoded.contains("and_mask"));
+                                hashes.push(pcap_evidence::sha256::digest(encoded.as_bytes()));
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                }
+                assert!(parser.finish().unwrap().is_none());
+                assert_eq!((hashes.len(), emitted_spans), (count, wire.len() as u64));
+                if let Some(previous) = &expected {
+                    assert_eq!(&hashes, previous)
+                } else {
+                    expected = Some(hashes)
+                }
+                eprintln!("pass={pass} count={count} stride={stride} input_bytes={input_bytes} emitted_spans={emitted_spans} elapsed_us={}",started.elapsed().as_micros());
+            }
+        }
+    }
+}
+
+#[test]
+fn oversized_external_frame_quota_requires_a_cut() {
+    let bytes = [0, 1, 0, 0, 0, 3, 1, 0x83, 2];
+    let mut parser = Parser::new("modbus", Limits::default(), Context::default()).unwrap();
+    parser
+        .feed(0, &evidence(&bytes[..4], 1), &mut |_| unreachable!())
+        .unwrap();
+    let tail = evidence(&bytes[4..], 2);
+    let mut quota = usize::MAX;
+    let error = parser
+        .feed_with_quota(4, &tail, &mut quota, &mut |_| unreachable!())
+        .unwrap_err();
+    assert_eq!(error.field, "frame_quota");
+    assert_eq!(
+        parser
+            .feed(4, &tail, &mut |_| unreachable!())
+            .unwrap_err()
+            .field,
+        "continuation_requires_cut"
+    );
+    parser.cut("invalid_frame_allowance").unwrap();
+    let mut count = 0;
+    parser
+        .feed(0, &evidence(&bytes, 3), &mut |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+}

@@ -160,6 +160,17 @@ impl History {
         start: i64,
         end: i64,
     ) -> Result<Json> {
+        self.range_with_next_start(generation, direction, start, end)
+            .map(|(report, _)| report)
+    }
+
+    fn range_with_next_start(
+        &mut self,
+        generation: [u8; 32],
+        direction: u8,
+        start: i64,
+        end: i64,
+    ) -> Result<(Json, Option<i64>)> {
         let size = end
             .checked_sub(start)
             .filter(|n| *n > 0)
@@ -173,6 +184,7 @@ impl History {
         let mut work = 0u64;
         let mut scanned = 0usize;
         let mut boundaries = BTreeSet::from([start, end]);
+        let mut next_start = None;
         while at < self.index.count {
             // Charge the index scan before filtering: short intervals preceding
             // start are still reads, even though they produce no observation.
@@ -186,7 +198,11 @@ impl History {
                 .ok_or_else(|| Error::limit("query_work"))?;
             let row = self.index.at(at)?;
             at += 1;
-            if row.generation != generation || row.direction != direction || row.start >= end {
+            if row.generation != generation || row.direction != direction {
+                break;
+            }
+            if row.start >= end {
+                next_start = Some(row.start);
                 break;
             }
             if row.end <= start {
@@ -230,7 +246,7 @@ impl History {
         for pair in cuts.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let mut selected: Option<&[u8]> = None;
-            let mut conflict = false;
+            let mut conflicts: Vec<bool> = Vec::new();
             let mut uncertain = false;
             let mut ids = Vec::new();
             for (i, (row, input, _decision)) in observations.iter().enumerate() {
@@ -248,41 +264,67 @@ impl History {
                     if work > self.config.max_query_work {
                         return Err(Error::limit("query_work"));
                     }
-                    if selected.is_some_and(|old| old != raw) {
-                        conflict = true;
+                    if let Some(first) = selected {
+                        if !conflicts.is_empty() || first != raw {
+                            conflicts.resize(raw.len(), false);
+                            for ((differs, left), right) in conflicts.iter_mut().zip(first).zip(raw)
+                            {
+                                *differs |= left != right;
+                            }
+                        }
+                    } else {
+                        selected = Some(raw);
                     }
-                    selected.get_or_insert(raw);
                     uncertain |= !row.selected;
-                    references += 1;
-                    if references > self.config.max_query_intervals.saturating_mul(4) {
-                        return Err(Error::limit("query_evidence_references"));
-                    }
                     ids.push(Json::from(i));
                 }
             }
-            let status = if selected.is_none() {
-                "gap"
-            } else if conflict {
-                "conflicting_bytes"
-            } else if uncertain {
-                "ambiguous_sequence_placement"
-            } else {
-                "candidate"
+            // Placement is constant over this interval, but its observations
+            // may agree on only part of the payload. Split at byte disagreements.
+            let mut emit = |lo: usize, hi: usize, conflict: bool| -> Result<()> {
+                references = references
+                    .checked_add(ids.len())
+                    .filter(|&n| n <= self.config.max_query_intervals.saturating_mul(4))
+                    .ok_or_else(|| Error::limit("query_evidence_references"))?;
+                let status = if conflict {
+                    "conflicting_bytes"
+                } else if uncertain {
+                    "ambiguous_sequence_placement"
+                } else if selected.is_some() {
+                    "candidate"
+                } else {
+                    "gap"
+                };
+                let bytes = selected.filter(|_| !conflict && !uncertain);
+                pieces.push(Json::object([
+                    ("start", (a + lo as i64).to_string().into()),
+                    ("end", (a + hi as i64).to_string().into()),
+                    ("status", status.into()),
+                    (
+                        "observation_ids",
+                        Json::Array(if hi == (b - a) as usize {
+                            std::mem::take(&mut ids)
+                        } else {
+                            ids.clone()
+                        }),
+                    ),
+                    (
+                        "bytes_hex",
+                        bytes.map_or(Json::Null, |raw| sha256::hex(&raw[lo..hi]).into()),
+                    ),
+                ]));
+                Ok(())
             };
-            pieces.push(Json::object([
-                ("start", a.to_string().into()),
-                ("end", b.to_string().into()),
-                ("status", status.into()),
-                ("observation_ids", Json::Array(ids)),
-                (
-                    "bytes_hex",
-                    if conflict || uncertain {
-                        Json::Null
-                    } else {
-                        selected.map_or(Json::Null, |bytes| sha256::hex(bytes).into())
-                    },
-                ),
-            ]));
+            if conflicts.is_empty() {
+                emit(0, (b - a) as usize, false)?;
+            } else {
+                let mut lo = 0;
+                for run in conflicts.chunk_by(|x, y| x == y) {
+                    let hi = lo + run.len();
+                    emit(lo, hi, run[0])?;
+                    lo = hi;
+                }
+            }
         }
         let evidence = observations
             .iter()
@@ -332,6 +374,28 @@ impl History {
             ("observations", Json::array(evidence)),
         ]);
         result.encode_bounded(self.config.max_record_bytes)?;
-        Ok(result)
+        Ok((result, next_start))
+    }
+
+    /// Read one page of a selection. A trailing gap extends to the next indexed
+    /// placement or the selection end without reading empty pages in between.
+    pub fn evidence_page(
+        &mut self,
+        generation: [u8; 32],
+        direction: u8,
+        start: i64,
+        end: i64,
+        page_bytes: usize,
+    ) -> Result<Vec<EvidencePiece>> {
+        if page_bytes == 0 || page_bytes > self.config.max_query_bytes {
+            return Err(Error::limit("query_bytes"));
+        }
+        let page_end = start.saturating_add_unsigned(page_bytes as u64).min(end);
+        let (report, next) = self.range_with_next_start(generation, direction, start, page_end)?;
+        let mut pieces = self.typed_evidence(report)?.pieces;
+        if let Some(gap) = pieces.last_mut().filter(|p| p.status == "gap") {
+            gap.end = next.unwrap_or(end).min(end);
+        }
+        Ok(pieces)
     }
 }

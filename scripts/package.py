@@ -76,7 +76,7 @@ def selected(name, profile):
         if relative.parts[:2] == ('.github', 'workflows'):
             return relative.name in {'ci.yml', 'hardening.yml'}
         if relative.parts[0] == 'docs' and len(relative.parts) > 2:
-            return relative.parts[1] in {'streaming', 'semantics'}
+            return relative.parts[1] in {'streaming', 'semantics'} or name == 'docs/product/NEXT_PARSER_SLICE.md'
     return True
 
 

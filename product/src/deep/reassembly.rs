@@ -307,6 +307,27 @@ impl StreamBuffer {
             poisoned: false,
         })
     }
+    /// Largest prefix that fits before complete frames must be drained.
+    pub(super) fn span_limited_end(
+        &self,
+        input: &EvidenceBytes,
+        start: usize,
+        cursor: usize,
+    ) -> Result<usize> {
+        let spans = &input.spans()[cursor..];
+        let first = &spans[0];
+        let merges = self.pending.spans().last().is_some_and(|last| {
+            last.packet == first.packet
+                && last.packet_start + (last.end - last.start)
+                    == first.packet_start + (start - first.start)
+        });
+        let slots = self.spans - self.pending.spans().len() + usize::from(merges);
+        spans[..slots.min(spans.len())]
+            .last()
+            .map(|span| span.end)
+            .ok_or_else(|| Error::limit("stream_buffer_spans"))
+    }
+
     pub fn push(&mut self, offset: i64, bytes: &EvidenceBytes) -> Result<()> {
         if self.poisoned {
             return Err(bad("stream_buffer", 0, "explicit gap/reset required"));
@@ -318,13 +339,7 @@ impl StreamBuffer {
         let end = offset
             .checked_add(i64::try_from(bytes.len()).map_err(|_| Error::limit("stream_offset"))?)
             .ok_or_else(|| Error::limit("stream_offset"))?;
-        if self
-            .pending
-            .spans()
-            .len()
-            .saturating_add(bytes.spans().len())
-            > self.spans
-        {
+        if self.pending.appended_span_count(bytes) > self.spans {
             return Err(Error::limit("stream_buffer_spans"));
         }
         if self.pending.is_empty() {
@@ -345,13 +360,24 @@ impl StreamBuffer {
             return Err(bad("stream_buffer", 0, "invalid consumed extent"));
         }
         let out = self.pending.slice(0..count)?;
-        let rest = self.pending.slice(count..self.pending.len())?;
+        self.discard_prefix(count)?;
+        Ok(out)
+    }
+    pub(super) fn discard_prefix(&mut self, count: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let rest = if count == self.pending.len() {
+            EvidenceBytes::default()
+        } else {
+            self.pending.slice(count..self.pending.len())?
+        };
         self.base = self
             .base
             .checked_add(count as i64)
             .ok_or_else(|| Error::limit("stream_offset"))?;
         self.pending = rest;
-        Ok(out)
+        Ok(())
     }
     pub fn gap(&mut self) -> EvidenceBytes {
         self.next = None;

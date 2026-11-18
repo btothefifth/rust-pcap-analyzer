@@ -1,4 +1,4 @@
-//! Small generated packet witnesses shared by history regression consumers.
+//! Small generated packet witnesses for streaming and history regression tests.
 #![allow(dead_code)]
 use std::{
     fs,
@@ -95,6 +95,17 @@ pub fn tcp(
     flags: u8,
     payload: &[u8],
 ) -> Vec<u8> {
+    tcp_with_options(reverse, sequence, acknowledgment, flags, &[], payload)
+}
+pub fn tcp_with_options(
+    reverse: bool,
+    sequence: u32,
+    acknowledgment: u32,
+    flags: u8,
+    options: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    assert!(options.len() <= 40 && options.len() % 4 == 0);
     let (source, destination, a, b) = if reverse {
         ([10, 0, 0, 2], [10, 0, 0, 1], 2000u16, 1000u16)
     } else {
@@ -105,7 +116,9 @@ pub fn tcp(
     segment.extend_from_slice(&b.to_be_bytes());
     segment.extend_from_slice(&sequence.to_be_bytes());
     segment.extend_from_slice(&acknowledgment.to_be_bytes());
-    segment.extend_from_slice(&[0x50, flags, 0x20, 0, 0, 0, 0, 0]);
+    let data_offset = ((20 + options.len()) / 4) as u8;
+    segment.extend_from_slice(&[data_offset << 4, flags, 0x20, 0, 0, 0, 0, 0]);
+    segment.extend_from_slice(options);
     segment.extend_from_slice(payload);
     let mut pseudo = Vec::from(source);
     pseudo.extend_from_slice(&destination);
@@ -115,6 +128,19 @@ pub fn tcp(
     let sum = checksum(&pseudo);
     segment[16..18].copy_from_slice(&sum.to_be_bytes());
     ethernet(&ipv4(source, destination, 6, &segment))
+}
+pub fn ipv4_fragment(frame: &[u8], range: std::ops::Range<usize>, more: bool) -> Vec<u8> {
+    assert_eq!(range.start % 8, 0);
+    let mut header = frame[..34].to_vec();
+    let length = u16::try_from(20 + range.len()).unwrap();
+    header[16..18].copy_from_slice(&length.to_be_bytes());
+    let flags_offset = (u16::from(more) << 13) | (range.start / 8) as u16;
+    header[20..22].copy_from_slice(&flags_offset.to_be_bytes());
+    header[24..26].fill(0);
+    let sum = checksum(&header[14..34]);
+    header[24..26].copy_from_slice(&sum.to_be_bytes());
+    header.extend_from_slice(&frame[34 + range.start..34 + range.end]);
+    header
 }
 pub fn tunneled(kind: &str, identity: u32, reverse: bool, inner: &[u8]) -> Vec<u8> {
     let (source, destination) = if reverse {

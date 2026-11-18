@@ -208,7 +208,7 @@ fn labels_produce_candidate_edges_not_attack_truth() {
 #[test]
 fn label_changes_are_semantically_inert_to_packet_stream_reconstruction() {
     let mut analysis = analyze(&fixture("dnp3_tcp.pcap"), Config::default()).unwrap();
-    let before = analysis.flows[0].streams[0].as_ref().unwrap().chunks[0]
+    let before = analysis.flows()[0].streams[0].as_ref().unwrap().chunks[0]
         .bytes
         .clone();
     apply_labels(
@@ -217,7 +217,7 @@ fn label_changes_are_semantically_inert_to_packet_stream_reconstruction() {
     )
     .unwrap();
     assert_eq!(
-        analysis.flows[0].streams[0].as_ref().unwrap().chunks[0].bytes,
+        analysis.flows()[0].streams[0].as_ref().unwrap().chunks[0].bytes,
         before
     );
     let before_matches = analysis.attempt_matches.len();

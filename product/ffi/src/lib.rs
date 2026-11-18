@@ -129,7 +129,7 @@ pub extern "C" fn pcap_analyze(id: u64) -> i32 {
             let mut c = Config::default();
             c.limits.max_input_bytes = h.max_input;
             match engine::analyze(&h.input, c) {
-                Ok(a) => match report::analysis(&a, false).encode_bounded_line(h.max_output) {
+                Ok(a) => match report::snapshot_line(&a, false, h.max_output) {
                     Ok(v) => {
                         h.output = v.into_bytes();
                         h.successful = true;

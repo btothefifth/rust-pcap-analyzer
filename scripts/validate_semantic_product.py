@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import struct
 import subprocess
 import sys
 from pathlib import Path
+
+from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -21,6 +25,12 @@ FIXTURES = (
     "dnp3_split_valid.pcap",
     "modbus_bits_bad_padding.pcap",
     "modbus_bits_valid.pcap",
+    "modbus_fc23_split.pcap",
+    "modbus_generation_overlap.pcap",
+    "modbus_interleaved.pcap",
+    "modbus_partial_same.pcap",
+    "modbus_partial_sibling.pcap",
+    "modbus_mei_exception_reuse.pcap",
 )
 
 
@@ -32,6 +42,9 @@ def run_product(binary: Path, capture: Path, output: Path, output_format: str, r
             str(capture),
             "--profile",
             "ics-full",
+            "--max-packets", "32",
+            "--max-output-bytes", "1048576",
+            "--window-bytes", "4096",
             "--format",
             output_format,
             "-o",
@@ -78,6 +91,66 @@ def semantic_event_count(values: list[dict]) -> int:
     return count
 
 
+def packet_bytes(capture):
+    packets = []
+    data = capture.read_bytes()
+    offset = 24
+    while offset < len(data):
+        length = struct.unpack_from('<I', data, offset + 8)[0]
+        packets.append(data[offset + 16:offset + 16 + length])
+        offset += 16 + length
+    return packets
+
+
+def field_bytes(field, packets):
+    raw = bytearray()
+    for span in field["evidence"]["spans"]:
+        packet = packets[int(span["frame"]) - 1]
+        start = int(span["packet_start"])
+        raw.extend(packet[start:start + int(span["end"]) - int(span["start"])])
+    return raw
+
+
+def verify_device_objects(events, capture):
+    packets = packet_bytes(capture)
+    objects = 0
+    for event in events:
+        subset = event["data"].get("semantic_subset", {})
+        for report in subset.get("interpretations", []):
+            for record in report["records"]:
+                for field in record["fields"]:
+                    if field["name"] == "object_value_octet_count":
+                        raw = field_bytes(field, packets)
+                        if (field["type"] != "unsigned" or field["value"] != str(len(raw))
+                                or field["evidence"]["sha256"] != hashlib.sha256(raw).hexdigest()):
+                            raise AssertionError("FC43 device object differs from its wire bytes")
+                        objects += 1
+    if not objects:
+        raise AssertionError("missing FC43 device objects")
+
+
+def verify_split_fc23(events, capture):
+    packets = packet_bytes(capture)
+    mapping, = [e["data"]["read_mapping"] for e in events if e["kind"] == "transaction.candidate"]
+    if (mapping["starting_address_zero_based"], mapping["quantity"]) != (0xabcd, 2):
+        raise AssertionError("FC23 read mapping differs from the wire request")
+    by_id = {e["sequence"]: e for e in events}
+    for role, name, expected, frames in [
+        ("request", "read_start_zero_based", b"\xab\xcd", [4, 5]),
+        ("response", "register_u16", b"\x12\x34", [6, 7]),
+    ]:
+        message = by_id[mapping[role]]["data"]
+        if message["role"] != role:
+            raise AssertionError(f"FC23 mapping references the wrong {role}")
+        report, = message["semantic_subset"]["interpretations"]
+        field = next(f for rec in report["records"] for f in rec["fields"] if f["name"] == name)
+        spans = field["evidence"]["spans"]
+        raw = field_bytes(field, packets)
+        if ([int(s["frame"]) for s in spans] != frames or raw != expected
+                or int(field["value"]) != int.from_bytes(expected, "big")):
+            raise AssertionError(f"FC23 {name} differs from its packet witnesses")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -93,6 +166,7 @@ def main() -> int:
     fixture_root = ROOT / "fixtures" / "semantics"
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
+    validator = Draft202012Validator(json.loads((ROOT / "docs/semantics/semantic.schema.json").read_text()))
     results = []
     for fixture_name in FIXTURES:
         capture = fixture_root / fixture_name
@@ -108,6 +182,17 @@ def main() -> int:
                 if left != right:
                     raise AssertionError(f"{capture.name}: event {index} differs between NDJSON and TLV")
             raise AssertionError(f"{capture.name}: event counts differ")
+        if not ndjson or ndjson[-1].get("kind") != "capture.complete":
+            raise AssertionError(f"{capture.name}: missing terminal capture event")
+        if ndjson[-1]["data"].get("source_sha256") != hashlib.sha256(capture.read_bytes()).hexdigest():
+            raise AssertionError(f"{capture.name}: incorrect source hash")
+        for event in ndjson:
+            if "semantic_subset" in event["data"]:
+                validator.validate(event["data"]["semantic_subset"])
+        if fixture_name == "modbus_fc23_split.pcap":
+            verify_split_fc23(ndjson, capture)
+        if fixture_name == "modbus_interleaved.pcap":
+            verify_device_objects(ndjson, capture)
         results.append(
             {
                 "fixture": fixture_name,

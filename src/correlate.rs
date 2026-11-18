@@ -9,7 +9,7 @@ pub use dnp3_confirmations::{
 use crate::dnp3::MessageClass;
 use crate::engine::{Analysis, ApplicationAnalysis, ApplicationData};
 use crate::modbus::Role;
-use crate::provenance::{EvidenceBytes, PacketId};
+use crate::provenance::PacketId;
 use crate::wire::Endpoint;
 use crate::{Error, ErrorCode, Limits, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +28,18 @@ pub struct Transaction {
     pub responses: Vec<MessageRef>,
     pub status: &'static str,
     pub reason: &'static str,
+    pub(crate) competing: Vec<(usize, &'static str, usize)>,
+    pub(crate) modbus_pair: Option<(&'static str, &'static str, ModbusPair)>,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct ModbusPair {
+    pub capture: [u8; 32],
+    pub flow: usize,
+    pub generation: Option<(usize, crate::tcp::FlowKey)>,
+    pub refs: [MessageRef; 2],
+    pub directions: [usize; 2],
+    pub bindings: [crate::modbus::MessageBinding; 2],
+    pub tokens: [String; 2],
 }
 #[derive(Default)]
 struct Group {
@@ -36,27 +48,26 @@ struct Group {
     uncertain_boundary: bool,
 }
 
-// An absent, invalid or mixed-capture witness has no assignable source scope.
-fn capture_scope(raw: &EvidenceBytes) -> Option<[u8; 32]> {
-    if !raw.validate() {
-        return None;
-    }
-    let capture = raw.spans().first()?.packet.capture;
-    raw.spans()
-        .iter()
-        .all(|span| span.packet.capture == capture)
-        .then_some(capture)
-}
-
-/// Pair within one capture and connection generation. Reused small sequence
-/// numbers remain ambiguous rather than being joined by an invented clock/order heuristic.
+/// Group application observations by capture and caller-assigned flow. Reused
+/// identifiers remain ambiguous. Use `engine::analyze` for snapshot mappings
+/// checked against transport generations, gaps and conflicts.
 pub fn transactions(
     applications: &[ApplicationAnalysis],
     limits: &Limits,
 ) -> Result<Vec<Transaction>> {
+    transactions_with_flows(applications, limits, &[])
+}
+
+pub(crate) fn transactions_with_flows(
+    applications: &[ApplicationAnalysis],
+    limits: &Limits,
+    flows: &[crate::tcp::FlowResult],
+) -> Result<Vec<Transaction>> {
     // Protocol, capture, flow, controller address/unit, outstation address, sequence/tx ID, function.
     type Key = (&'static str, [u8; 32], usize, u16, u16, u16, u8);
     let mut groups: BTreeMap<Key, Group> = BTreeMap::new();
+    let mut incomplete: BTreeMap<_, crate::modbus::CompetingEvidence<_>> = BTreeMap::new();
+    let mut failed_modbus_flows = BTreeSet::new();
     let mut output = Vec::new();
     let mut count = 0usize;
     let mut dnp_work = 0usize;
@@ -126,6 +137,8 @@ pub fn transactions(
                             }
                         };
                         output.push(Transaction {
+                            modbus_pair: None,
+                            competing: vec![],
                             protocol: "dnp3",
                             flow: application.flow,
                             requests: if message.class == MessageClass::Request {
@@ -167,6 +180,19 @@ pub fn transactions(
                 }
             }
             ApplicationData::Modbus(result) => {
+                count = count
+                    .checked_add(result.unfinished.len())
+                    .filter(|n| *n <= limits.max_protocol_messages)
+                    .ok_or_else(|| Error::limit("correlation_messages"))?;
+                for (capture, prefix, index) in &result.unfinished {
+                    incomplete
+                        .entry((*capture, application.flow))
+                        .or_default()
+                        .record(prefix.clone(), (ai, "issue", *index));
+                }
+                let discontinuous = flows
+                    .get(application.flow)
+                    .is_some_and(crate::tcp::FlowResult::has_transport_loss);
                 for (mi, message) in result.messages.iter().enumerate() {
                     count += 1;
                     if count > limits.max_protocol_messages {
@@ -181,15 +207,30 @@ pub fn transactions(
                         .and_then(|work| work.checked_add(1))
                         .filter(|work| *work <= limits.max_correlation_checks)
                         .ok_or_else(|| Error::limit("transaction_capture_scope_work"))?;
-                    let capture = capture_scope(&message.raw);
-                    if application.direction > 1
+                    let capture = message.raw.capture_scope();
+                    let mbap_matches = message.mbap_matches_fields();
+                    if discontinuous
+                        || application.direction > 1
                         || application.protocol != "modbus"
-                        || !message.shape_valid
-                        || !message.semantics_supported
-                        || message.role == Role::Unknown
+                        || !mbap_matches
                         || capture.is_none()
+                        || !message.pairable_pdu()
                     {
+                        if let Some(capture) = capture {
+                            incomplete
+                                .entry((capture, application.flow))
+                                .or_default()
+                                .record(
+                                    crate::modbus::observation_prefix(
+                                        message.raw.data(),
+                                        message.role,
+                                    ),
+                                    (ai, "message", mi),
+                                );
+                        }
                         output.push(Transaction {
+                            modbus_pair: None,
+                            competing: vec![],
                             protocol: "modbus",
                             flow: application.flow,
                             requests: if message.role == Role::Request {
@@ -203,8 +244,12 @@ pub fn transactions(
                                 Vec::new()
                             },
                             status: "unclassified",
-                            reason: if capture.is_none() {
+                            reason: if discontinuous {
+                                "modbus_transport_discontinuity"
+                            } else if capture.is_none() {
                                 "modbus_transaction_capture_scope_invalid"
+                            } else if !mbap_matches {
+                                "modbus_mbap_metadata_mismatch"
                             } else {
                                 "invalid_or_unsupported_pdu_shape_or_endpoint_role"
                             },
@@ -230,34 +275,88 @@ pub fn transactions(
                     }
                 }
             }
+            ApplicationData::ModbusFailed { capture, .. } => {
+                failed_modbus_flows.insert((*capture, application.flow));
+            }
             ApplicationData::Failed(_) => {}
         }
     }
-    for ((protocol, _, flow, _, _, _, _), group) in groups {
-        let inconsistent_modbus =
-            if protocol == "modbus" && group.requests.len() == 1 && group.responses.len() == 1 {
-                let request = &group.requests[0];
-                let response = &group.responses[0];
-                match (
-                    &applications[request.application].data,
-                    &applications[response.application].data,
-                ) {
-                    (ApplicationData::Modbus(a), ApplicationData::Modbus(b)) => {
-                        !crate::modbus::response_matches(
-                            &a.messages[request.message],
-                            &b.messages[response.message],
-                        )
+    let mut reference_budget = limits.max_correlation_checks.saturating_sub(dnp_work);
+    for ((protocol, capture, flow, unit, _, transaction, function), group) in groups {
+        let witnesses = if protocol == "modbus" {
+            let key = format!("{transaction}:{unit}:{function}");
+            let exception =
+                group
+                    .responses
+                    .iter()
+                    .any(|r| match &applications[r.application].data {
+                        ApplicationData::Modbus(result) => {
+                            result.messages[r.message].function & 0x80 != 0
+                        }
+                        _ => false,
+                    });
+            match incomplete.get(&(capture, flow)) {
+                Some(evidence) => evidence.witnesses(&key, exception, &mut reference_budget)?,
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let competing = !witnesses.is_empty()
+            || (protocol == "modbus" && failed_modbus_flows.contains(&(capture, flow)));
+        let mut pair = None;
+        let inconsistent_modbus = if protocol == "modbus"
+            && group.requests.len() == 1
+            && group.responses.len() == 1
+        {
+            let request = &group.requests[0];
+            let response = &group.responses[0];
+            match (
+                &applications[request.application].data,
+                &applications[response.application].data,
+            ) {
+                (ApplicationData::Modbus(a), ApplicationData::Modbus(b)) => {
+                    match crate::modbus::pair_summaries(
+                        &a.messages[request.message],
+                        &b.messages[response.message],
+                    ) {
+                        Some((left, right)) => {
+                            let agrees = left.agrees(&right);
+                            pair = Some(ModbusPair {
+                                capture,
+                                flow,
+                                generation: flows.get(flow).map(|f| (f.generation, f.key.clone())),
+                                refs: [*request, *response],
+                                directions: [
+                                    applications[request.application].direction,
+                                    applications[response.application].direction,
+                                ],
+                                bindings: [
+                                    a.messages[request.message].binding(),
+                                    b.messages[response.message].binding(),
+                                ],
+                                tokens: [left.token(), right.token()],
+                            });
+                            !agrees
+                        }
+                        None => true,
                     }
-                    _ => false,
                 }
-            } else {
-                false
-            };
+                _ => false,
+            }
+        } else {
+            false
+        };
         let same_direction = group.requests.len() == 1
             && group.responses.len() == 1
             && applications[group.requests[0].application].direction
                 == applications[group.responses[0].application].direction;
         let (status, reason) = match (group.requests.len(), group.responses.len()) {
+            _ if competing => ("ambiguous", "competing_modbus_observation"),
+            (2.., _) | (_, 2..) if protocol == "modbus" => (
+                "ambiguous",
+                "identifier_reuse_or_duplicate_application_messages",
+            ),
             (1, 1) if same_direction => (
                 "ambiguous",
                 if protocol == "dnp3" {
@@ -286,6 +385,13 @@ pub fn transactions(
             ),
         };
         output.push(Transaction {
+            modbus_pair: match status {
+                "candidate_pair" | "candidate_unverified_boundary" | "inconsistent_response" => {
+                    pair.map(|pair| (status, reason, pair))
+                }
+                _ => None,
+            },
+            competing: witnesses,
             protocol,
             flow,
             requests: group.requests,
@@ -414,7 +520,7 @@ fn tuple(
     }
 }
 pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Vec<AttemptMatch>> {
-    if labels.len() > analysis.config.limits.max_labels {
+    if labels.len() > analysis.config().limits.max_labels {
         return Err(Error::limit("labels"));
     }
     let mut packet_tuples = BTreeMap::<_, Vec<usize>>::new();
@@ -430,12 +536,12 @@ pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Ve
     }
     let mut packet_messages: BTreeMap<PacketId, Vec<MessageRef>> = BTreeMap::new();
     let mut checks = 0usize;
-    let budget = analysis.config.limits.max_correlation_checks;
-    for (ai, application) in analysis.applications.iter().enumerate() {
+    let budget = analysis.config().limits.max_correlation_checks;
+    for (ai, application) in analysis.applications().iter().enumerate() {
         let message_packets: Vec<Vec<PacketId>> = match &application.data {
             ApplicationData::Dnp3(d) => d.messages.iter().map(|m| m.packets.clone()).collect(),
             ApplicationData::Modbus(m) => m.messages.iter().map(|m| m.raw.packets()).collect(),
-            ApplicationData::Failed(_) => Vec::new(),
+            ApplicationData::Failed(_) | ApplicationData::ModbusFailed { .. } => Vec::new(),
         };
         for (mi, ids) in message_packets.into_iter().enumerate() {
             for id in ids {
@@ -505,7 +611,7 @@ pub fn match_attempts(analysis: &Analysis, labels: &[AttemptLabel]) -> Result<Ve
 }
 /// Transactional application: invalid labels leave the analysis unchanged.
 pub fn apply_labels(analysis: &mut Analysis, text: &str) -> Result<()> {
-    let labels = parse_labels(text, &analysis.config.limits)?;
+    let labels = parse_labels(text, &analysis.config().limits)?;
     let matches = match_attempts(analysis, &labels)?;
     analysis.attempt_matches = matches;
     analysis.labels_sha256 = Some(crate::sha256::digest(text.as_bytes()));

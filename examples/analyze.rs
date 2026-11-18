@@ -15,8 +15,8 @@ fn main() -> Result<()> {
     println!(
         "packets={} generations={} protocol_directions={} diagnostics={}",
         result.packets.len(),
-        result.flows.len(),
-        result.applications.len(),
+        result.flows().len(),
+        result.applications().len(),
         result.has_diagnostics()
     );
     Ok(())

@@ -16,6 +16,9 @@ fn typed_array(v:&Json)->Result<&[Json]>{match v{Json::Array(v)=>Ok(v),_=>Err(ba
 impl History{
     pub fn evidence_range(&mut self,generation:[u8;32],direction:u8,start:i64,end:i64)->Result<EvidenceRange>{
         let research=self.range(generation,direction,start,end)?;
+        self.typed_evidence(research)
+    }
+    fn typed_evidence(&mut self,research:Json)->Result<EvidenceRange>{
         let observations=typed_array(typed_field(&research,"observations")?)?;
         let mut pieces=Vec::new();let mut copied=0usize;
         for p in typed_array(typed_field(&research,"pieces")?)?{

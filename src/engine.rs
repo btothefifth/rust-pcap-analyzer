@@ -1,12 +1,14 @@
 //! Capture analysis, transport reconstruction, and protocol correlation.
+mod fragments;
+
 use crate::capture::{CaptureIter, PacketMeta, ParseMode, RecordKind};
 use crate::correlate::{AttemptMatch, Transaction};
 use crate::dnp3::{self, Dnp3Result};
-use crate::fragment::{FragmentNotice, FragmentOutcome, FragmentReassembler};
+use crate::fragment::{FragmentNotice, FragmentOutcome};
 use crate::modbus::{self, ModbusResult, Role};
 use crate::provenance::PacketId;
 use crate::sha256;
-use crate::tcp::{Assignment, FlowResult, OverlapPolicy, TcpTracker};
+use crate::tcp::{Assignment, FlowResult, HeaderDisposition, OverlapPolicy, TcpTracker};
 use crate::wire::{self, Checksum, ChecksumPolicy, Endpoint, Scope, Transport};
 use crate::{Error, ErrorCode, Limits, Result};
 
@@ -101,6 +103,11 @@ pub enum ApplicationData {
     Dnp3(Dnp3Result),
     Modbus(ModbusResult),
     Failed(Error),
+    /// The capture and generation remain known when Modbus decoding exhausts a limit.
+    ModbusFailed {
+        capture: [u8; 32],
+        error: Error,
+    },
 }
 #[derive(Clone, Debug)]
 pub struct ApplicationAnalysis {
@@ -114,13 +121,13 @@ pub struct Analysis {
     pub capture_sha256: [u8; 32],
     pub labels_sha256: Option<[u8; 32]>,
     pub capture_bytes: usize,
-    pub config: Config,
+    config: Config,
     pub records: usize,
     pub metadata_records: usize,
     pub secret_blocks: usize,
     pub packets: Vec<PacketObservation>,
-    pub flows: Vec<FlowResult>,
-    pub applications: Vec<ApplicationAnalysis>,
+    flows: Vec<FlowResult>,
+    applications: Vec<ApplicationAnalysis>,
     pub datagrams: Vec<crate::datagram::DatagramAnalysis>,
     pub fragment_notices: Vec<FragmentNotice>,
     pub transactions: Vec<Transaction>,
@@ -131,6 +138,41 @@ pub struct Analysis {
     pub correlation_error: Option<Error>,
 }
 impl Analysis {
+    /// Configuration that produced this snapshot.
+    ///
+    /// ```compile_fail
+    /// fn relabel(snapshot: &mut pcap_evidence::engine::Analysis) {
+    ///     snapshot.config().modbus_ports.clear();
+    /// }
+    /// ```
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Finalized transport evidence used to assign and interpret application data.
+    ///
+    /// ```compile_fail
+    /// fn replace(a: &mut pcap_evidence::engine::Analysis, b: &pcap_evidence::engine::Analysis) {
+    ///     a.flows()[0] = b.flows()[0].clone();
+    /// }
+    /// ```
+    pub fn flows(&self) -> &[FlowResult] {
+        &self.flows
+    }
+
+    /// The application observations used to finalize the snapshot's transactions.
+    /// To correlate an edited collection, copy this slice and call
+    /// [`crate::correlate::transactions`] on the copy.
+    ///
+    /// ```compile_fail
+    /// fn relabel(snapshot: &mut pcap_evidence::engine::Analysis) {
+    ///     snapshot.applications()[0].flow = 2;
+    /// }
+    /// ```
+    pub fn applications(&self) -> &[ApplicationAnalysis] {
+        &self.applications
+    }
+
     /// Reports parse warnings, incomplete reconstruction, and protocol diagnostics.
     pub fn has_diagnostics(&self) -> bool {
         self.datagrams.iter().any(|d| match &d.data {
@@ -153,7 +195,7 @@ impl Analysis {
                         .any(|s| !s.gaps.is_empty() || !s.conflicts.is_empty())
             })
             || self.applications.iter().any(|a| match &a.data {
-                ApplicationData::Failed(_) => true,
+                ApplicationData::Failed(_) | ApplicationData::ModbusFailed { .. } => true,
                 ApplicationData::Dnp3(d) => {
                     !d.issues.is_empty() || d.messages.iter().any(|m| !m.complete)
                 }
@@ -207,7 +249,8 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         return Err(Error::limit("input_bytes"));
     }
     let identity = sha256::digest(input);
-    let mut fragments = FragmentReassembler::new(config.limits.clone());
+    let mut fragments =
+        fragments::SnapshotFragments::new(config.limits.clone(), config.checksum_policy);
     let mut tracker = TcpTracker::new(config.limits.clone(), config.idle_timeout_ns)?;
     let mut packets = Vec::new();
     let mut notices = Vec::new();
@@ -229,7 +272,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                 continue;
             }
         };
-        for notice in fragments.expire(metadata.frame) {
+        for notice in fragments.expire(metadata.frame, &mut tracker) {
             fragment_notice(&mut packets, &notice)?;
             notices.push(notice);
         }
@@ -274,9 +317,26 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             link_interface: None,
             vlans: Vec::new(),
         };
-        let network = match wire::decode_packet(metadata.link_type, data, id, scope) {
+        let network = match wire::decode_packet(metadata.link_type, data, id, scope.clone()) {
             Ok(d) => d,
             Err(e) => {
+                if metadata.captured_len < metadata.original_len {
+                    if let Some((scope, segment)) = wire::snapped_tcp_with_policy(
+                        metadata.link_type,
+                        data,
+                        id,
+                        scope,
+                        config.checksum_policy,
+                    ) {
+                        tracker.observe_header(
+                            scope,
+                            id,
+                            time,
+                            segment,
+                            HeaderDisposition::Omitted,
+                        )?;
+                    }
+                }
                 packets[at].disposition = Disposition::Rejected {
                     code: e.code.as_str(),
                     detail: e.to_string(),
@@ -296,24 +356,32 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             };
             continue;
         }
-        let (datagram, mut contributors) = match fragments.push(network, metadata.frame)? {
-            FragmentOutcome::Pending => {
-                packets[at].disposition = Disposition::FragmentPending;
-                continue;
-            }
-            FragmentOutcome::Rejected(notice) => {
-                fragment_notice(&mut packets, &notice)?;
-                notices.push(notice);
-                continue;
-            }
-            FragmentOutcome::Complete(d, ids) => (d, ids),
-        };
+        let (datagram, mut contributors) =
+            match fragments.push(network, metadata.frame, time, &mut tracker)? {
+                FragmentOutcome::Pending => {
+                    packets[at].disposition = Disposition::FragmentPending;
+                    continue;
+                }
+                FragmentOutcome::Rejected(notice) => {
+                    fragment_notice(&mut packets, &notice)?;
+                    notices.push(notice);
+                    continue;
+                }
+                FragmentOutcome::Complete(d, ids) => (d, ids),
+            };
         if contributors.is_empty() {
             contributors.push(id);
         }
         let transport = match wire::decode_transport(&datagram, config.checksum_policy) {
             Ok(t) => t,
             Err(e) => {
+                if let Some(observation) = wire::tcp_header_observation(&datagram) {
+                    tracker.resolve_reassembly(
+                        datagram.scope.clone(),
+                        observation.header,
+                        &contributors,
+                    );
+                }
                 each_packet(&mut packets, &contributors, |p| {
                     p.disposition = Disposition::Rejected {
                         code: e.code.as_str(),
@@ -414,6 +482,13 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
     let flows = tracker.finish(config.overlap_policy)?;
     let mut applications = Vec::new();
     for flow in &flows {
+        each_packet(&mut packets, &flow.outside_syn_span, |p| {
+            p.disposition = Disposition::Rejected {
+                code: "stream_position_outside_syn_span",
+                detail: "later handshake excludes this segment from the candidate generation"
+                    .into(),
+            };
+        })?;
         let detected = crate::detection::classify_flow(flow, &config)?;
         let dnp = detected.dnp3;
         let modbus = detected.modbus;
@@ -454,7 +529,10 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                     "modbus",
                     match modbus::decode(stream, role, &config.limits) {
                         Ok(d) => ApplicationData::Modbus(d),
-                        Err(e) => ApplicationData::Failed(e),
+                        Err(error) => ApplicationData::ModbusFailed {
+                            capture: identity,
+                            error,
+                        },
                     },
                 )
             } else {
@@ -469,7 +547,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         }
     }
     let (transactions, correlation_error) =
-        match crate::correlate::transactions(&applications, &config.limits) {
+        match crate::correlate::transactions_with_flows(&applications, &config.limits, &flows) {
             Ok(t) => (t, None),
             Err(e) => (Vec::new(), Some(e)),
         };

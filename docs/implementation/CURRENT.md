@@ -94,3 +94,7 @@ regression repairs, validation scope, and remaining evidence limits.
 
 The [November 10 main audit](MAIN_AUDIT_2026-11-10.md) records subsequent parser
 and desktop input defects, repairs, and the next-slice recommendation.
+
+## Modbus/TCP
+
+The [Modbus/TCP profile](../product/NEXT_PARSER_SLICE.md) lists the supported function codes and links to the field and transaction contract.

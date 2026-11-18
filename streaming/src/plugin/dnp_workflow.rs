@@ -402,6 +402,7 @@ mod tests {
             modbus_ports: Vec::new(),
         };
         let mut remaining = 1000;
+        let native = pcap_evidence::Limits::default();
         let mut out = Output {
             context: &context,
             sink,
@@ -409,6 +410,8 @@ mod tests {
             dnp3_confirmations,
             remaining: &mut remaining,
             max_message_bytes: 65536,
+            native: &native,
+            modbus_queue: None,
             sink_failed: false,
         };
         let limits = AnalyzerLimits {

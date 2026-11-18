@@ -49,7 +49,7 @@ def check(destination,compiler=None,library=None):
     env=dict(os.environ)
     env['PATH']=str(library.parent)+os.pathsep+env.get('PATH','')
     try:
-        for name,argv in [('link',command),('execute',[str(executable)])]:
+        for name,argv in [('link',command),('execute',[str(executable),str(ROOT/'fixtures/semantics/modbus_fc23_split.pcap')])]:
             started=time.monotonic()
             with (destination/(name+'.stdout')).open('xb')as out,(destination/(name+'.stderr')).open('xb')as err:
                 proc=subprocess.run(argv,cwd=ROOT,env=env,stdin=subprocess.DEVNULL,stdout=out,stderr=err,timeout=60,check=False,shell=False)
