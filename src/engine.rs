@@ -247,7 +247,7 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
         return Err(Error::limit("input_bytes"));
     }
     let identity = sha256::digest(input);
-    let mut fragments = FragmentReassembler::new(config.limits.clone());
+    let mut fragments = FragmentReassembler::with_prefix_cache(config.limits.clone());
     let mut tracker = TcpTracker::new(config.limits.clone(), config.idle_timeout_ns)?;
     let mut packets = Vec::new();
     let mut notices = Vec::new();
@@ -365,13 +365,21 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
             .fragment
             .as_ref()
             .and_then(|_| loss_header(&network));
+        // An identical first fragment keeps its own packet ID and the extent
+        // already established for this set.
+        if let (Some((_, _, h)), Some(cached)) = (&mut header, fragments.cached_prefix(&network)) {
+            *h = *cached;
+        }
         let mut inspect =
             |prefix: &wire::Datagram, contributors: &[PacketId]| match wire::inspect_tcp_header(
                 prefix,
             ) {
                 Ok(Some(observation)) => {
-                    if let Some(candidate) = observation.possible_loss(config.checksum_policy) {
-                        header.get_or_insert((prefix.scope.clone(), observation.packet, candidate));
+                    let candidate = observation.possible_loss(config.checksum_policy);
+                    if let Some(candidate) = candidate {
+                        tracker.refine_reassembly_extent(&prefix.scope, candidate, contributors);
+                        let packet = header.as_ref().map_or(observation.packet, |(_, id, _)| *id);
+                        header = Some((prefix.scope.clone(), packet, candidate));
                     } else {
                         header = None;
                         tracker.resolve_reassembly(
@@ -380,13 +388,16 @@ pub fn analyze(input: &[u8], config: Config) -> Result<Analysis> {
                             contributors,
                         );
                     }
-                    true
+                    (None, candidate.filter(wire::TcpHeader::is_empty_fin))
                 }
-                Ok(None) => true,
-                Err(error) => error.code != crate::ErrorCode::Truncated,
+                Ok(None) => (None, None),
+                Err(error) => (
+                    (error.code == crate::ErrorCode::Truncated).then(|| prefix.payload.len() + 1),
+                    None,
+                ),
             };
         let outcome =
-            fragments.push_observing_prefix(network, metadata.frame, &[], Some(&mut inspect))?;
+            fragments.push_caching_prefix(network, metadata.frame, &[], Some(&mut inspect))?;
         if !matches!(outcome, FragmentOutcome::Complete(..)) {
             if let Some((scope, packet, segment)) = header {
                 tracker.observe_header(

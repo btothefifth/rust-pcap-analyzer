@@ -210,7 +210,9 @@ The comparison uses TCP sequence arithmetic and applies in either arrival order.
 If a snapped FIN lacks options but its declared lengths establish an empty
 payload, its sequence still supplies a possible stream end. A discrepancy with
 the retained data end or an admitted FIN withholds the affected mapping. A FIN
-at the established end preserves it.
+at the established end preserves it. A terminal IP fragment can establish this
+extent while TCP options are still missing. A reassembled FIN refused at the
+window’s packet-reference limit supplies the same end-position evidence.
 A late handshake rechecks earlier stream positions and loss observations against
 the observed initial sequence and configured span. Excluded packets remain in
 diagnostics. A SYN-ACK must acknowledge the peer SYN when it was observed.

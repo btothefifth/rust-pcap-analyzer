@@ -15,6 +15,13 @@ Replace the example marker and metadata with specification-backed parsing. Keep
 NoMatch separate from NeedMore and errors. Match lengths must refer to inspected
 bytes; a marker is not authentication. Always propagate `Output` errors.
 
+The registry supplies `plugin::Output` to each analyzer. To invoke a plugin in a
+Rust test or another application, register its factory with `Registry::register`.
+Construct `plugin::RegistryOutput` with the event sink, message records, DNP3
+confirmations and remaining message budget. Pass it to `Registry::datagram`
+for UDP, `Registry::stream` for one TCP direction, or `Registry::streams` for
+both directions of a window.
+
 For TCP, implement `StreamAnalyzer` with a bounded buffer and explicit `push`,
 `gap`, `finish` and `retained_bytes`. Data is only contiguous within a supplied
 chunk; never bridge an emitted gap or history cut. A protocol frame can span several

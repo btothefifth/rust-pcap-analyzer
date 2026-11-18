@@ -606,6 +606,7 @@ impl State<'_> {
             }
         });
         let mut resolved = None;
+        let mut refine_packets = Vec::new();
         let mut disposition = HeaderDisposition::AwaitingReassembly;
         let mut inspect = |prefix: &wire::Datagram, contributors: &[PacketId]| {
             let mut next_check = None;
@@ -628,7 +629,14 @@ impl State<'_> {
                         disposition = HeaderDisposition::Omitted;
                         header = Some(candidate.path.clone());
                     } else {
-                        header.get_or_insert_with(|| candidate.path.clone());
+                        let mut observed = candidate.path.clone();
+                        if let Some((_, _, _, packet)) = &header {
+                            observed.3 = *packet;
+                        }
+                        if observed.2.is_empty_fin() {
+                            refine_packets.extend_from_slice(contributors);
+                        }
+                        header = Some(observed);
                     }
                     (next_check, Some(Some(candidate)))
                 }
@@ -663,6 +671,21 @@ impl State<'_> {
                 self.resolve_header(scope, path, segment, &packets);
             }
             if let Some(header) = header {
+                if !refine_packets.is_empty() {
+                    let (scope, path, segment, _) = &header;
+                    let (key, _) = Key::new(
+                        scope.clone(),
+                        path.clone(),
+                        6,
+                        segment.source,
+                        segment.destination,
+                    );
+                    if let Some(tracker) =
+                        self.active.get_mut(&key).and_then(|a| a.tracker.as_mut())
+                    {
+                        tracker.refine_reassembly_extent(scope, *segment, &refine_packets);
+                    }
+                }
                 self.observe_tcp_header(header, frame, time, disposition)?;
             }
             return Ok(());
@@ -1006,7 +1029,7 @@ impl State<'_> {
         }
         if bytes > self.c.window_payload || packets.len() > self.c.window_packets {
             if let Transport::Tcp(segment) = &transport {
-                if !segment.payload.is_empty() {
+                if segment.contributes_stream_extent() {
                     self.observe_tcp_header(
                         (scope, path, segment.header(), packets[0]),
                         frame,
@@ -1056,7 +1079,7 @@ impl State<'_> {
                             packets.clone(),
                             EvidenceStatus::Incomplete,
                         )?;
-                        if !retry.payload.is_empty() {
+                        if retry.contributes_stream_extent() {
                             a.tracker
                                 .as_mut()
                                 .ok_or_else(|| Error::limit("tcp_tracker"))?

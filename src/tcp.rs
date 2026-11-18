@@ -535,7 +535,7 @@ impl Flow {
         pair.is_none_or(|(seq, base)| sequence_delta(seq, base).is_ok_and(|d| d.abs() <= max_span))
     }
     fn note_uncertain(&mut self, header: &UnretainedHeader) {
-        if header.empty_fin {
+        if header.extent == MissingExtent::EmptyFin {
             let direction = header.direction;
             let end = self.payload_end[direction]
                 .or_else(|| self.syn[direction].map(|s| s.wrapping_add(1)));
@@ -562,6 +562,13 @@ enum HeaderCandidate {
     Closed,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MissingExtent {
+    PossiblePayload,
+    FinWithUnknownLength,
+    EmptyFin,
+}
+
 struct UnretainedHeader {
     disposition: HeaderDisposition,
     existing: Vec<usize>,
@@ -570,7 +577,7 @@ struct UnretainedHeader {
     time: Option<i128>,
     direction: usize,
     sequence: u32,
-    empty_fin: bool,
+    extent: MissingExtent,
     ack: Option<u32>,
     syn_isn: Option<u32>,
     arrival: Arrival,
@@ -588,7 +595,11 @@ impl UnretainedHeader {
             packet,
             time: when,
             direction,
-            empty_fin: segment.flags & 1 != 0 && segment.payload_len == Some(0),
+            extent: match (segment.flags & 1 != 0, segment.payload_len) {
+                (true, None) => MissingExtent::FinWithUnknownLength,
+                (true, Some(0)) => MissingExtent::EmptyFin,
+                _ => MissingExtent::PossiblePayload,
+            },
             sequence: segment
                 .sequence
                 .wrapping_add(u32::from(segment.flags & 2 != 0)),
@@ -598,6 +609,22 @@ impl UnretainedHeader {
             existing: Vec::new(),
             simultaneous_open: None,
             disposition,
+        }
+    }
+
+    fn refine_empty_fin(&mut self, direction: usize, header: TcpHeader) {
+        let sequence = header
+            .sequence
+            .wrapping_add(u32::from(header.flags & 2 != 0));
+        if self.disposition == HeaderDisposition::AwaitingReassembly
+            && self.extent == MissingExtent::FinWithUnknownLength
+            && self.direction == direction
+            && self.sequence == sequence
+            && header.is_empty_fin()
+            && self.syn_isn == (header.flags & 2 != 0).then_some(header.sequence)
+            && self.ack == (header.flags & 0x10 != 0).then_some(header.acknowledgement)
+        {
+            self.extent = MissingExtent::EmptyFin;
         }
     }
 
@@ -794,14 +821,20 @@ impl TcpTracker {
         disposition: HeaderDisposition,
     ) -> Result<()> {
         let (key, direction) = FlowKey::new(scope, segment.source, segment.destination);
-        let previous = self.unretained.get(&key).and_then(|set| set.get(&packet));
-        if previous.is_some_and(|h| {
-            h.disposition == HeaderDisposition::Omitted
-                || disposition == HeaderDisposition::AwaitingReassembly
-        }) {
-            return Ok(());
-        }
+        let previous = self
+            .unretained
+            .get_mut(&key)
+            .and_then(|set| set.get_mut(&packet));
         let replacing = previous.is_some();
+        if let Some(seen) = previous {
+            if seen.disposition == HeaderDisposition::Omitted {
+                return Ok(());
+            }
+            if disposition == HeaderDisposition::AwaitingReassembly {
+                seen.refine_empty_fin(direction, segment);
+                return Ok(());
+            }
+        }
         self.check_header_capacity(&key, usize::from(!replacing))?;
         let header = self.match_header(
             &key,
@@ -953,6 +986,27 @@ impl TcpTracker {
                 })
                 .count()
         })
+    }
+
+    /// A terminal fragment can fix a FIN's position while TCP options are
+    /// still missing. Preserve each contributor's arrival and candidate flows.
+    pub fn refine_reassembly_extent(
+        &mut self,
+        scope: &Scope,
+        header: TcpHeader,
+        packets: &[PacketId],
+    ) {
+        if !header.is_empty_fin() {
+            return;
+        }
+        let (key, direction) = FlowKey::new(scope.clone(), header.source, header.destination);
+        if let Some(headers) = self.unretained.get_mut(&key) {
+            for packet in packets {
+                if let Some(seen) = headers.get_mut(packet) {
+                    seen.refine_empty_fin(direction, header);
+                }
+            }
+        }
     }
 
     /// A completed reassembly with a definitive transport disposition resolves

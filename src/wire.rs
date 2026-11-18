@@ -70,6 +70,13 @@ pub struct TcpHeader {
     pub payload_len: Option<usize>,
 }
 
+impl TcpHeader {
+    /// The enclosing length establishes that this FIN carries no payload bytes.
+    pub fn is_empty_fin(&self) -> bool {
+        self.flags & 1 != 0 && self.payload_len == Some(0)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TcpSegment {
     pub source: Endpoint,
@@ -105,7 +112,7 @@ impl TcpSegment {
         self.flags & 0x04 != 0
     }
     /// Data and FIN both contribute positions to the reconstructed stream.
-    pub(crate) fn contributes_stream_extent(&self) -> bool {
+    pub fn contributes_stream_extent(&self) -> bool {
         !self.payload.is_empty() || self.fin()
     }
     pub fn data_sequence(&self) -> u32 {
@@ -233,7 +240,7 @@ pub fn inspect_tcp_header(d: &Datagram) -> Result<Option<TcpHeaderObservation>> 
             .ok_or_else(|| Error::limit("tcp_header_offset"))?,
         possible_extent: d.fragment.is_some()
             || d.declared_payload_len > offset + header_len
-            || (header.flags & 1 != 0 && header.payload_len == Some(0)),
+            || header.is_empty_fin(),
         checksum_allowed,
     }))
 }

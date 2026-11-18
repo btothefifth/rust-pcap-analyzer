@@ -663,6 +663,109 @@ fn dropped_tcp_data_only_invalidates_plausible_modbus_generations() {
 }
 
 #[test]
+fn fragmented_fin_extent_matches_the_retained_stream_end() {
+    use tiny_capture::{capture, ipv4_fragment, tcp, tcp_with_options};
+    fn mapping_addresses<'a>(rows: impl Iterator<Item = &'a Json>) -> Vec<u64> {
+        rows.filter_map(|row| {
+            let Json::Object(fields) = row else {
+                panic!("expected a transaction")
+            };
+            let (_, mapping) = fields.iter().find(|(name, _)| *name == "read_mapping")?;
+            let Json::Number(address) = field(mapping, "starting_address_zero_based") else {
+                panic!("expected a numeric address")
+            };
+            Some(*address)
+        })
+        .collect()
+    }
+
+    let exchange = |address, seq, peer| {
+        let request = [0, 1, 0, 0, 0, 6, 1, 3, 0, address, 0, 1];
+        let response = [0, 1, 0, 0, 0, 5, 1, 3, 2, 0, 7];
+        vec![
+            tcp(false, seq, 0, 2, &[]),
+            tcp(true, peer, seq + 1, 0x12, &[]),
+            tcp(false, seq + 1, peer + 1, 0x18, &request),
+            tcp(true, peer + 1, seq + 13, 0x18, &response),
+        ]
+    };
+    for end in [1013, 1018] {
+        let fin = tcp_with_options(false, end, 5012, 0x11, &[1; 28], &[]);
+        let head = ipv4_fragment(&fin, 0..24, true);
+        let tail = ipv4_fragment(&fin, 40..48, false);
+        let all: Vec<_> = (0..48)
+            .step_by(8)
+            .map(|i| ipv4_fragment(&fin, i..i + 8, i + 8 != 48))
+            .collect();
+        for (case, fragments, slots, known_end) in [
+            ("unknown end", vec![head.clone()], 32, false),
+            ("head first", vec![head.clone(), tail.clone()], 32, true),
+            ("tail first", vec![tail.clone(), head.clone()], 32, true),
+            (
+                "repeated head",
+                vec![head.clone(), head.clone(), tail.clone()],
+                32,
+                true,
+            ),
+            (
+                "duplicate after extent",
+                vec![head.clone(), tail.clone(), head.clone()],
+                32,
+                true,
+            ),
+            ("six fragments, five references", all.clone(), 5, true),
+            ("all fragments admitted", all.clone(), 32, true),
+        ] {
+            let mut frames = exchange(9, 1000, 5000);
+            frames.extend(fragments);
+            // The other exchange uses a distinct VLAN and has its own window.
+            for mut packet in exchange(17, 100, 800) {
+                packet.splice(12..12, [0x81, 0, 0, 7]);
+                frames.push(packet);
+            }
+            let bytes = capture(&frames);
+            let mut config = StreamConfig::default();
+            config.base.modbus_ports = vec![2000];
+            config.base.checksum_policy = pcap_evidence::wire::ChecksumPolicy::RequireValid;
+            config.window_packets = slots;
+            let root = pcap_evidence::engine::analyze(&bytes, config.base.clone()).unwrap();
+            let report = pcap_evidence::report::analysis(&root, false);
+            let Json::Array(rows) = field(&report, "transaction_candidates") else {
+                panic!("transactions array")
+            };
+            let out = run(&bytes, config);
+            let expected: &[u64] = if known_end && end == 1013 {
+                &[9, 17]
+            } else {
+                &[17]
+            };
+            let stream = out
+                .events
+                .iter()
+                .filter(|e| e.kind == EventKind::Transaction)
+                .map(|e| &e.data);
+            assert_eq!(
+                mapping_addresses(rows.iter()),
+                expected,
+                "snapshot {case}, FIN {end}"
+            );
+            assert_eq!(
+                mapping_addresses(stream),
+                expected,
+                "stream {case}, FIN {end}"
+            );
+            assert_eq!(
+                out.events.iter().any(|e| e
+                    .data
+                    .encode()
+                    .contains("segment_or_fragment_provenance_exceeds_window_budget")),
+                slots == 5
+            );
+        }
+    }
+}
+
+#[test]
 fn successfully_reassembled_tcp_releases_its_provisional_header() {
     use tiny_capture::{capture, ipv4_fragment, tcp, tunneled};
     let request = tcp(false, 101, 501, 0x18, &[0, 1, 0, 0, 0, 6, 1, 3, 0, 9, 0, 1]);
